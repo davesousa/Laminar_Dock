@@ -9,6 +9,8 @@
 //!   list of exact ids ("stripe,stripe-chart")
 //! - `state=setup|error`: force every connector face into its setup or error state
 //! - `tray=N`: N sample tray apps for Background Apps (0 shows its empty state)
+//! - `toggles=on`: Keep Awake and Show Desktop in their on state (Dark Mode follows the
+//!   sheet theme)
 //! - `update=pending|restart|current|unknown|none`: the Windows Update status (none = not
 //!   checked yet)
 //!
@@ -87,6 +89,11 @@ Oat milk
 Coffee beans
 Call the dentist".into();
         }
+        if opt("toggles").as_deref() == Some("on") {
+            // Set the fields directly: Hub::set_keep_awake would really keep the PC awake.
+            hub.keep_awake = true;
+            hub.desktop_shown = true;
+        }
         let hub = hub;
         let weather = sample_weather();
         let stats = laminar_sys::stats::Stats { cpu_percent: 23.0, mem_used_gb: 21.3, mem_total_gb: 32.0, disk_c_used_percent: 74.0, net_down_bps: 2_400_000.0, net_up_bps: 310_000.0 };
@@ -108,7 +115,7 @@ Call the dentist".into();
         let cfg = crate::config::Config::default();
         let pinned = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(), "e".to_string()];
         let names: HashMap<String, String> =
-            if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Calendar", "Photos", "Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
+            if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Microsoft Edge", "File Explorer", "Windows Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
         let n_tray = opt("tray").and_then(|v| v.parse::<u64>().ok()).unwrap_or(14);
         let tray: Vec<(u64, String)> = (1..=n_tray).map(|k| (k, format!("App {k}"))).collect();
         use laminar_sys::update::UpdateStatus;

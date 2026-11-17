@@ -9662,13 +9662,15 @@ fn hour_bars(c: &Canvas, vals: &[f64], now: usize, full: f64, x: f32, y: f32, w:
     let n = vals.len().max(1);
     let slot = w / n as f32;
     let hi = vals.iter().cloned().fold(full, f64::max);
-    let past = alpha(BLUE, if c.light { 0.5 } else { 0.6 });
+    let past = alpha(BLUE, if c.light { 0.5 } else { 0.7 });
     let r = (bw / 2.0).min(1.5);
     for (i, v) in vals.iter().enumerate() {
         if *v <= 0.0 {
             continue;
         }
-        let ht = ((v / hi) as f32 * h * 0.86).max(2.0);
+        // The current hour is at least 4 px (scaled) so "now" never reads as a stray dot.
+        let min = if i == now { (4.0f32).min(h * 0.3).max(2.0) } else { 2.0 };
+        let ht = ((v / hi) as f32 * h * 0.86).max(min);
         let bx = x + slot * i as f32 + (slot - bw) / 2.0;
         c.rr(bx, y + h - ht, bw, ht, r, if i == now { BLUE } else { past });
     }
@@ -9731,13 +9733,15 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
         }
         ToolKind::Focus => {
             let mut f = ToolFace::new(G_FOCUS, "Focus", open("ms-settings:quiethours"));
+            // Focus is about sessions and Do not disturb; the Win + N keycap belongs to
+            // Notifications only, so the two widgets never look alike.
+            f.state = "Do not disturb".into();
             f.small = "Do not disturb".into();
-            f.medium = "Do not disturb settings".into();
-            f.slot = ToolSlot::Key("Win + N");
+            f.medium = "Sessions and Do not disturb".into();
             f.rows = vec![
+                row(G_CLOCK, "Start a focus session", Trail::Go(open("ms-clock:"))),
                 row(G_DND, "Do not disturb", Trail::Go(open("ms-settings:quiethours"))),
-                row(G_SETTINGS, "Notification settings", Trail::Go(open("ms-settings:notifications"))),
-                row(G_KEYBOARD, "Notification centre", Trail::Key("Win + N")),
+                note_row("Focus sessions run in the Clock app"),
             ];
             tool_face(c, out, &f, sh);
         }
@@ -9803,30 +9807,35 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
         ToolKind::Trash => {
             let stats = bin_stats(x.sample);
             let mut f = ToolFace::new(G_TRASH, "Recycle Bin", open("shell:RecycleBinFolder"));
+            // Large: two actions and a footnote in every state (the caption already gives
+            // the count and size, so the rows don't repeat it).
+            let actions = |note: &str| {
+                vec![
+                    row(G_TRASH, "Open Recycle Bin", Trail::Go(open("shell:RecycleBinFolder"))),
+                    row(G_DRIVE, "Storage settings", Trail::Go(open("ms-settings:storagesense"))),
+                    note_row(note),
+                ]
+            };
             match stats {
                 Some((0, _)) => {
                     f.state = "Empty".into();
                     f.small = "Empty".into();
                     f.medium = "Empty".into();
                     f.slot = ToolSlot::Note("Nothing deleted".into());
-                    f.rows = vec![row(G_TRASH, "Items", Trail::Text("None".into())), note_row("Deleted files wait here until you empty it")];
+                    f.rows = actions("Deleted files wait here until you empty it");
                 }
                 Some((n, b)) => {
                     f.state = items_str(n);
                     f.small = items_str(n);
                     f.medium = format!("{} \u{00B7} {}", items_str(n), bytes_str(b));
                     f.slot = ToolSlot::Value(bytes_str(b));
-                    f.rows = vec![
-                        row(G_TRASH, "Items", Trail::Text(n.to_string())),
-                        row(G_DRIVE, "Size on disk", Trail::Text(bytes_str(b))),
-                        note_row("Click to open; empty it from File Explorer"),
-                    ];
+                    f.rows = actions("Empty it from File Explorer");
                 }
                 None => {
                     f.small = "Click to open".into();
                     f.medium = "Click to open".into();
                     f.slot = ToolSlot::Note("Open".into());
-                    f.rows = vec![row(G_TRASH, "Open Recycle Bin", Trail::Go(open("shell:RecycleBinFolder"))), note_row("Deleted files wait here until you empty it")];
+                    f.rows = actions("Deleted files wait here until you empty it");
                 }
             }
             let (mx, my, ms) = tool_face(c, out, &f, sh);
@@ -9836,9 +9845,11 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
         }
         ToolKind::WhatsApp => {
             let (state, rows): (&str, Vec<TRow>) = match x.whatsapp {
-                Some(true) => ("New messages", vec![row(G_POWER, "Status", Trail::Text("Running".into())), row(G_CHAT, "Messages", Trail::Text("New".into())), note_row("Click to open your chats")]),
-                Some(false) => ("No new messages", vec![row(G_POWER, "Status", Trail::Text("Running".into())), row(G_CHAT, "Messages", Trail::Text("All read".into())), note_row("Click to open your chats")]),
-                None => ("Not running", vec![row(G_POWER, "Status", Trail::Text("Not running".into())), note_row("Click to start WhatsApp")]),
+                // The caption already says whether there is anything new: the rows add the
+                // app's status and the actions instead of repeating it.
+                Some(true) => ("New messages", vec![row(G_POWER, "Status", Trail::Text("Running".into())), row(G_CHAT, "Open chats", Trail::Go(WAct::WhatsApp)), note_row("A red dot means unread messages")]),
+                Some(false) => ("No new messages", vec![row(G_POWER, "Status", Trail::Text("Running".into())), row(G_CHAT, "Open chats", Trail::Go(WAct::WhatsApp)), note_row("You're all caught up")]),
+                None => ("Not running", vec![row(G_POWER, "Status", Trail::Text("Not running".into())), row(G_CHAT, "Start WhatsApp", Trail::Go(WAct::WhatsApp)), note_row("New messages show here while it runs")]),
             };
             let mut f = ToolFace::new(G_CHAT, "WhatsApp", WAct::WhatsApp);
             // The dock has room for a shorter state only.
@@ -9904,7 +9915,7 @@ fn search(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
         let cx = m + cw * (i as f32 + 0.5);
         out.icons.push((cx - s / 2.0, top, s, id.clone()));
         out.hits.push(((cx - cw / 2.0, top - 4.0, cw, c.h - style::M_CARD - top + 8.0), WAct::App(id.clone())));
-        let name = x.names.get(id).cloned().unwrap_or_default();
+        let name = grid_name(x.names.get(id).map(String::as_str).unwrap_or_default());
         c.text_base(&name, cx, 184.0, style::FOOT.size, 400, c.text2(), Align::Center, cw - 4.0);
     }
 }
@@ -9971,6 +9982,28 @@ fn screenshot(c: &Canvas, out: &mut Painted, sh: Shape) {
             }
         }
     }
+}
+
+/// A short label for an app under a grid tile (a column is only ~55 px wide): drops a
+/// vendor prefix such as "Microsoft " or "Google ", and maps a few long names.
+fn grid_name(name: &str) -> String {
+    let n = name.trim();
+    match n {
+        "File Explorer" => return "Explorer".into(),
+        "Visual Studio Code" => return "VS Code".into(),
+        "Windows Terminal" => return "Terminal".into(),
+        "Windows PowerShell" => return "PowerShell".into(),
+        "Microsoft Edge" => return "Edge".into(),
+        _ => {}
+    }
+    for p in ["Microsoft ", "Google ", "Mozilla ", "Adobe "] {
+        if let Some(rest) = n.strip_prefix(p) {
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    n.to_string()
 }
 
 /// A placeholder app tile; the first one carries a "+" that opens Launchpad to pin apps.
@@ -10044,7 +10077,7 @@ fn apps_grid(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                         out.icons.push((ix, ty, MARK_CARD, id.clone()));
                         let hy = if large { ty - m } else { 0.0 };
                         out.hits.push(((cx - cw / 2.0, hy, cw, if large { pitch } else { c.h }), WAct::App(id.clone())));
-                        let name = x.names.get(id).cloned().unwrap_or_default();
+                        let name = grid_name(x.names.get(id).map(String::as_str).unwrap_or_default());
                         c.text_base(&name, cx, ty + 60.0, style::FOOT.size, 400, c.text2(), Align::Center, cw - 4.0);
                     }
                     None if i == pins.len() => {
@@ -10128,14 +10161,29 @@ fn notes(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let x0 = mx + ms + style::SP[4] * k;
             let mut right = c.w - m;
             if dock_wide(c) {
-                let slot = if empty { ToolSlot::Note("New note".into()) } else { ToolSlot::Note(if lines.len() == 1 { "1 line".into() } else { format!("{} lines", lines.len()) }) };
-                if let Some(w) = tool_slot(c, &slot, c.w - m, 27.0 * k, k, false) {
-                    right -= w + style::SP[5] * k;
+                if empty {
+                    // A round "+" plate: an action that reads as one (a text3 label looked
+                    // like a disabled button).
+                    let d = KEY_H * k;
+                    let cy = 27.0 * k;
+                    c.circle(c.w - m - d / 2.0, cy, d / 2.0, c.plate());
+                    c.glyph(G_ADD, c.w - m - d / 2.0, cy, 10.0 * k, c.text1());
+                    right -= d + style::SP[5] * k;
+                } else {
+                    let slot = ToolSlot::Note(if lines.len() == 1 { "1 line".into() } else { format!("{} lines", lines.len()) });
+                    if let Some(w) = tool_slot(c, &slot, c.w - m, 27.0 * k, k, false) {
+                        right -= w + style::SP[5] * k;
+                    }
                 }
             }
-            let (first, second) = if empty { ("Notes", "Click to write") } else { (lines[0], lines.get(1).copied().unwrap_or("Notes")) };
+            // One line: the second line invites more (a quiet hint, not the word "Notes" again).
+            let (first, second, ink2) = match (empty, lines.get(1)) {
+                (true, _) => ("Notes", "Click to write", c.text2()),
+                (false, Some(l)) => (lines[0], *l, c.text2()),
+                (false, None) => (lines[0], "Click to add more", c.text3()),
+            };
             c.text_base(first, x0, 26.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, right - x0);
-            c.text_base(second, x0, 40.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - x0);
+            c.text_base(second, x0, 40.0 * k, style::FOOT.size * k, 400, ink2, Align::Left, right - x0);
         }
         Shape::Small => {
             let m = style::M_SMALL;
@@ -10189,9 +10237,16 @@ fn notes(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 c.text_base("Click to add more", m, first, style::BODY.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
             for (i, l) in body.iter().take(fits).enumerate() {
-                // More lines than fit: the last one fades instead of stopping short.
-                let col = if i + 1 == fits && body.len() > fits { c.text3() } else { ink };
-                c.text_base(l, m, first + i as f32 * pitch, style::BODY.size, 400, col, Align::Left, c.w - 2.0 * m);
+                // More lines than fit: the last one keeps its ink (content is never text3)
+                // and a trailing "+N more" footnote says how many are hidden.
+                let base = first + i as f32 * pitch;
+                let mut right = c.w - m;
+                if i + 1 == fits && body.len() > fits {
+                    let more = format!("+{} more", body.len() - fits);
+                    let mw = c.text_base(&more, right, base, style::FOOT.size, 400, c.text3(), Align::Right, c.w);
+                    right -= mw + style::SP[3];
+                }
+                c.text_base(l, m, base, style::BODY.size, 400, ink, Align::Left, right - m);
             }
             if large && body.len() < fits {
                 let n = lines.len();
@@ -10246,6 +10301,9 @@ fn screen_time(c: &Canvas, x: &Ctx, sh: Shape) {
             c.text_cap(&v, m, m, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
             c.text_base(if none { "Starting now" } else { "Today" }, m, 54.0, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
             share_bar(c, &apps, total, m, 64.0, inner, style::METER_H);
+            if apps.is_empty() {
+                c.text_base("No apps yet", m, 88.0, style::FOOT.size, 400, c.text2(), Align::Left, inner);
+            }
             for (i, (name, secs)) in apps.iter().take(2).enumerate() {
                 let base = 88.0 + i as f32 * style::ROW_S;
                 let cy = base - c.cap_h(style::FOOT.size) / 2.0;
@@ -10265,7 +10323,8 @@ fn screen_time(c: &Canvas, x: &Ctx, sh: Shape) {
             let (rx, rw) = (148.0, c.w - m - 148.0);
             let first = m + c.cap_h(style::FOOT.size);
             if apps.is_empty() {
-                c.text_base("No apps yet", rx, first, style::FOOT.size, 400, c.text3(), Align::Left, rw);
+                c.text_base("No apps yet", rx, first, style::FOOT.size, 500, c.text1(), Align::Left, rw);
+                c.text_base("Apps show up here", rx, first + style::ROW_S, style::FOOT.size, 400, c.text2(), Align::Left, rw);
             }
             for (i, (name, secs)) in apps.iter().take(3).enumerate() {
                 let base = first + i as f32 * style::ROW_L;
@@ -10280,6 +10339,9 @@ fn screen_time(c: &Canvas, x: &Ctx, sh: Shape) {
                 let bw = (w / 24.0 * 0.6).round();
                 hour_bars(c, &vals, x.now.hour as usize, 3600.0, m, style::DETAIL_TOP, w, 64.0, bw);
                 hour_ticks(c, &[(0, "12a"), (6, "6a"), (12, "12p"), (18, "6p")], m, w, bw, 186.0);
+                if none {
+                    c.text_base("Your day fills in here, hour by hour", c.w / 2.0, style::DETAIL_TOP + 38.0, style::CAPTION.size, 400, c.text2(), Align::Center, w);
+                }
             }
         }
     }
@@ -10327,7 +10389,7 @@ fn timeline(c: &Canvas, x: &Ctx, sh: Shape) {
             let inner = c.w - 2.0 * m;
             let (v, fs) = fit_value(c, &value, style::HERO_S, inner);
             c.text_cap(&v, m, m, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
-            c.text_base("Today", m, 54.0, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
+            c.text_base(if total == 0 { "Starting now" } else { "Today" }, m, 54.0, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
             let bw = 3.0;
             hour_bars(c, &vals, now, 3600.0, m, 64.0, inner, 28.0, bw);
             hour_ticks(c, &[(0, "12a"), (12, "12p")], m, inner, bw, 106.0);
