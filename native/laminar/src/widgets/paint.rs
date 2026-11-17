@@ -1799,7 +1799,34 @@ const EMOJI_LEFT: f32 = 0.18;
 
 /// A weather emoji `size` px square, centred on `cx`, with its top at `top`.
 fn draw_emoji(c: &Canvas, e: &str, cx: f32, top: f32, size: f32, col: Col) {
-    c.text(e, cx - size * (EMOJI_LEFT + 0.5), top - size * EMOJI_TOP, size, 400, col, Align::Left, size * 2.0, Font::Text);
+    let (x, y) = (cx - size * (EMOJI_LEFT + 0.5), top - size * EMOJI_TOP);
+    if c.light {
+        emoji_shadow(c, e, x, y, size);
+    }
+    c.text(e, x, y, size, 400, col, Align::Left, size * 2.0, Font::Text);
+}
+
+/// Light cards: white emoji (clouds, snow) have almost no edge on pale glass. Under the
+/// canvas's own crisp silhouette, a soft one (about 1 px down, 2 px blur, black ≈ 0.2 at its
+/// core) gives them a shape. The blur is a ring of faint copies of the glyph's silhouette.
+fn emoji_shadow(c: &Canvas, e: &str, x: f32, y: f32, size: f32) {
+    use windows::core::HSTRING;
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+    use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE;
+    use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_WORD_WRAPPING_NO_WRAP};
+    let wide: Vec<u16> = e.encode_utf16().collect();
+    unsafe {
+        let Ok(f) = c.dw.CreateTextFormat(&HSTRING::from(Canvas::family(size, Font::Text)), None, DWRITE_FONT_WEIGHT(400), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, &HSTRING::from("en-us")) else { return };
+        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let Ok(l) = c.dw.CreateTextLayout(&wide, &f, size * 2.0, size * 2.0) else { return };
+        let Ok(b) = c.dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.045 }, None) else { return };
+        // Eight taps on a 1 px circle around (0, 1) plus the centre: overlapping, they build
+        // to ≈ 0.2 under the glyph and fade out over the last 2 px.
+        let taps = [(0.0, 1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0), (0.0, 2.0), (-0.7, 0.3), (0.7, 0.3), (-0.7, 1.7), (0.7, 1.7)];
+        for (dx, dy) in taps {
+            c.dc.DrawTextLayout(windows_numerics::Vector2 { X: x + dx, Y: y + dy }, &l, &b, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
+    }
 }
 
 /// A temperature centred on its digits' ink, so the ° hangs off to the right.
@@ -2310,7 +2337,9 @@ fn sun(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, sh: Shape) {
         }
         Shape::Small => {
             let m = style::M_SMALL;
-            sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), frac, (2.0, 2.5), 4.0, night);
+            // No night dot here: under the horizon it would land on the hero time. At night
+            // the arc is all track, which already says the sun is down.
+            sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), frac, (2.0, 2.5), 4.0, None);
             let hs = style::HERO_S.size;
             time_ampm(c, &t, ap, m, 86.0, hs, style::time_weight(hs), t1, t2, Align::Left);
             c.text_base(next_l, m, 106.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, c.w - 2.0 * m);
@@ -3673,8 +3702,12 @@ fn progress(c: &Canvas, s: Span, x: &Ctx, sh: Shape) {
         Shape::Small => {
             let m = style::M_SMALL;
             let w = c.w - 2.0 * m;
-            let pitch = w / (cols as f32 - 1.0 + 0.68);
-            unit_grid(c, total, current, cols, m, (m + 62.0) / 2.0, pitch, pitch * 0.68, col);
+            // The grid fills the width but stays in y m..58, so even month's four rows keep
+            // a clear gap above the hero's cap top (~y67); a deeper grid shrinks to fit.
+            let rows = total.div_ceil(cols) as f32;
+            let (gy0, gy1) = (m, 58.0);
+            let pitch = (w / (cols as f32 - 1.0 + 0.68)).min((gy1 - gy0) / (rows - 1.0 + 0.68));
+            unit_grid(c, total, current, cols, m, (gy0 + gy1) / 2.0, pitch, pitch * 0.68, col);
             let (v, fs) = fit_value(c, &pct, style::HERO_S, w);
             c.text_base(&v, m, 86.0, fs, style::HERO_S.weight, t1, Align::Left, c.w * 2.0);
             c.text_base(&caption, m, 106.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, w);
