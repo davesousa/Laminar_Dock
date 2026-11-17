@@ -395,7 +395,7 @@ pub static ALL: &[Def] = &[
     w("watchlist", "Watchlist", "Your symbols and today's change.", &[Stocks], Face::Watch { conn: "stocks" }),
     w("crypto", "Crypto", "Today's price chart for your first coin.", &[Stocks], Face::Chart { conn: "crypto", badge: B_CRYPTO, open: "https://www.coingecko.com" }),
     // ------------------------------------------------------------ Clocks
-    w("clock", "Clock", "Large time with seconds and the date.", &[Clocks], Face::Clock(ClockKind::Digital)),
+    w("clock", "Clock", "The time and date, with this week.", &[Clocks], Face::Clock(ClockKind::Digital)),
     w("flip-clock", "Flip Clock", "Split-flap style digits.", &[Clocks], Face::Clock(ClockKind::Flip)),
     w("world-clocks", "World Clocks", "Three cities on analog faces.", &[Clocks], Face::Clock(ClockKind::World)),
     w("week", "7 Days", "This week at a glance.", &[Clocks], Face::Clock(ClockKind::WeekStrip)),
