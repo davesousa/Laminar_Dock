@@ -669,7 +669,7 @@ pub fn sample(conn: &str) -> Feed {
             ..Default::default()
         },
         "battery" => Feed { value: Some(82.0), frac: Some(0.82), unit: "%".into(), extra: [("charging".to_string(), "false".to_string()), ("time_left".to_string(), "4h 10m".to_string())].into(), ..Default::default() },
-        "storage" => Feed { value: Some(240.8), unit: "GB".into(), caption: "Free on C:".into(), frac: Some(0.74), rows: vec![row("C:", "240 GB free of 931 GB", 0.74)], ..Default::default() },
+        "storage" => Feed { value: Some(240.8), unit: "GB".into(), caption: "Free on C:".into(), frac: Some(0.74), rows: vec![row("C: Windows", "240 GB free of 931 GB", 0.74), row("D: Data", "1.1 TB free of 1.8 TB", 0.39), row("E: Games", "86 GB free of 476 GB", 0.82)], ..Default::default() },
         "language" => Feed { text: Some("ENG".into()), caption: "English (Canada)".into(), ..Default::default() },
         "uptime" => Feed { value: Some(52.0), text: Some("2d 4h".into()), caption: "Uptime".into(), ..Default::default() },
         "wallpaper" => Feed {
