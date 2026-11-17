@@ -343,6 +343,20 @@ enum Vis {
     Emoji(&'static str),
 }
 
+/// What the accessory slot (Dock L, and Small's top-right) holds when a face chooses it.
+/// `Auto` picks from the summary: a trend (with the change over it), a meter or the change.
+#[derive(Clone, Default)]
+enum Acc {
+    #[default]
+    Auto,
+    /// A second value over its label ("812" over "subscribers").
+    Second(String, String),
+    /// Two lines of text (the newest sender over the subject).
+    Note(String, String),
+    /// The last seven days, oldest first: active or not.
+    Week(Vec<bool>),
+}
+
 struct Sum {
     vis: Vis,
     value: String,
@@ -350,18 +364,62 @@ struct Sum {
     delta: Option<f64>,
     series: Vec<f64>,
     meter: Option<(f32, Col)>,
+    /// Mini's value when it isn't just the compact form of `value` ("$3.0K").
+    mini: Option<String>,
+    /// A unit after the value, in text2 ("7" + "days").
+    unit: String,
+    /// The trend's identity colour; None = green/red by the change (blue with none).
+    tint: Option<Col>,
+    /// The change figure's colour where "up" is not a judgment (text2).
+    delta_col: Option<Col>,
+    /// The series is daily quantities: draw the trend as bars.
+    bars: bool,
+    /// Dock M shows the change after the caption. Off: the change waits for Dock L's slot.
+    inline_delta: bool,
+    acc: Acc,
 }
 
 impl Sum {
     fn new(vis: Vis, value: impl Into<String>, caption: impl Into<String>) -> Self {
-        Sum { vis, value: value.into(), caption: caption.into(), delta: None, series: Vec::new(), meter: None }
+        Sum {
+            vis,
+            value: value.into(),
+            caption: caption.into(),
+            delta: None,
+            series: Vec::new(),
+            meter: None,
+            mini: None,
+            unit: String::new(),
+            tint: None,
+            delta_col: None,
+            bars: false,
+            inline_delta: true,
+            acc: Acc::Auto,
+        }
     }
-    /// The trend's colour: up/down for a change, else the meter's (identity) colour, else blue.
+    /// The trend's colour: the identity tint, else up/down for a change (blue for none),
+    /// else the meter's colour, else blue.
     fn spark_col(&self) -> Col {
-        match (self.delta, self.meter) {
-            (Some(d), _) => up_down(d),
-            (None, Some((_, col))) => col,
+        match (self.tint, self.delta, self.meter) {
+            (Some(t), _, _) => t,
+            (None, Some(_), _) => trend_col(self.delta),
+            (None, None, Some((_, col))) => col,
             _ => BLUE,
+        }
+    }
+    /// The change figure and its colour.
+    fn delta_text(&self, c: &Canvas) -> Option<(String, Col)> {
+        self.delta.map(|d| {
+            let (t, col) = fmt_delta(c, d);
+            (t, self.delta_col.unwrap_or(col))
+        })
+    }
+    /// The trend, drawn the way the face reads it.
+    fn trend(&self, c: &Canvas, x: f32, y: f32, w: f32, h: f32) {
+        if self.bars {
+            day_bars(c, x, y, w, h, &self.series, self.spark_col(), false);
+        } else {
+            spark(c, x, y, w, h, &self.series, self.spark_col(), false);
         }
     }
 }
@@ -398,6 +456,30 @@ enum Slot {
     Spark,
     Meter,
     Delta,
+    Own,
+}
+
+/// A value with an optional unit after it on the same baseline (text2): "7 days".
+#[allow(clippy::too_many_arguments)]
+fn value_unit(c: &Canvas, v: &str, unit: &str, x: f32, base: f32, fs: f32, weight: u32, unit_fs: f32) -> f32 {
+    let w = c.text_base(v, x, base, fs, weight, c.text1(), Align::Left, c.w * 2.0);
+    if unit.is_empty() {
+        return w;
+    }
+    let gap = style::SP[1];
+    w + gap + c.text_base(unit, x + w + gap, base, unit_fs, 600, c.text2(), Align::Left, c.w)
+}
+
+/// Seven day cells (oldest first) right-aligned at `right`: filled in `col` where active,
+/// track where not.
+fn week_cells(c: &Canvas, days: &[bool], right: f32, y: f32, cell: f32, gap: f32, r: f32, col: Col) -> f32 {
+    let n = days.len().min(7);
+    let x0 = right - n as f32 * cell - (n.saturating_sub(1)) as f32 * gap;
+    for (i, on) in days.iter().rev().take(n).rev().enumerate() {
+        let x = x0 + i as f32 * (cell + gap);
+        c.rr(x, y, cell, cell, r, if *on { col } else { c.track() });
+    }
+    x0
 }
 
 /// Mini, Dock M/L and Small layouts shared by most faces (§3).
@@ -414,7 +496,8 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
                 draw_vis(c, &Vis::Ring(*f, *col, t), (c.w - v) / 2.0, (c.h - v) / 2.0, v);
                 return;
             }
-            if s.value.is_empty() {
+            let value = s.mini.as_deref().unwrap_or(&s.value);
+            if value.is_empty() {
                 let v = style::BADGE_MINI_VIS * k;
                 draw_vis(c, &s.vis, (c.w - v) / 2.0, (c.h - v) / 2.0, v);
                 return;
@@ -423,7 +506,7 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             let v = style::BADGE_MINI * k;
             draw_vis(c, &s.vis, (c.w - v) / 2.0, 8.0 * k, v);
             let role = Type { size: style::MINI_VALUE.size * k, ..style::MINI_VALUE };
-            let (val, fs) = fit_value(c, &s.value, role, c.w - 2.0 * style::M_MINI * k);
+            let (val, fs) = fit_value(c, value, role, c.w - 2.0 * style::M_MINI * k);
             c.text_base(&val, c.w / 2.0, 45.0 * k, fs, role.weight, vcol, Align::Center, c.w * 2.0);
         }
         Shape::Dock => {
@@ -435,6 +518,8 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             // Dock L (the wide pill) adds one accessory at the right; Dock M never does.
             let slot = if c.w < c.h * 3.4 {
                 Slot::None
+            } else if !matches!(s.acc, Acc::Auto) {
+                Slot::Own
             } else if s.series.len() > 2 {
                 Slot::Spark
             } else if s.meter.is_some() {
@@ -449,17 +534,20 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             let right = if slot == Slot::None { c.w - m } else { slot_x - style::SP[4] * k };
             let col_meter = s.meter.filter(|_| slot != Slot::Meter);
             let role = Type { size: style::VALUE.size * k, ..style::VALUE };
-            let (val, fs) = fit_value(c, &s.value, role, right - x0);
+            let ufs = style::TITLE.size * k;
+            let uw = if s.unit.is_empty() { 0.0 } else { c.measure(&s.unit, ufs, 600, Font::Text).0 + style::SP[1] * k };
+            let (val, fs) = fit_value(c, &s.value, role, right - x0 - uw);
             // With a meter under the caption the three lines move up as one block, so the
             // caption keeps clear of the value (baseline 40 under a value at 30 touched it).
             let (val_base, cap_base, bar_y) = if col_meter.is_some() { (23.0, 36.0, 41.0) } else { (30.0, 44.0, 45.0) };
             let (val_base, cap_base, bar_y) = (val_base * k, cap_base * k, bar_y * k);
-            c.text_base(&val, x0, val_base, fs, role.weight, vcol, Align::Left, c.w * 2.0);
+            value_unit(c, &val, &s.unit, x0, val_base, fs, role.weight, ufs);
             let cs = style::FOOT.size * k;
-            // The change shares the caption line only when both fit whole; otherwise the
-            // caption alone (Dock L shows the trend in its slot instead).
+            // The change shares the caption line only on faces that ask for it, and only
+            // when both fit whole; a slot that shows the change keeps it to itself.
+            let slot_has_delta = matches!(slot, Slot::Delta) || (slot == Slot::Spark && s.delta.is_some());
             let cap = short_caption(&s.caption);
-            let both = s.delta.filter(|_| slot != Slot::Delta).map(|d| fmt_delta(c, d)).filter(|(dt, _)| {
+            let both = s.delta_text(c).filter(|_| s.inline_delta && !slot_has_delta).filter(|(dt, _)| {
                 let gap = if cap.is_empty() { 0.0 } else { style::SP[2] * k };
                 c.measure(&cap, cs, 400, Font::Text).0 + gap + c.measure(dt, cs, 600, Font::Text).0 <= right - x0
             });
@@ -477,7 +565,14 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             }
             let (sy0, sy1) = (14.0 * k, 40.0 * k);
             match slot {
-                Slot::Spark => c.area(slot_x, sy0, slot_w, sy1 - sy0, &s.series, s.spark_col(), true),
+                Slot::Spark => match s.delta_text(c) {
+                    // The change over its trend, so the pill says which way it went.
+                    Some((dt, dcol)) => {
+                        c.text_base(&dt, c.w - m, 22.0 * k, cs, 600, dcol, Align::Right, slot_w);
+                        s.trend(c, slot_x, 27.0 * k, slot_w, sy1 - 27.0 * k);
+                    }
+                    None => s.trend(c, slot_x, sy0, slot_w, sy1 - sy0),
+                },
                 Slot::Meter => {
                     if let Some((f, col)) = s.meter {
                         let pct = format!("{:.0}%", (f * 100.0).clamp(0.0, 999.0));
@@ -486,11 +581,25 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
                     }
                 }
                 Slot::Delta => {
-                    if let Some(d) = s.delta {
-                        let (dt, dcol) = fmt_delta(c, d);
+                    if let Some((dt, dcol)) = s.delta_text(c) {
                         c.text_base(&dt, c.w - m, 32.0 * k, style::TITLE.size * k, 600, dcol, Align::Right, slot_w);
                     }
                 }
+                Slot::Own => match &s.acc {
+                    Acc::Second(v, l) => {
+                        c.text_base(v, c.w - m, val_base, style::TITLE.size * k, 600, vcol, Align::Right, slot_w);
+                        c.text_base(l, c.w - m, cap_base, cs, 400, c.text2(), Align::Right, slot_w);
+                    }
+                    Acc::Note(a, b) => {
+                        c.text_base(a, slot_x, 26.0 * k, cs, 600, vcol, Align::Left, slot_w);
+                        c.text_base(b, slot_x, 40.0 * k, cs, 400, c.text2(), Align::Left, slot_w);
+                    }
+                    Acc::Week(days) => {
+                        let d = 7.0 * k;
+                        week_cells(c, days, c.w - m, 27.0 * k - d / 2.0, d, 3.0 * k, d / 2.0, s.spark_col());
+                    }
+                    Acc::Auto => {}
+                },
                 Slot::None => {}
             }
         }
@@ -499,20 +608,38 @@ fn compact_sum(c: &Canvas, s: &Sum, sh: Shape) {
             let m = style::M_SMALL;
             let bs = style::BADGE_SMALL;
             draw_vis(c, &s.vis, m, m, bs);
-            let (sx0, sx1) = (m + bs + style::SP[4], c.w - m);
-            let mut sy0 = 16.0;
-            if let Some(d) = s.delta {
-                let (t, col) = fmt_delta(c, d);
-                c.text_base(&t, sx1, 26.0, style::FOOT.size, 600, col, Align::Right, sx1 - sx0);
-                sy0 = 30.0;
+            // The top-right accessory slot: x 52 to 114, y 16 to 42.
+            let (sx1, sw) = (c.w - m, 62.0);
+            let sx0 = sx1 - sw;
+            let fs = style::FOOT.size;
+            match &s.acc {
+                Acc::Second(v, l) => {
+                    c.text_base(v, sx1, 26.0, fs, 600, vcol, Align::Right, sw);
+                    c.text_base(l, sx1, 40.0, fs, 400, c.text2(), Align::Right, sw);
+                }
+                Acc::Note(a, _) => {
+                    c.text_base(a, sx1, 26.0, fs, 600, c.text2(), Align::Right, sw);
+                }
+                Acc::Week(days) => {
+                    week_cells(c, days, sx1, 23.0, 6.0, 3.0, 3.0, s.spark_col());
+                }
+                Acc::Auto => {
+                    let mut sy0 = 16.0;
+                    if let Some((t, col)) = s.delta_text(c) {
+                        c.text_base(&t, sx1, 26.0, fs, 600, col, Align::Right, sw);
+                        sy0 = 30.0;
+                    }
+                    if s.series.len() > 2 {
+                        s.trend(c, sx0, sy0, sw, 42.0 - sy0);
+                    } else if let Some((f, col)) = s.meter {
+                        c.bar(sx0, if s.delta.is_some() { 36.0 } else { 27.0 }, sw, style::METER_H_COMPACT, f, col);
+                    }
+                }
             }
-            if s.series.len() > 2 {
-                c.area(sx0, sy0, sx1 - sx0, 42.0 - sy0, &s.series, s.spark_col(), true);
-            } else if let Some((f, col)) = s.meter {
-                c.bar(sx0, if s.delta.is_some() { 36.0 } else { 27.0 }, sx1 - sx0, style::METER_H_COMPACT, f, col);
-            }
-            let (v, fs) = fit_value(c, &s.value, style::HERO_S, c.w - 2.0 * m);
-            c.text_base(&v, m, 86.0, fs, style::HERO_S.weight, vcol, Align::Left, c.w * 2.0);
+            let ufs = style::TITLE.size;
+            let uw = if s.unit.is_empty() { 0.0 } else { c.measure(&s.unit, ufs, 600, Font::Text).0 + style::SP[1] };
+            let (v, vfs) = fit_value(c, &s.value, style::HERO_S, c.w - 2.0 * m - uw);
+            value_unit(c, &v, &s.unit, m, 86.0, vfs, style::HERO_S.weight, ufs);
             c.text_base(&s.caption, m, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
         }
     }
@@ -533,7 +660,7 @@ fn details(c: &Canvas, f: &Feed, col: Col) {
     let (x, y, w, h) = detail_region(c);
     if f.series.len() > 2 {
         separator(c, style::SEP_Y_LARGE);
-        c.chart(x, y, w, h, &f.series, col, ChartOpts { fill: true, dot: true, stroke: style::STROKE, smooth: f.series.len() >= 8 });
+        c.chart(x, y, w, h, &f.series, line_col(c, col), ChartOpts { fill: true, dot: true, stroke: style::STROKE, smooth: f.series.len() >= 8 });
         return;
     }
     let items: Vec<(&str, &str)> = f.rows.iter().map(|r| (r.label.as_str(), r.value.as_str())).collect();
@@ -563,9 +690,35 @@ fn reason_line(c: &Canvas, s: &str, x: f32, base: f32, size: f32, err: bool, ali
     c.text_base(s, left + g, base, size, 400, c.text2(), Align::Left, max_w - g);
 }
 
+/// What a Large Glance face shows under its separator, for the loading skeleton.
+#[derive(Clone, Copy, PartialEq)]
+enum Detail {
+    Rows,
+    Chart,
+    Footer,
+    /// A full-width meter on Medium; three stats and a pill on Large (OpenRouter).
+    Credits,
+    /// Stat tiles (followers).
+    Tiles,
+}
+
+/// The layout a connector face really draws, so its loading skeleton matches it (§7).
+enum Tpl {
+    /// Glance faces: `slot` when Dock L, Small and Medium carry a trend or meter.
+    Glance { slot: bool, detail: Detail },
+    /// Header faces (charts), with their real title.
+    Header(String),
+}
+
 /// The whole-card fallback for connector faces that have no data (§7): a skeleton while
 /// loading, the Connect layout when it needs setting up, the reason when it failed.
 fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &'static str, g: &Got, sh: Shape) -> bool {
+    placeholder_tpl(c, out, name, badge, conn, g, sh, &Tpl::Glance { slot: false, detail: Detail::Rows })
+}
+
+/// `placeholder` with the face's real template, so loading → loaded doesn't jump.
+#[allow(clippy::too_many_arguments)]
+fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &'static str, g: &Got, sh: Shape, tpl: &Tpl) -> bool {
     let (loading, connect, reason) = match g {
         Got::Feed(_) => return false,
         Got::Loading => (true, false, String::new()),
@@ -576,7 +729,16 @@ fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &
     if connect {
         out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect(conn)));
     }
+    let header = matches!(tpl, Tpl::Header(_));
+    let slot = header || matches!(tpl, Tpl::Glance { slot: true, .. });
     match sh {
+        Shape::Mini if loading => {
+            // The badge where the loaded value-led Mini puts it, over a value bar.
+            let k = c.h / 54.0;
+            let bs = style::BADGE_MINI * k;
+            c.badge(badge, (c.w - bs) / 2.0, 8.0 * k, bs);
+            skeleton(c, (c.w - 26.0 * k) / 2.0, 37.0 * k, 26.0 * k, 8.0 * k);
+        }
         Shape::Mini => {
             let k = c.h / 54.0;
             let bs = 30.0 * k;
@@ -596,7 +758,15 @@ fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &
             let x0 = m + bs + style::SP[4] * k;
             let tw = c.w - m - x0;
             if loading {
-                skeleton(c, x0, (c.h - 10.0 * k) / 2.0, (60.0 * k).min(tw), 10.0 * k);
+                // Value and caption bars where the loaded text sits; Dock L's slot too.
+                let wide = c.w >= c.h * 3.4;
+                let slot_w = (c.w * 0.34).round();
+                let tw = if wide && slot { c.w - m - slot_w - style::SP[4] * k - x0 } else { tw };
+                skeleton(c, x0, 20.0 * k, (60.0 * k).min(tw), 10.0 * k);
+                skeleton(c, x0, 38.0 * k, (36.0 * k).min(tw), 6.0 * k);
+                if wide && slot {
+                    skeleton(c, c.w - m - slot_w, 25.0 * k, slot_w, style::METER_H_COMPACT * k);
+                }
             } else {
                 c.text_base(name, x0, 30.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, tw);
                 if connect {
@@ -606,6 +776,15 @@ fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &
                 }
             }
         }
+        Shape::Small if loading && header => {
+            // Chart-led Small: badge and period on top, the value, the chart's baseline.
+            let m = style::M_SMALL;
+            c.badge(badge, m, m, style::BADGE_HEADER);
+            skeleton(c, m + style::BADGE_HEADER + style::SP[2], 24.0, 36.0, 6.0);
+            let ch = c.cap_h(style::HERO_S.size);
+            skeleton(c, m, 62.0 - ch, (c.w - 2.0 * m) * 0.6, ch);
+            base_line(c, m, c.w - 2.0 * m, c.h - m);
+        }
         Shape::Small => {
             let m = style::M_SMALL;
             c.badge(badge, m, m, style::BADGE_SMALL);
@@ -614,6 +793,9 @@ fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &
                 let ch = c.cap_h(style::HERO_S.size);
                 skeleton(c, m, 86.0 - ch, inner * 0.6, ch);
                 skeleton(c, m, 106.0 - 8.0, 40.0, 8.0);
+                if slot {
+                    skeleton(c, c.w - m - 62.0, 36.0, 62.0, style::METER_H_COMPACT);
+                }
             } else {
                 // Name and reason sit above the pill on the bottom margin.
                 let pill_y = c.h - m - 26.0;
@@ -627,15 +809,77 @@ fn placeholder(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, conn: &
         }
         Shape::Medium | Shape::Large if loading => {
             let m = style::M_CARD;
-            let bs = style::BADGE_GLANCE;
-            c.badge(badge, c.w - m - bs, m, bs);
-            skeleton(c, m, m, (c.w - 2.0 * m - bs - style::SP[3]) * 0.6, c.cap_h(style::HERO.size));
-            skeleton(c, m, 58.0 - 8.0, 40.0, 8.0);
-            if sh == Shape::Large {
-                separator(c, style::SEP_Y_LARGE);
-                let (x, y, w, _) = detail_region(c);
-                for (i, f) in [1.0, 0.75, 0.5].iter().enumerate() {
-                    skeleton(c, x, y + 4.0 + i as f32 * style::ROW_L, w * f, 8.0);
+            let large = sh == Shape::Large;
+            match tpl {
+                Tpl::Header(title) => {
+                    // The real badge and title; bars for the trailing value, subtitle and
+                    // change; the chart's baseline; Large's three footer columns.
+                    let bs = style::BADGE_HEADER;
+                    c.badge(badge, m, m, bs);
+                    let tx = m + bs + style::SP[3];
+                    let (vw, cw) = (48.0, 32.0);
+                    c.text_base(title, tx, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, c.w - m - vw - style::SP[5] - tx);
+                    skeleton(c, c.w - m - vw, 19.0, vw, 12.0);
+                    skeleton(c, tx, 38.0, 40.0, 8.0);
+                    skeleton(c, c.w - m - cw, 38.0, cw, 8.0);
+                    let plot_bottom = if large { HDR_PLOT_BOTTOM_L } else { c.h - m };
+                    base_line(c, m, c.w - 2.0 * m, plot_bottom);
+                    if large {
+                        let colw = (c.w - 2.0 * m) / 3.0;
+                        for i in 0..3 {
+                            let x0 = m + i as f32 * colw;
+                            skeleton(c, x0, 154.0, 40.0, 12.0);
+                            skeleton(c, x0, 174.0, 32.0, 8.0);
+                        }
+                    }
+                }
+                Tpl::Glance { slot, detail } => {
+                    let bs = style::BADGE_GLANCE;
+                    c.badge(badge, c.w - m - bs, m, bs);
+                    skeleton(c, m, m, (c.w - 2.0 * m - bs - style::SP[3]) * 0.6, c.cap_h(style::HERO.size));
+                    skeleton(c, m, 58.0 - 8.0, 40.0, 8.0);
+                    if *detail == Detail::Credits {
+                        // The full-width meter under the caption.
+                        skeleton(c, m, 70.0, c.w - 2.0 * m, style::METER_H);
+                    } else if *slot && !(large && *detail == Detail::Chart) {
+                        skeleton(c, ACC_X, 76.0, c.w - m - ACC_X, style::METER_H_COMPACT);
+                    }
+                    if large {
+                        separator(c, style::SEP_Y_LARGE);
+                        let (x, y, w, h) = detail_region(c);
+                        match detail {
+                            Detail::Rows => {
+                                for (i, f) in [1.0, 0.75, 0.5].iter().enumerate() {
+                                    skeleton(c, x, y + 4.0 + i as f32 * style::ROW_L, w * f, 8.0);
+                                }
+                            }
+                            Detail::Chart => {
+                                // A soft block where the chart will be, on its baseline.
+                                c.rr(x, y + 16.0, w, h - 24.0, style::R_MIN, alpha(c.track(), 0.5));
+                                base_line(c, x, w, y + h);
+                            }
+                            Detail::Tiles => {
+                                let gap = style::SP[3];
+                                let tw = (w - 2.0 * gap) / 3.0;
+                                for i in 0..3 {
+                                    let tx = x + i as f32 * (tw + gap);
+                                    c.rr(tx, y + style::SP[1], tw, h - style::SP[3], style::R_MIN, alpha(c.track(), 0.5));
+                                }
+                            }
+                            Detail::Footer | Detail::Credits => {
+                                let colw = w / 3.0;
+                                for i in 0..3 {
+                                    skeleton(c, x + i as f32 * colw, y + 6.0, 40.0, 12.0);
+                                    skeleton(c, x + i as f32 * colw, y + 26.0, 28.0, 8.0);
+                                }
+                                if *detail == Detail::Credits {
+                                    // The secondary pill on the bottom margin.
+                                    let ph = style::BTN_SECONDARY;
+                                    c.rr(x, y + h - ph, w, ph, ph / 2.0, alpha(c.track(), 0.5));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -700,132 +944,1121 @@ fn compactish(sh: Shape) -> bool {
 }
 
 // ------------------------------------------------------------------ connector faces
+// Stat faces use the Glance template, Chart faces the Header template, Usage faces the
+// Glance template with a meter or a token trend. Mini and Dock are shared (compact_sum).
+
+const TEAL: Col = hex(0x10A37F);
+const INDIGO: Col = hex(0x6467F2);
+/// The Medium Glance accessory box: x 148 to w − 16, y 48 to 80.
+const ACC_X: f32 = 148.0;
+const ACC_TOP: f32 = 48.0;
+/// Header faces: the plot starts under the two-line header; Large's plot ends here.
+const HDR_PLOT_TOP: f32 = 52.0;
+const HDR_PLOT_BOTTOM_L: f32 = 132.0;
+/// Large Header faces: the three-stat footer's value baseline (labels 16 below).
+const HDR_FOOT_BASE: f32 = 166.0;
+/// Daily bars: earlier days are drawn at this opacity, the latest at full colour.
+const BAR_PAST: f32 = 0.55;
+
+fn same_col(a: Col, b: Col) -> bool {
+    (a.0 - b.0).abs() < 0.003 && (a.1 - b.1).abs() < 0.003 && (a.2 - b.2).abs() < 0.003
+}
+
+/// A trend's colour where up is a judgment (money, prices): green up, red down, and the
+/// neutral blue when there is no change to back either.
+fn trend_col(d: Option<f64>) -> Col {
+    match d {
+        Some(d) if d >= 0.05 => GREEN,
+        Some(d) if d <= -0.05 => RED,
+        _ => BLUE,
+    }
+}
+
+/// A widget's identity colour for every chart, meter and sparkline it draws (§2.3), or
+/// None where the trend's sign colours it (revenue and prices).
+fn ident(c: &Canvas, conn: &str) -> Option<Col> {
+    match conn {
+        "claude_code" | "anthropic" => Some(CLAUDE),
+        "openai" => Some(TEAL),
+        "codex" => Some(if c.light { hex(0x6E7378) } else { hex(0x9AA0A6) }),
+        "openrouter" => Some(INDIGO),
+        "plausible" | "umami" | "supabase" | "search_console" | "resend" => Some(BLUE),
+        "github" => Some(if c.light { hex(0x2DA44E) } else { hex(0x39D353) }),
+        _ => None,
+    }
+}
+
+/// A line's colour: in the light theme a deeper tone, so a 1.5 px stroke keeps 3:1 on pale
+/// glass (system accents take their text variant; Claude orange and OpenAI teal deepen).
+fn line_col(c: &Canvas, col: Col) -> Col {
+    if !c.light {
+        col
+    } else if same_col(col, CLAUDE) {
+        hex(0xC8643F)
+    } else if same_col(col, TEAL) {
+        hex(0x0E8A6B)
+    } else {
+        c.tone(col, true)
+    }
+}
+
+/// A long series thinned to about `n` points (means of equal runs), so a narrow line
+/// reads as a trend rather than day-to-day noise.
+fn thin(vals: &[f64], n: usize) -> Vec<f64> {
+    if vals.len() <= n + 2 {
+        return vals.to_vec();
+    }
+    let k = vals.len().div_ceil(n);
+    vals.chunks(k).map(|ch| ch.iter().sum::<f64>() / ch.len() as f64).collect()
+}
+
+/// A sparkline (§2.5): thinned when narrow, smoothed, stroke 1.5, gradient fill.
+#[allow(clippy::too_many_arguments)]
+fn spark(c: &Canvas, x: f32, y: f32, w: f32, h: f32, vals: &[f64], col: Col, dot: bool) {
+    let v = if w < 120.0 { thin(vals, 10) } else { vals.to_vec() };
+    c.chart(x, y, w, h, &v, line_col(c, col), ChartOpts { fill: true, dot, stroke: style::STROKE_SPARK, smooth: v.len() >= 5 });
+}
+
+/// A 1 px separator-colour hairline whose bottom edge is `bottom`.
+fn base_line(c: &Canvas, x: f32, w: f32, bottom: f32) {
+    c.line(x + 0.5, bottom - 0.5, x + w - 0.5, bottom - 0.5, 1.0, c.sep());
+}
+
+/// Daily quantities as bars from zero: fully rounded, earlier days at `BAR_PAST`, the
+/// latest at full colour, 14% headroom over the tallest; optionally on a baseline.
+#[allow(clippy::too_many_arguments)]
+fn day_bars(c: &Canvas, x: f32, y: f32, w: f32, h: f32, vals: &[f64], col: Col, baseline: bool) {
+    let n = vals.len();
+    if n == 0 || w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let col = line_col(c, col);
+    let max = vals.iter().copied().filter(|v| v.is_finite()).fold(0.0, f64::max);
+    let top = if max > 0.0 { max * (1.0 + style::CHART_PAD_HI) } else { 1.0 };
+    let pitch = w / n as f32;
+    let gap = (pitch * 0.36).clamp(1.33, 4.0);
+    let bw = (pitch - gap).max(1.0);
+    let floor = if baseline { y + h - 2.0 } else { y + h };
+    if baseline {
+        base_line(c, x, w, y + h);
+    }
+    let r = (bw / 2.0).min(3.0);
+    for (i, v) in vals.iter().enumerate() {
+        let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+        if v <= 0.0 {
+            continue;
+        }
+        let bh = ((v / top) as f32 * (floor - y)).max(bw.min(2.0));
+        let a = if i + 1 == n { 1.0 } else { BAR_PAST };
+        c.rr(x + i as f32 * pitch + (pitch - bw) / 2.0, floor - bh, bw, bh, r, alpha(col, a));
+    }
+}
+
+/// Where `v` lands in `c.chart` for the same box and options, or None when it falls
+/// outside the plotted range (used for a price chart's reference line).
+fn chart_y(vals: &[f64], y: f32, h: f32, stroke: f32, dot: bool, v: f64) -> Option<f32> {
+    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+    for x in vals.iter().filter(|v| v.is_finite()) {
+        lo = lo.min(*x);
+        hi = hi.max(*x);
+    }
+    if lo > hi {
+        return None;
+    }
+    if (hi - lo).abs() < 1e-9 {
+        hi = lo + 1.0;
+        lo -= 1.0;
+    }
+    let range = hi - lo;
+    let (lo, hi) = (lo - range * style::CHART_PAD_LO, hi + range * style::CHART_PAD_HI);
+    if v < lo || v > hi {
+        return None;
+    }
+    let inset = stroke / 2.0;
+    let top = y + inset.max(if dot { style::CHART_DOT + 1.5 } else { 0.0 });
+    let bottom = y + h - inset;
+    Some(bottom - ((v - lo) / (hi - lo)) as f32 * (bottom - top))
+}
+
+/// A dashed hairline (a price's reference level).
+fn dashed(c: &Canvas, x0: f32, x1: f32, y: f32, col: Col) {
+    let mut x = x0;
+    while x < x1 {
+        c.line(x + 0.5, y, (x + 2.5).min(x1), y, 1.0, col);
+        x += 6.0;
+    }
+}
+
+/// Mini's money (≤ 5 glyphs): "$126", "$5.3K", "$3.0K" (one decimal kept under $10K),
+/// "$18K", "$1.2M".
+fn mini_money(v: f64, cur: Option<&str>) -> String {
+    let full = money(v, cur);
+    let Some(start) = full.find(|ch: char| ch.is_ascii_digit()).filter(|s| *s > 0) else {
+        return compact_str(&full).unwrap_or(full);
+    };
+    let a = v.abs();
+    let body = if a >= 1e6 {
+        format!("{:.1}M", a / 1e6)
+    } else if a >= 1e4 {
+        format!("{:.0}K", a / 1e3)
+    } else if a >= 1e3 {
+        format!("{:.1}K", a / 1e3)
+    } else {
+        format!("{a:.0}")
+    };
+    format!("{}{body}", &full[..start])
+}
+
+/// A live price: cents under 1,000 ("$248.31"), whole units with separators above
+/// ("$96,412"), compact from a million.
+fn quote(v: f64, cur: Option<&str>) -> String {
+    let sym = match cur.unwrap_or("USD") {
+        "USD" | "CAD" | "AUD" | "NZD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        "JPY" => "¥",
+        "INR" => "₹",
+        _ => return money(v, cur),
+    };
+    let a = v.abs();
+    let sign = if v < 0.0 { "-" } else { "" };
+    if a < 1000.0 {
+        format!("{sign}{sym}{a:.2}")
+    } else if a < 1e6 {
+        format!("{sign}{sym}{}", super::grouped(a.round() as i64))
+    } else {
+        money(v, cur)
+    }
+}
+
+/// A formatted amount back to a number ("$1,204.50" → 1204.5).
+fn parse_amount(s: &str) -> Option<f64> {
+    let t: String = s.chars().filter(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-').collect();
+    t.parse().ok()
+}
+
+/// "$50.00" → "$50".
+fn trim_cents(s: &str) -> String {
+    s.strip_suffix(".00").unwrap_or(s).to_string()
+}
+
+/// "2026-10-27" → "Oct 27".
+fn short_date(ymd: &str) -> Option<String> {
+    let mut it = ymd.split('-');
+    let (_, m, d) = (it.next()?, it.next()?.parse::<usize>().ok()?, it.next()?.parse::<u32>().ok()?);
+    Some(format!("{} {d}", MONTHS.get(m.checked_sub(1)?)?.get(..3)?))
+}
+
+/// The period in a caption: "Last 30 days" → "30 days", "Clicks, 28 days" → "28 days".
+fn period_of(cap: &str) -> String {
+    let t = cap.trim();
+    let t = t.rsplit(", ").next().unwrap_or(t);
+    t.strip_prefix("Last ").unwrap_or(t).to_string()
+}
+
+/// A period's shortest form: "30 days" → "30d", "24 hours" → "24h".
+fn short_period(period: &str) -> String {
+    let mut it = period.split_whitespace();
+    match (it.next(), it.next(), it.next()) {
+        (Some(n), Some(unit), None) if n.chars().all(|ch| ch.is_ascii_digit()) => format!("{n}{}", &unit[..1]),
+        _ => period.to_string(),
+    }
+}
+
+/// "30 days" → "30-day" (to lead a noun: "30-day visitors").
+fn period_adj(period: &str) -> String {
+    match period.strip_suffix(" days") {
+        Some(n) => format!("{n}-day"),
+        None => period.to_string(),
+    }
+}
+
+/// A coin's letter tile: the first letter of its symbol on the badge's colours.
+fn letter_badge(b: &Badge, symbol: &str) -> Badge {
+    const LETTERS: [&str; 26] = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"];
+    match symbol.chars().next().map(|ch| ch.to_ascii_uppercase()) {
+        Some(ch @ 'A'..='Z') => Badge { mark: LETTERS[(ch as u8 - b'A') as usize], glyph: false, ..*b },
+        _ => *b,
+    }
+}
+
+fn mean(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        0.0
+    } else {
+        v.iter().sum::<f64>() / v.len() as f64
+    }
+}
+
+fn max_of(v: &[f64]) -> f64 {
+    v.iter().copied().fold(f64::MIN, f64::max)
+}
+
+fn min_of(v: &[f64]) -> f64 {
+    v.iter().copied().fold(f64::MAX, f64::min)
+}
+
+/// Up to three stats in equal columns across the card: value 17/600 over a footnote
+/// label, by baseline. Fewer stats share the width between them.
+fn stats_row(c: &Canvas, items: &[(String, String)], value_base: f32) {
+    let m = style::M_CARD;
+    let n = items.len().clamp(1, 3);
+    let cw = (c.w - 2.0 * m) / n as f32;
+    for (i, (v, label)) in items.iter().take(3).enumerate() {
+        let x = m + i as f32 * cw;
+        let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
+        c.text_base(&v, x, value_base, fs, style::VALUE.weight, c.text1(), Align::Left, c.w);
+        c.text_base(label, x, value_base + style::SP[6], style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, cw - style::SP[1]);
+    }
+}
+
+// ------------------------------------------------------------------ Stat and Usage (Glance)
+
+/// What a Glance face's Medium accessory box holds (x 148 to 252, y 48 to 80).
+enum Boxed {
+    None,
+    /// The trend: smoothed, filled, with an end dot.
+    Spark,
+    /// A second value over its label, right-aligned.
+    Stat(String, String),
+    /// The last seven days as cells, weekday letters above.
+    Week(Vec<bool>),
+}
+
+/// What a Glance face's Large adds under its separator.
+enum Detail2 {
+    None,
+    /// The series as a history chart; `Some(label)` ends it at 172 with time labels
+    /// ("13 days ago" … "Today").
+    Chart(Option<String>),
+    /// A shorter chart over a three-stat footer.
+    ChartFooter(Vec<(String, String)>),
+    /// Up to three rows (label, trailing value) and a footnote that closes the list.
+    Rows(Vec<(String, String)>, String),
+    /// The contribution heat map of the last 21 weeks (GitHub streak).
+    Heat(Vec<f32>, usize),
+    /// Stat tiles (followers without history yet).
+    Tiles(Vec<(String, String)>),
+    /// Three stats, then the paid / trial split and its footnote (RevenueCat).
+    Subs(Vec<(String, String)>, f32, Col, String),
+    /// Three stats, then a secondary pill that opens the credits page (OpenRouter).
+    Credits(Vec<(String, String)>),
+}
+
+impl Detail2 {
+    /// The Large detail shows the accessory's data again, so the box gives way to it.
+    fn replaces_box(&self) -> bool {
+        matches!(self, Detail2::Chart(_) | Detail2::ChartFooter(_) | Detail2::Heat(..) | Detail2::Tiles(_))
+    }
+}
+
+/// How a Glance face reads at every size; the layouts below are shared.
+struct Look {
+    badge: Badge,
+    /// The key value (Dock, Small and Medium), with an optional unit after it.
+    value: String,
+    unit: String,
+    mini: Option<String>,
+    /// The caption on dock sizes, and on Small and Medium.
+    dock_cap: String,
+    cap: String,
+    delta: Option<f64>,
+    delta_col: Option<Col>,
+    series: Vec<f64>,
+    /// Identity colour of the trend; None = by the change's sign.
+    tint: Option<Col>,
+    meter: Option<(f32, Col)>,
+    /// Dock L's slot, and whether Small shows it too.
+    acc: Acc,
+    small_acc: bool,
+    /// Medium's third line: an emphasised lead, then the rest (11, text2).
+    third: Option<(String, String)>,
+    boxed: Boxed,
+    detail: Detail2,
+}
+
+impl Look {
+    fn new(badge: Badge, value: String, cap: impl Into<String>) -> Self {
+        let cap = cap.into();
+        Look {
+            badge,
+            value,
+            unit: String::new(),
+            mini: None,
+            dock_cap: cap.clone(),
+            cap,
+            delta: None,
+            delta_col: None,
+            series: Vec::new(),
+            tint: None,
+            meter: None,
+            acc: Acc::Auto,
+            small_acc: true,
+            third: None,
+            boxed: Boxed::None,
+            detail: Detail2::None,
+        }
+    }
+
+    fn trend(&self) -> Col {
+        self.tint.unwrap_or_else(|| trend_col(self.delta))
+    }
+
+    /// Mini, Dock and Small, through the shared compact layouts.
+    fn compact(&self, c: &Canvas, sh: Shape) {
+        // Small takes the longer caption only when it fits whole; else the dock's.
+        let small_fits = c.measure(&self.cap, style::CAPTION.size, style::CAPTION.weight, Font::Text).0 <= c.w - 2.0 * style::M_SMALL;
+        let cap = if sh == Shape::Small && small_fits { &self.cap } else { &self.dock_cap };
+        let mut s = Sum::new(Vis::Badge(self.badge), self.value.clone(), cap.clone());
+        s.mini = self.mini.clone();
+        s.unit = self.unit.clone();
+        s.delta = self.delta;
+        s.delta_col = self.delta_col;
+        s.series = self.series.clone();
+        s.tint = self.tint;
+        s.meter = self.meter;
+        s.inline_delta = false;
+        if sh != Shape::Small || self.small_acc {
+            s.acc = self.acc.clone();
+        }
+        compact_sum(c, &s, sh);
+    }
+
+    /// The Medium Glance block; Large draws it unchanged (bar a box its detail replaces).
+    fn glance(&self, c: &Canvas, x: &Ctx, large: bool) {
+        let m = style::M_CARD;
+        let third = self.meter.map(|(f, col)| Line::Meter(f, col));
+        glance(c, &self.badge, &self.value, &self.cap, third);
+        if !self.unit.is_empty() {
+            let bs = style::BADGE_GLANCE;
+            let (v, fs) = fit_value(c, &self.value, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
+            let w = c.measure(&v, fs, style::HERO.weight, Font::Text).0;
+            c.text_base(&self.unit, m + w + style::SP[1], m + c.cap_h(fs), style::VALUE.size, 600, c.text2(), Align::Left, c.w);
+        }
+        // The change follows the caption on its baseline, the same size, 6 px after it.
+        if let Some(d) = self.delta {
+            let (t, col) = fmt_delta(c, d);
+            let cw = c.measure(&self.cap, style::CAPTION.size, style::CAPTION.weight, Font::Text).0;
+            c.text_base(&t, m + cw + style::SP[2], 58.0, style::CAPTION.size, 600, self.delta_col.unwrap_or(col), Align::Left, c.w);
+        }
+        let show_box = !(large && self.detail.replaces_box());
+        let boxed = show_box && !matches!(self.boxed, Boxed::None);
+        if let Some((lead, rest)) = &self.third {
+            let max = if boxed { ACC_X - m - style::SP[3] } else { c.w - 2.0 * m };
+            let fs = style::FOOT.size;
+            let lw = if lead.is_empty() { 0.0 } else { c.text_base(lead, m, 76.0, fs, 600, c.text2(), Align::Left, max) + style::SP[2] };
+            c.text_base(rest, m + lw, 76.0, fs, 400, c.text2(), Align::Left, max - lw);
+        }
+        if !show_box {
+            return;
+        }
+        let right = c.w - m;
+        match &self.boxed {
+            Boxed::None => {}
+            Boxed::Spark => spark(c, ACC_X, ACC_TOP, right - ACC_X, 80.0 - ACC_TOP, &self.series, self.trend(), true),
+            Boxed::Stat(v, l) => {
+                c.text_base(v, right, 62.0, style::VALUE.size, style::VALUE.weight, c.text1(), Align::Right, right - ACC_X);
+                c.text_base(l, right, 76.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Right, right - ACC_X);
+            }
+            Boxed::Week(days) => {
+                let (cell, gap) = (12.0, 3.0);
+                let x0 = week_cells(c, days, right, 62.0, cell, gap, 3.0, self.trend());
+                // Weekday letters over the cells; the last cell is today.
+                let n = days.len().min(7);
+                for i in 0..n {
+                    let wd = (x.now.weekday as usize + 7 * 2 - (n - 1 - i)) % 7;
+                    let l = &"SMTWTFS"[wd..wd + 1];
+                    let col = if i + 1 == n { c.text2() } else { c.text3() };
+                    c.text_base(l, x0 + i as f32 * (cell + gap) + cell / 2.0, 56.0, style::MICRO.size, style::MICRO.weight, col, Align::Center, cell * 2.0);
+                }
+            }
+        }
+    }
+
+    /// Large: the separator and the detail region (y 108 to 188).
+    fn detail(&self, c: &Canvas, out: &mut Painted, x: &Ctx, open: &str) {
+        let (rx, ry, rw, rh) = detail_region(c);
+        let bottom = ry + rh;
+        if !matches!(self.detail, Detail2::None) {
+            separator(c, style::SEP_Y_LARGE);
+        }
+        let col = line_col(c, self.trend());
+        match &self.detail {
+            Detail2::None => {}
+            Detail2::Chart(label) => {
+                let h = if label.is_some() { 64.0 } else { rh };
+                c.chart(rx, ry, rw, h, &self.series, col, ChartOpts { fill: true, dot: true, stroke: style::STROKE, smooth: self.series.len() >= 8 });
+                if let Some(l) = label {
+                    let (fs, wt) = (style::MICRO.size, style::MICRO.weight);
+                    c.text_base(l, rx, bottom, fs, wt, c.text3(), Align::Left, rw / 2.0);
+                    c.text_base("Today", rx + rw, bottom, fs, wt, c.text3(), Align::Right, rw / 2.0);
+                }
+            }
+            Detail2::ChartFooter(items) => {
+                c.chart(rx, ry, rw, 38.0, &self.series, col, ChartOpts { fill: true, dot: true, stroke: style::STROKE, smooth: self.series.len() >= 8 });
+                stats_row(c, items, bottom - style::SP[6] - style::SP[1]);
+            }
+            Detail2::Rows(items, summary) => {
+                let items: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+                // The first row's capitals on the region's top; the footnote on its bottom.
+                rows(c, &items, ry - style::SP[3], style::ROW_L, 3);
+                c.text_base(summary, rx, bottom - style::SP[0] - 1.0, style::FOOT.size, 500, c.text3(), Align::Left, rw);
+            }
+            Detail2::Heat(grid, streak) => heat_weeks(c, grid, *streak, x.now.weekday as usize, self.trend()),
+            Detail2::Tiles(items) => {
+                let n = items.len().clamp(1, 3) as f32;
+                let gap = style::SP[3];
+                let tw = (rw - gap * (n - 1.0)) / n;
+                let (ty, th) = (ry + style::SP[1], rh - style::SP[3]);
+                for (i, (v, l)) in items.iter().take(3).enumerate() {
+                    let tx = rx + i as f32 * (tw + gap);
+                    c.rr(tx, ty, tw, th, style::concentric(style::CARD_R, style::M_CARD), alpha(c.plate(), 0.6));
+                    let base = ty + th / 2.0 + style::SP[0];
+                    let (v, fs) = fit_value(c, v, style::VALUE, tw - style::SP[5]);
+                    c.text_base(&v, tx + tw / 2.0, base, fs, style::VALUE.weight, c.text1(), Align::Center, tw);
+                    c.text_base(l, tx + tw / 2.0, base + style::SP[6], style::FOOT.size, style::FOOT.weight, c.text2(), Align::Center, tw - style::SP[3]);
+                }
+            }
+            Detail2::Subs(items, paid, red, note) => {
+                stats_row(c, items, 126.0);
+                // Paid in the badge colour, trials in the same colour, lighter, after it.
+                let (my, mh) = (158.0, style::METER_H);
+                c.rr(rx, my, rw, mh, mh / 2.0, alpha(*red, 0.35));
+                c.rr(rx, my, (rw * paid.clamp(0.0, 1.0)).max(mh), mh, mh / 2.0, *red);
+                c.text_base(note, rx, 182.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, rw);
+            }
+            Detail2::Credits(items) => {
+                stats_row(c, items, 126.0);
+                // A secondary pill on the bottom margin.
+                let ph = style::BTN_SECONDARY;
+                let py = bottom - ph;
+                c.rr(rx, py, rw, ph, ph / 2.0, c.plate());
+                let fs = style::TITLE.size;
+                c.text_cap("Add credits", rx + rw / 2.0, py + (ph - c.cap_h(fs)) / 2.0, fs, 600, c.text1(), Align::Center, rw);
+                if !open.is_empty() {
+                    out.hits.push(((rx, py, rw, ph), WAct::Open(open.to_string())));
+                }
+            }
+        }
+    }
+}
+
+/// GitHub's last 21 weeks as a heat map (cell 9, gap 2) centred in the detail region: the
+/// current streak at full intensity, today ringed.
+fn heat_weeks(c: &Canvas, grid: &[f32], streak: usize, weekday: usize, col: Col) {
+    let (rx, ry, rw, rh) = detail_region(c);
+    let (cell, gap) = (9.0, style::HEAT_GAP);
+    let weeks = (((rw + gap) / (cell + gap)).floor() as usize).min(21);
+    let (gw, gh) = (weeks as f32 * (cell + gap) - gap, 7.0 * (cell + gap) - gap);
+    let (x0, y0) = (rx + (rw - gw) / 2.0, ry + (rh - gh) / 2.0);
+    let n = grid.len();
+    for j in 0..weeks {
+        for r in 0..7 {
+            let ago = (weeks - 1 - j) * 7 + weekday;
+            let Some(ago) = ago.checked_sub(r) else { continue };
+            if ago >= n {
+                continue;
+            }
+            let v = grid[n - 1 - ago];
+            let (x, y) = (x0 + j as f32 * (cell + gap), y0 + r as f32 * (cell + gap));
+            let fill = if v <= 0.0 {
+                c.track()
+            } else if ago < streak {
+                col
+            } else {
+                let step = ((v * 4.0).ceil() as usize).clamp(1, 4) - 1;
+                alpha(col, style::HEAT_STEPS[step])
+            };
+            c.rr(x, y, cell, cell, 2.0, fill);
+            if ago == 0 {
+                c.rr_stroke(x - 2.0, y - 2.0, cell + 4.0, cell + 4.0, 4.0, c.text1(), 1.5);
+            }
+        }
+    }
+}
+
+/// The last seven days of a contribution grid: active or not.
+fn last_week(grid: &[f32]) -> Vec<bool> {
+    grid.iter().rev().take(7).rev().map(|v| *v > 0.0).collect()
+}
+
+fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look {
+    let ex = |k: &str| f.extra.get(k).cloned();
+    let v = f.value.unwrap_or(0.0);
+    let cur = f.currency.as_deref();
+    match conn {
+        "revenuecat" => {
+            let mut l = Look::new(*badge, headline(f), "MRR");
+            l.mini = Some(mini_money(v, cur));
+            let subs = ex("active_subscriptions");
+            let trials = ex("active_trials");
+            if let Some(s) = &subs {
+                l.cap = format!("MRR · {s} subscribers");
+                l.acc = Acc::Second(s.clone(), "subscribers".into());
+            }
+            if let Some(t) = &trials {
+                l.boxed = Boxed::Stat(t.clone(), "Trials".into());
+            }
+            let items: Vec<(String, String)> = [("revenue", "Revenue · 28d"), ("new_customers", "New · 28d"), ("active_users", "Active users")]
+                .iter()
+                .filter_map(|(k, label)| ex(k).map(|v| (trim_cents(&v), label.to_string())))
+                .collect();
+            let (p, t) = (subs.as_deref().and_then(parse_amount).unwrap_or(0.0), trials.as_deref().and_then(parse_amount).unwrap_or(0.0));
+            if p + t > 0.0 {
+                let note = match (&subs, &trials) {
+                    (Some(s), Some(t)) => format!("{s} paid · {t} in trial"),
+                    (Some(s), None) => format!("{s} paid"),
+                    _ => String::new(),
+                };
+                l.detail = Detail2::Subs(items, (p / (p + t)) as f32, badge.bg, note);
+            } else if !items.is_empty() {
+                l.detail = Detail2::Subs(items, 0.0, badge.bg, String::new());
+            }
+            l
+        }
+        "cursor" => {
+            let mut l = Look::new(*badge, headline(f), "This cycle");
+            l.mini = Some(mini_money(v, cur));
+            let since = ex("cycle_start").and_then(|d| short_date(&d));
+            if let Some(s) = &since {
+                l.cap = format!("This cycle · since {s}");
+            }
+            let od = ex("on_demand").filter(|s| parse_amount(s).unwrap_or(0.0) > 0.0);
+            let members = ex("members");
+            l.acc = match (&od, &members) {
+                (Some(o), _) => Acc::Second(o.clone(), "on-demand".into()),
+                (None, Some(n)) => Acc::Second(n.clone(), "members".into()),
+                _ => Acc::Auto,
+            };
+            let mut parts = Vec::new();
+            if let Some(o) = &od {
+                parts.push(format!("{o} on-demand"));
+            }
+            if let Some(n) = &members {
+                parts.push(format!("{n} {}", if n == "1" { "member" } else { "members" }));
+            }
+            if !parts.is_empty() {
+                l.third = Some((String::new(), parts.join(" · ")));
+            }
+            let n = f.rows.len();
+            if n > 0 {
+                let shown = n.min(3);
+                let items = f.rows.iter().take(shown).map(|r| (r.label.clone(), r.value.clone())).collect();
+                let summary = if n > shown {
+                    let rest: f64 = f.rows.iter().skip(shown).filter_map(|r| parse_amount(&r.value)).sum();
+                    format!("and {} more · {}", n - shown, money(rest, cur))
+                } else {
+                    let mut s = Vec::new();
+                    if let Some(o) = &od {
+                        s.push(format!("{o} on-demand"));
+                    }
+                    if let Some(d) = &since {
+                        s.push(format!("since {d}"));
+                    }
+                    s.join(" · ")
+                };
+                l.detail = Detail2::Rows(items, summary);
+            }
+            l
+        }
+        "gmail" => {
+            let n = v.round() as i64;
+            let cap = if n == 0 { "All caught up" } else { "Unread" };
+            let mut l = Look::new(*badge, super::grouped(n), cap);
+            l.mini = Some(compact_tight(v));
+            if let Some(r) = f.rows.first().filter(|_| n > 0) {
+                let first = r.value.split_whitespace().next().unwrap_or("").to_string();
+                l.acc = Acc::Note(r.value.clone(), r.label.clone());
+                l.small_acc = !first.is_empty();
+                l.third = Some((r.value.clone(), r.label.clone()));
+            }
+            let items: Vec<(String, String)> = f.rows.iter().filter(|_| n > 0).take(3).map(|r| (r.label.clone(), r.value.clone())).collect();
+            let mut summary = vec![format!("{} unread", super::grouped(n))];
+            if let Some(t) = ex("total") {
+                summary.push(format!("{t} in inbox"));
+            }
+            l.detail = Detail2::Rows(items, summary.join(" · "));
+            l
+        }
+        "github" => {
+            let streak = ex("streak").unwrap_or_else(|| "0".into());
+            let days: usize = streak.parse().unwrap_or(0);
+            let cap = if days == 0 { "Start a streak today" } else { "Current streak" };
+            let mut l = Look::new(*badge, streak.clone(), cap);
+            l.unit = if days == 1 { "day".into() } else { "days".into() };
+            l.mini = Some(streak);
+            l.tint = ident(c, conn);
+            if !f.grid.is_empty() {
+                l.acc = Acc::Week(last_week(&f.grid));
+                l.boxed = Boxed::Week(last_week(&f.grid));
+                l.detail = Detail2::Heat(f.grid.clone(), days);
+            }
+            l
+        }
+        "x" | "tiktok" | "youtube" | "instagram" => {
+            let cap = if f.caption.is_empty() { "Followers".to_string() } else { f.caption.clone() };
+            let mut l = Look::new(*badge, super::grouped(v.round() as i64), cap);
+            l.mini = Some(compact_tight(v));
+            if let Some(n) = ex("name") {
+                l.third = Some((String::new(), n));
+            }
+            let stats: &[(&str, &str)] = match conn {
+                "x" => &[("posts", "Posts"), ("following", "Following")],
+                "tiktok" => &[("likes", "Likes"), ("videos", "Videos"), ("following", "Following")],
+                "youtube" => &[("views", "Views"), ("videos", "Videos")],
+                _ => &[("posts", "Posts")],
+            };
+            let mut items: Vec<(String, String)> = stats.iter().filter_map(|(k, label)| ex(k).map(|v| (v, label.to_string()))).collect();
+            if conn == "youtube" {
+                // Views per video, from the two totals.
+                let (vw, vd) = (ex("views").and_then(|s| parse_compact(&s)), ex("videos").and_then(|s| parse_compact(&s)));
+                if let (Some(vw), Some(vd)) = (vw, vd) {
+                    if vd > 0.0 {
+                        items.push((compact(vw / vd), "Per video".into()));
+                    }
+                }
+            }
+            if let Some((sv, sl)) = items.first() {
+                l.acc = Acc::Second(sv.clone(), sl.to_lowercase());
+                l.small_acc = false;
+                l.boxed = Boxed::Stat(sv.clone(), sl.clone());
+            }
+            if !items.is_empty() {
+                l.detail = Detail2::Tiles(items);
+            }
+            l
+        }
+        _ => {
+            // Totals with a 30-day trend: revenue, visitors, clicks, emails.
+            let value = match (&f.text, conn) {
+                (Some(t), "resend") => t.clone(),
+                _ if f.currency.is_none() && f.value.is_some() => super::grouped(v.round() as i64),
+                _ => headline(f),
+            };
+            let caption = if f.caption.is_empty() { def.name.to_string() } else { f.caption.clone() };
+            let mut l = Look::new(*badge, value, caption.clone());
+            l.mini = Some(if f.currency.is_some() { mini_money(v, cur) } else { compact_tight(v) });
+            l.delta = f.delta_pct;
+            l.series = f.series.clone();
+            l.tint = ident(c, conn);
+            let period = period_of(&caption);
+            match conn {
+                "plausible" | "umami" => {
+                    l.dock_cap = "Visitors".into();
+                    l.cap = format!("{} visitors", period_adj(&period));
+                }
+                "search_console" => {
+                    l.dock_cap = "Clicks".into();
+                    l.cap = format!("Clicks · {period}");
+                }
+                "resend" => {
+                    // More emails is not better or worse: the change stays neutral.
+                    l.delta_col = Some(c.text2());
+                    l.dock_cap = "Emails sent".into();
+                    l.cap = if f.series.len() > 2 { format!("Emails sent · {} days", f.series.len()) } else { "Emails sent".into() };
+                }
+                _ => {}
+            }
+            if l.series.len() > 2 {
+                l.boxed = Boxed::Spark;
+                l.detail = Detail2::Chart(None);
+                let s = &l.series;
+                let items: Vec<(String, String)> = match conn {
+                    "search_console" => [("impressions", "Impressions"), ("ctr", "CTR"), ("position", "Avg position")].iter().filter_map(|(k, label)| ex(k).map(|v| (v, label.to_string()))).collect(),
+                    "resend" => {
+                        let week: f64 = s.iter().rev().take(7).sum();
+                        vec![(super::grouped(s[s.len() - 1] as i64), "Today".into()), (super::grouped(week as i64), "7 days".into()), (compact(mean(s)), "Daily avg".into())]
+                    }
+                    _ => Vec::new(),
+                };
+                if !items.is_empty() {
+                    l.detail = Detail2::ChartFooter(items);
+                }
+            }
+            l
+        }
+    }
+}
+
+/// "1.2M" → 1200000, "8,900" → 8900.
+fn parse_compact(s: &str) -> Option<f64> {
+    let t = s.trim();
+    let (num, k) = match t.chars().last()? {
+        'K' => (&t[..t.len() - 1], 1e3),
+        'M' => (&t[..t.len() - 1], 1e6),
+        'B' => (&t[..t.len() - 1], 1e9),
+        _ => (t, 1.0),
+    };
+    num.replace(',', "").parse::<f64>().ok().map(|v| v * k)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    let tpl = match conn {
+        "revenuecat" => Tpl::Glance { slot: false, detail: Detail::Footer },
+        "x" | "tiktok" | "youtube" | "instagram" => Tpl::Glance { slot: false, detail: Detail::Tiles },
+        "cursor" | "gmail" => Tpl::Glance { slot: false, detail: Detail::Rows },
+        "github" => Tpl::Glance { slot: true, detail: Detail::Chart },
+        _ => Tpl::Glance { slot: true, detail: Detail::Chart },
+    };
+    if placeholder_tpl(c, out, def.name, badge, conn, &g, sh, &tpl) {
         return;
     }
     let Got::Feed(f) = g else { return };
     open_hit(out, c, open);
-    let (value, caption) = if def.id == "github-streak" {
-        (f.extra.get("streak").cloned().unwrap_or_else(|| "0".into()), "Day streak".to_string())
-    } else {
-        (headline(&f), if f.caption.is_empty() { def.name.to_string() } else { f.caption.clone() })
-    };
+    let look = stat_look(c, def, conn, &f, badge);
     if compactish(sh) {
-        let mut s = Sum::new(Vis::Badge(*badge), value, caption);
-        s.delta = f.delta_pct;
-        s.series = f.series.clone();
-        compact_sum(c, &s, sh);
+        look.compact(c, sh);
         return;
     }
-    c.badge(badge, c.w - 16.0 - 34.0, 16.0, 34.0);
-    c.num(&value, 16.0, 14.0, fit(c, &value, 32.0, 18.0, 600, Font::Display, c.w - 80.0), 600, c.text1());
-    // Subscribers share the caption's line ("MRR · 812 subscribers"), not a floating corner.
-    let caption = match f.extra.get("active_subscriptions") {
-        Some(n) => format!("{caption} · {n} subscribers"),
-        None => caption,
-    };
-    let cw = c.tw(&caption, 16.0, 58.0, 12.0, 400, c.text2(), c.w - 120.0);
-    if let Some(d) = f.delta_pct {
-        c.tw(&fmt_delta_text(d), 22.0 + cw, 58.0, 11.5, 600, up_down(d), 90.0);
-    }
-    // Mail: the newest subject under the count (Large lists it with the others instead).
-    if conn == "gmail" && sh != Shape::Large {
-        if let Some(r) = f.rows.first() {
-            c.tw(&r.label, 16.0, 74.0, 11.0, 400, c.text3(), c.w - 32.0);
-        }
-    }
+    look.glance(c, x, sh == Shape::Large);
     if sh == Shape::Large {
-        details(c, &f, f.delta_pct.map(up_down).unwrap_or(GREEN));
-    } else if f.series.len() > 2 {
-        c.area(c.w - 120.0, 64.0, 104.0, 20.0, &f.series, GREEN, false);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
-    let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
-        return;
-    }
-    let Got::Feed(f) = g else { return };
-    open_hit(out, c, open);
-    let col = match f.delta_pct {
-        Some(d) if d < 0.0 => RED,
-        _ => GREEN,
-    };
-    let title = match f.extra.get("symbol") {
-        Some(s) => s.clone(),
-        None => def.name.trim_end_matches(" Chart").to_string(),
-    };
-    let value = if f.unit == "tokens" { compact(f.value.unwrap_or(0.0)) } else { headline(&f) };
-    if compactish(sh) {
-        let mut s = Sum::new(Vis::Badge(*badge), value, title);
-        s.delta = f.delta_pct;
-        s.series = f.series.clone();
-        compact_sum(c, &s, sh);
-        return;
-    }
-    c.badge(badge, 14.0, 13.0, 20.0);
-    c.tw(&title, 42.0, 14.0, 12.5, 600, c.text1(), c.w - 160.0);
-    c.tr(&value, c.w - 14.0, 9.0, 16.0, 600, c.text1());
-    match f.delta_pct {
-        Some(d) => {
-            c.tr(&fmt_delta_text(d), c.w - 14.0, 30.0, 10.5, 600, up_down(d));
-        }
-        None => {
-            c.tr(&f.caption, c.w - 14.0, 30.0, 10.5, 400, c.text3());
-        }
-    }
-    if f.series.len() > 1 {
-        c.area(14.0, 48.0, c.w - 28.0, c.h - 60.0, &f.series, col, true);
-    } else {
-        c.tw("No chart data yet", 14.0, 60.0, 11.5, 400, c.text3(), c.w - 28.0);
+        look.detail(c, out, x, open);
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn usage(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    let credits = conn == "openrouter";
+    let tpl = Tpl::Glance { slot: true, detail: if credits { Detail::Credits } else { Detail::Chart } };
+    if placeholder_tpl(c, out, def.name, badge, conn, &g, sh, &tpl) {
         return;
     }
     let Got::Feed(f) = g else { return };
     open_hit(out, c, open);
-    let tokens = f.unit == "tokens";
-    let short = if tokens { compact(f.value.unwrap_or(0.0)) } else { headline(&f) };
-    let (meter_label, frac) = if tokens {
-        let w5 = f.extra.get("tokens_5h").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        let wk = f.extra.get("tokens_week").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-        // Share of the week's use in the last 5 hours (a sense of pace).
-        (format!("5h window {} · week {}", compact(w5), compact(wk)), if wk > 0.0 { (w5 / wk) as f32 } else { 0.0 })
+    let v = f.value.unwrap_or(0.0);
+    let look = if f.unit == "tokens" {
+        // Tokens today, with the last two weeks as the trend (no meter: there is no limit).
+        let mut l = Look::new(*badge, compact(v), "tokens today");
+        l.mini = Some(compact_tight(v));
+        l.series = f.series.clone();
+        l.tint = ident(c, conn).or(Some(CLAUDE));
+        let num = |k: &str| f.extra.get(k).and_then(|s| s.parse::<f64>().ok());
+        let mut parts = Vec::new();
+        if let Some(w5) = num("tokens_5h") {
+            parts.push(format!("5h {}", compact(w5)));
+        }
+        if let Some(wk) = num("tokens_week") {
+            parts.push(format!("week {}", compact(wk)));
+        }
+        if !parts.is_empty() {
+            l.third = Some((String::new(), parts.join(" · ")));
+        }
+        if l.series.len() > 2 {
+            l.boxed = Boxed::Spark;
+            l.detail = Detail2::Chart(Some(format!("{} days ago", l.series.len() - 1)));
+        }
+        l
     } else {
-        let lim = f.extra.get("total_credits").cloned().unwrap_or_default();
-        (if lim.is_empty() { f.caption.clone() } else { format!("{}% of ${lim} used", (f.frac.unwrap_or(0.0) * 100.0).round() as i32) }, f.frac.unwrap_or(0.0))
+        // Credits left: the meter shows what is left, and warns like a battery.
+        let mut l = Look::new(*badge, headline(&f), if f.caption.is_empty() { "Credits left".to_string() } else { f.caption.clone() });
+        l.mini = Some(mini_money(v, f.currency.as_deref()));
+        if let Some(used) = f.frac {
+            let left = (1.0 - used).clamp(0.0, 1.0);
+            let col = if left <= 0.1 {
+                RED
+            } else if left <= 0.2 {
+                ORANGE
+            } else if credits {
+                INDIGO
+            } else {
+                ident(c, conn).unwrap_or(BLUE)
+            };
+            l.meter = Some((left, col));
+            let mut items = Vec::new();
+            if let Some(u) = f.extra.get("total_usage") {
+                items.push((trim_cents(u), "Used".to_string()));
+            }
+            if let Some(t) = f.extra.get("total_credits") {
+                items.push((trim_cents(t), "Limit".to_string()));
+            }
+            items.push((format!("{:.0}%", left * 100.0), "Left".to_string()));
+            l.detail = Detail2::Credits(items);
+        }
+        l
     };
     if compactish(sh) {
-        let mut s = Sum::new(Vis::Badge(*badge), short, if tokens { "tokens today".to_string() } else { f.caption.clone() });
-        s.meter = Some((frac, CLAUDE));
-        if sh == Shape::Small && f.series.len() > 2 {
-            s.series = f.series.clone();
-        }
-        compact_sum(c, &s, sh);
+        look.compact(c, sh);
         return;
     }
-    let value = if tokens { format!("{short} tokens") } else { short };
-    c.badge(badge, 16.0, 16.0, 36.0);
-    c.tw(def.name, 64.0, 15.0, 12.5, 600, c.text2(), c.w - 80.0);
-    c.num(&value, 64.0, 32.0, 19.0, 600, c.text1());
-    c.bar(16.0, 70.0, c.w - 32.0, 6.0, frac, CLAUDE);
-    c.tw(&meter_label, 16.0, 78.0, 10.0, 400, c.text3(), c.w - 32.0);
-    if let Some(cost) = f.extra.get("cost_today_usd").and_then(|v| v.parse::<f64>().ok()) {
-        c.tr(&format!("≈ {}", money(cost, None)), c.w - 16.0, 20.0, 11.0, 400, c.text3());
-    }
+    look.glance(c, x, sh == Shape::Large);
     if sh == Shape::Large {
-        details(c, &f, CLAUDE);
+        look.detail(c, out, x, open);
+    }
+}
+
+// ------------------------------------------------------------------ Chart (Header)
+
+/// How a Chart face plots its series.
+#[derive(Clone, Copy, PartialEq)]
+enum Plot {
+    /// Daily quantities: bars from zero (revenue, visitors, tokens, requests).
+    Bars,
+    /// A running total that ends at the headline (month-to-date spend).
+    Cumulative,
+    /// A price: a line, with a dashed reference at the period's start.
+    Quote(f64),
+}
+
+struct ChartLook {
+    badge: Badge,
+    /// Header title (the only naming on the card), and the line under it.
+    title: String,
+    sub: String,
+    /// Small's header label ("30 days").
+    period: String,
+    value: String,
+    mini: String,
+    dock_cap: String,
+    /// Dock M shows the change after the caption (prices).
+    inline_delta: bool,
+    delta: Option<f64>,
+    col: Col,
+    tint: Option<Col>,
+    plot: Plot,
+    series: Vec<f64>,
+    footer: Vec<(String, String)>,
+}
+
+impl ChartLook {
+    /// What the plot draws: the running total for Cumulative, else the series.
+    fn plotted(&self) -> Vec<f64> {
+        match self.plot {
+            Plot::Cumulative => self
+                .series
+                .iter()
+                .scan(0.0, |acc, v| {
+                    *acc += if v.is_finite() { *v } else { 0.0 };
+                    Some(*acc)
+                })
+                .collect(),
+            _ => self.series.clone(),
+        }
+    }
+
+    /// The plot in a box (bars on a baseline, or a line with its end dot).
+    fn plot(&self, c: &Canvas, x: f32, y: f32, w: f32, h: f32, compact: bool) {
+        let vals = self.plotted();
+        match self.plot {
+            Plot::Bars => day_bars(c, x, y, w, h, &vals, self.col, true),
+            Plot::Cumulative | Plot::Quote(_) => {
+                let stroke = if h >= 40.0 { style::STROKE } else { style::STROKE_SPARK };
+                if let Plot::Quote(r) = self.plot {
+                    if let Some(ry) = chart_y(&vals, y, h, stroke, true, r) {
+                        dashed(c, x, x + w - style::CHART_DOT - 1.5, ry.round() + 0.5, alpha(c.text3(), 0.6));
+                    }
+                } else if !compact {
+                    base_line(c, x, w, y + h);
+                }
+                let vals = if compact { thin(&vals, 24) } else { vals };
+                c.chart(x, y, w, h, &vals, line_col(c, self.col), ChartOpts { fill: true, dot: true, stroke, smooth: vals.len() >= 5 });
+            }
+        }
+    }
+}
+
+fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badge) -> ChartLook {
+    let v = f.value.unwrap_or(0.0);
+    let cur = f.currency.as_deref();
+    let s = &f.series;
+    let last = s.last().copied().unwrap_or(0.0);
+    let symbol = f.extra.get("symbol").cloned();
+    let caption = if f.caption.is_empty() { "Last 30 days".to_string() } else { f.caption.clone() };
+    let mut l = ChartLook {
+        badge: *badge,
+        title: def.name.trim_end_matches(" Chart").to_string(),
+        sub: caption.clone(),
+        period: period_of(&caption),
+        value: headline(f),
+        mini: if cur.is_some() { mini_money(v, cur) } else { compact_tight(v) },
+        dock_cap: caption.clone(),
+        inline_delta: false,
+        delta: f.delta_pct,
+        col: ident(c, conn).unwrap_or_else(|| trend_col(f.delta_pct)),
+        tint: ident(c, conn),
+        plot: Plot::Bars,
+        series: s.clone(),
+        footer: Vec::new(),
+    };
+    let fmt = |v: f64| if cur.is_some() { money(v, cur) } else { compact(v) };
+    if !s.is_empty() {
+        l.footer = vec![(fmt(last), "Today".into()), (fmt(mean(s)), "Daily avg".into()), (fmt(max_of(s)), "Best day".into())];
+    }
+    match conn {
+        "claude_code" => {
+            let n = s.len();
+            let total: f64 = s.iter().sum();
+            l.title = def.name.to_string();
+            l.sub = format!("{n} days");
+            l.period = l.sub.clone();
+            l.dock_cap = l.sub.clone();
+            l.value = compact(total);
+            l.mini = compact_tight(total);
+            if !s.is_empty() {
+                l.footer = vec![(compact(last), "Today".into()), (compact(mean(s)), "Daily avg".into()), (compact(max_of(s)), "Peak".into())];
+            }
+        }
+        "anthropic" | "openai" => {
+            l.title = def.name.to_string();
+            l.plot = Plot::Cumulative;
+            l.period = caption.clone();
+            let days = s.len().max(1) as f64;
+            let in_month = match x.now.month {
+                2 if x.now.year % 4 == 0 && (x.now.year % 100 != 0 || x.now.year % 400 == 0) => 29.0,
+                2 => 28.0,
+                4 | 6 | 9 | 11 => 30.0,
+                _ => 31.0,
+            };
+            let avg = v / days;
+            l.footer = vec![(money(last, cur), "Today".into()), (money(avg, cur), "Daily avg".into()), (money(avg * in_month, cur), "Projected".into())];
+        }
+        "plausible" | "umami" => {
+            l.title = "Visitors".into();
+            l.value = super::grouped(v.round() as i64);
+            l.dock_cap = "Visitors".into();
+            l.footer = vec![(super::grouped(last as i64), "Today".into()), (super::grouped(mean(s).round() as i64), "Daily avg".into()), (super::grouped(max_of(s) as i64), "Best day".into())];
+        }
+        "supabase" => {
+            l.title = "API requests".into();
+            l.sub = l.period.clone();
+            l.dock_cap = "API requests".into();
+            l.footer = vec![(compact(last), "Latest".into()), (compact(mean(s)), "Average".into()), (compact(max_of(s)), "Peak".into())];
+        }
+        "stocks" | "crypto" => {
+            let sym = symbol.unwrap_or_else(|| l.title.clone());
+            let name = f.extra.get("name").cloned().or_else(|| Some(f.caption.clone()).filter(|c| !c.is_empty() && *c != sym));
+            l.title = sym.clone();
+            l.sub = name.unwrap_or_default();
+            l.value = quote(v, cur);
+            l.dock_cap = sym.clone();
+            l.inline_delta = true;
+            let first = s.first().copied().unwrap_or(v);
+            if conn == "stocks" {
+                l.period = "Today".into();
+                let prev = f.delta_pct.map(|d| v / (1.0 + d / 100.0)).unwrap_or(first);
+                l.plot = Plot::Quote(prev);
+                l.footer = vec![(quote(prev, cur), "Prev close".into()), (quote(max_of(s).max(v), cur), "Day high".into()), (quote(min_of(s).min(v), cur), "Day low".into())];
+            } else {
+                l.period = "24 hours".into();
+                l.badge = letter_badge(badge, &sym);
+                l.plot = Plot::Quote(first);
+                l.footer = vec![(quote(max_of(s).max(v), cur), "24h high".into()), (quote(min_of(s).min(v), cur), "24h low".into()), (quote(first, cur), "24h open".into())];
+            }
+            if s.is_empty() {
+                l.footer.clear();
+            }
+        }
+        _ => {}
+    }
+    l
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
+    let g = got(x, conn);
+    // The loading skeleton names the card the way the loaded header will.
+    let title = match conn {
+        "plausible" | "umami" => "Visitors".to_string(),
+        "supabase" => "API requests".to_string(),
+        "claude_code" | "anthropic" | "openai" => def.name.to_string(),
+        _ => match &g {
+            Got::Feed(f) => f.extra.get("symbol").cloned().unwrap_or_else(|| def.name.trim_end_matches(" Chart").to_string()),
+            _ => def.name.trim_end_matches(" Chart").to_string(),
+        },
+    };
+    if placeholder_tpl(c, out, def.name, badge, conn, &g, sh, &Tpl::Header(title)) {
+        return;
+    }
+    let Got::Feed(f) = g else { return };
+    open_hit(out, c, open);
+    let l = chart_look(c, def, x, conn, &f, badge);
+    match sh {
+        Shape::Mini | Shape::Dock => {
+            let mut s = Sum::new(Vis::Badge(l.badge), l.value.clone(), l.dock_cap.clone());
+            s.mini = Some(l.mini.clone());
+            s.delta = l.delta;
+            s.series = l.plotted();
+            s.tint = l.tint;
+            s.bars = l.plot == Plot::Bars && s.series.len() <= 16;
+            s.inline_delta = l.inline_delta;
+            compact_sum(c, &s, sh);
+        }
+        Shape::Small => {
+            // Chart-led: badge, period and change on top, the value, then the chart.
+            let m = style::M_SMALL;
+            let bs = style::BADGE_HEADER;
+            let right = c.w - m;
+            c.badge(&l.badge, m, m, bs);
+            let lx = m + bs + style::SP[2];
+            let fs = style::FOOT.size;
+            let dw = match l.delta {
+                Some(d) => {
+                    let (t, col) = fmt_delta(c, d);
+                    c.text_base(&t, right, 28.0, fs, 600, col, Align::Right, right - lx) + style::SP[2]
+                }
+                None => 0.0,
+            };
+            // The period beside the change; its short form ("30d") when both won't fit.
+            let avail = right - lx - dw;
+            let period = if c.measure(&l.period, fs, 400, Font::Text).0 <= avail { l.period.clone() } else { short_period(&l.period) };
+            c.text_base(&period, lx, 28.0, fs, 400, c.text2(), Align::Left, avail);
+            let (v, vfs) = fit_value(c, &l.value, style::HERO_S, right - m);
+            c.text_base(&v, m, 62.0, vfs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
+            if l.series.len() > 1 {
+                l.plot(c, m, 72.0, right - m, c.h - m - 72.0, true);
+            }
+        }
+        _ => {
+            // Header: badge, title and value on one baseline; the period (or the name)
+            // and the change under them; the plot below.
+            let m = style::M_CARD;
+            let bs = style::BADGE_HEADER;
+            let right = c.w - m;
+            c.badge(&l.badge, m, m, bs);
+            let tx = m + bs + style::SP[3];
+            let (v, vfs) = fit_value(c, &l.value, style::VALUE, (right - tx) * 0.5);
+            let vw = c.text_base(&v, right, style::HEADER_BASE, vfs, style::VALUE.weight, c.text1(), Align::Right, c.w);
+            c.text_base(&l.title, tx, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, right - vw - style::SP[5] - tx);
+            let line2 = style::HEADER_BASE + 14.0;
+            let fs = style::FOOT.size;
+            let dw = match l.delta {
+                Some(d) => {
+                    let (t, col) = fmt_delta(c, d);
+                    c.text_base(&t, right, line2, fs, 600, col, Align::Right, c.w) + style::SP[5]
+                }
+                None => 0.0,
+            };
+            c.text_base(&l.sub, tx, line2, fs, 400, c.text2(), Align::Left, right - dw - tx);
+            let large = sh == Shape::Large;
+            if l.series.len() < 2 {
+                c.text_base("No chart data yet", m, 70.0, style::CAPTION.size, 400, c.text3(), Align::Left, right - m);
+                return;
+            }
+            let week = conn == "claude_code" && large && l.series.len() <= 16;
+            let bottom = if !large {
+                c.h - m
+            } else if week {
+                HDR_PLOT_BOTTOM_L - style::SP[3]
+            } else {
+                HDR_PLOT_BOTTOM_L
+            };
+            l.plot(c, m, HDR_PLOT_TOP, right - m, bottom - HDR_PLOT_TOP, false);
+            if week {
+                // Weekday letters under the bars; today's in the bar colour.
+                let n = l.series.len();
+                let pitch = (right - m) / n as f32;
+                for i in 0..n {
+                    let wd = (x.now.weekday as usize + 7 * 3 - (n - 1 - i)) % 7;
+                    let col = if i + 1 == n { line_col(c, l.col) } else { c.text3() };
+                    c.text_base(&"SMTWTFS"[wd..wd + 1], m + pitch * (i as f32 + 0.5), HDR_PLOT_BOTTOM_L + style::SP[2], style::MICRO.size, style::MICRO.weight, col, Align::Center, pitch);
+                }
+            }
+            if large {
+                stats_row(c, &l.footer, HDR_FOOT_BASE);
+            }
+        }
     }
 }
 

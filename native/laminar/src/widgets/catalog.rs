@@ -258,7 +258,7 @@ use Cat::*;
 
 // Service marks: original letter/glyph tiles in each service's colours (not their logos).
 const B_CLAUDE: Badge = mono("C", 0xD97757, 0xFFFFFF);
-const B_OPENAI: Badge = mono("AI", 0x10A37F, 0xFFFFFF);
+const B_OPENAI: Badge = mono("O", 0x10A37F, 0xFFFFFF);
 const B_CODEX: Badge = gly("\u{E943}", 0x1F1F24, 0xFFFFFF);
 const B_OPENROUTER: Badge = mono("OR", 0x6467F2, 0xFFFFFF);
 const B_CURSOR: Badge = gly("\u{E7C9}", 0x111114, 0xFFFFFF);
@@ -283,7 +283,7 @@ const B_X: Badge = mono("X", 0x000000, 0xFFFFFF);
 const B_TIKTOK: Badge = gly("\u{E8D6}", 0x000000, 0xFFFFFF);
 const B_YOUTUBE: Badge = gly("\u{E768}", 0xFF0033, 0xFFFFFF);
 const B_INSTAGRAM: Badge = gly("\u{E722}", 0xD62976, 0xFFFFFF);
-const B_STOCKS: Badge = gly("\u{E9D2}", 0x1F2A1F, 0x34C759);
+const B_STOCKS: Badge = gly("\u{E9D2}", 0x24331F, 0x34C759);
 const B_CRYPTO: Badge = mono("₿", 0xF7931A, 0xFFFFFF);
 const B_CPU: Badge = gly("\u{E950}", 0x2C2C34, 0x0A84FF);
 const B_MEM: Badge = gly("\u{E964}", 0x2C2C34, 0xBF5AF2);

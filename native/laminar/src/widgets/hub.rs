@@ -493,39 +493,92 @@ pub fn sample(conn: &str) -> Feed {
         series: walk(s, 30, v / 30.0, v / 40.0, v / 900.0),
         ..Default::default()
     };
+    let ex = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<std::collections::BTreeMap<_, _>>();
+    // A daily series scaled so it adds up to `total` (month-to-date spend, two weeks of tokens).
+    let summing = |s: &str, n: usize, total: f64| {
+        let w = walk(s, n, 10.0, 6.0, 0.15);
+        let sum: f64 = w.iter().sum();
+        w.iter().map(|v| (v * total / sum * 100.0).round() / 100.0).collect::<Vec<f64>>()
+    };
     let mut f = match conn {
         "stripe" => money(5336.0, conn),
         "lemonsqueezy" => money(3630.0, conn),
         "paddle" => money(2970.0, conn),
         "shopify" => money(17491.0, conn),
         "gumroad" => money(1407.0, conn),
-        "polar" => money(1613.0, conn),
-        "revenuecat" => Feed { value: Some(6807.0), currency: Some("USD".into()), caption: "MRR".into(), extra: [("active_subscriptions".to_string(), "812".to_string())].into(), ..Default::default() },
-        "anthropic" => Feed { value: Some(83.46), currency: Some("USD".into()), caption: "This month".into(), series: walk(conn, 14, 6.0, 4.0, 0.1), ..Default::default() },
-        "openai" => Feed { value: Some(41.20), currency: Some("USD".into()), caption: "This month".into(), series: walk(conn, 14, 3.0, 2.5, 0.05), ..Default::default() },
-        "openrouter" => Feed { value: Some(18.4), currency: Some("USD".into()), caption: "Credits left".into(), frac: Some(0.63), extra: [("total_credits".to_string(), "50".to_string())].into(), ..Default::default() },
-        "cursor" => Feed { value: Some(126.0), currency: Some("USD".into()), caption: "This cycle".into(), ..Default::default() },
-        "claude_code" | "codex" => Feed {
-            value: Some(if conn == "codex" { 412_000.0 } else { 1_920_000.0 }),
-            unit: "tokens".into(),
-            caption: "Today".into(),
-            frac: Some(0.19),
-            series: walk(conn, 14, 900_000.0, 700_000.0, 20_000.0),
-            extra: [("tokens_5h".to_string(), "380000".to_string()), ("tokens_week".to_string(), "9400000".to_string())].into(),
+        // Seeded so the sample trends up, matching its +12.4%.
+        "polar" => money(1613.0, "polar-up"),
+        "revenuecat" => Feed {
+            value: Some(6807.0),
+            currency: Some("USD".into()),
+            caption: "MRR".into(),
+            extra: ex(&[("active_subscriptions", "812"), ("active_trials", "34"), ("revenue", "$5,000"), ("new_customers", "41"), ("active_users", "2,140")]),
             ..Default::default()
         },
-        "plausible" | "umami" => Feed { value: Some(4012.0), unit: "visitors".into(), caption: "Last 30 days".into(), delta_pct: Some(8.1), series: walk(conn, 30, 130.0, 60.0, 1.0), ..Default::default() },
-        "search_console" => Feed { value: Some(834.0), unit: "clicks".into(), caption: "Last 28 days".into(), delta_pct: Some(18.0), series: walk(conn, 28, 30.0, 12.0, 0.3), ..Default::default() },
-        "supabase" => Feed { value: Some(41_800.0), unit: "requests".into(), caption: "Last 24 hours".into(), series: walk(conn, 24, 1700.0, 600.0, 10.0), ..Default::default() },
-        "resend" => Feed { value: Some(1208.0), unit: "emails".into(), caption: "Emails sent".into(), delta_pct: Some(4.0), ..Default::default() },
-        "gmail" => Feed { value: Some(12.0), caption: "Unread".into(), rows: vec![row("Your invoice is ready", "", 0.0), row("Team sync notes", "", 0.0)], ..Default::default() },
-        "x" => Feed { value: Some(2400.0), caption: "Followers".into(), ..Default::default() },
-        "tiktok" => Feed { value: Some(8900.0), caption: "Followers".into(), ..Default::default() },
-        "youtube" => Feed { value: Some(12_400.0), caption: "Subscribers".into(), ..Default::default() },
-        "instagram" => Feed { value: Some(21_700.0), caption: "Followers".into(), ..Default::default() },
+        "anthropic" => Feed { value: Some(83.46), currency: Some("USD".into()), caption: "This month".into(), series: summing(conn, 16, 83.46), ..Default::default() },
+        "openai" => Feed { value: Some(41.20), currency: Some("USD".into()), caption: "This month".into(), series: summing(conn, 16, 41.20), ..Default::default() },
+        "openrouter" => Feed {
+            value: Some(18.4),
+            currency: Some("USD".into()),
+            caption: "Credits left".into(),
+            frac: Some(0.632),
+            extra: ex(&[("total_credits", "$50.00"), ("total_usage", "$31.60")]),
+            ..Default::default()
+        },
+        "cursor" => Feed {
+            value: Some(126.0),
+            currency: Some("USD".into()),
+            caption: "This cycle".into(),
+            rows: vec![row("Dave", "$58.20", 0.46), row("Sam Lee", "$26.80", 0.21), row("Priya", "$24.10", 0.19), row("Alex", "$16.90", 0.13)],
+            extra: ex(&[("on_demand", "$24.50"), ("cycle_start", "2026-10-27"), ("members", "4")]),
+            ..Default::default()
+        },
+        "claude_code" | "codex" => {
+            let today = if conn == "codex" { 412_000.0 } else { 1_920_000.0 };
+            let mut series = walk(conn, 14, today * 0.45, today * 0.35, today * 0.012);
+            series[13] = today;
+            Feed {
+                value: Some(today),
+                unit: "tokens".into(),
+                caption: "Today".into(),
+                series,
+                extra: ex(&[("tokens_5h", "380000"), ("tokens_week", "9400000")]),
+                ..Default::default()
+            }
+        }
+        "plausible" | "umami" => Feed { value: Some(4012.0), unit: "visitors".into(), caption: "Last 30 days".into(), delta_pct: Some(8.1), series: summing(conn, 30, 4012.0).iter().map(|v| v.round()).collect(), ..Default::default() },
+        "search_console" => Feed {
+            value: Some(834.0),
+            unit: "clicks".into(),
+            caption: "Clicks, 28 days".into(),
+            series: walk(conn, 28, 26.0, 10.0, 0.4),
+            extra: ex(&[("impressions", "21,480"), ("ctr", "3.9%"), ("position", "14.2")]),
+            ..Default::default()
+        },
+        "supabase" => Feed { value: Some(41_800.0), unit: "requests".into(), caption: "API requests, 7 days".into(), series: summing("supabase-up", 28, 41_800.0).iter().map(|v| v.round()).collect(), ..Default::default() },
+        "resend" => Feed { value: Some(1208.0), unit: "emails".into(), caption: "Emails sent".into(), series: walk(conn, 30, 36.0, 22.0, 0.3), ..Default::default() },
+        "gmail" => Feed {
+            value: Some(12.0),
+            caption: "Unread".into(),
+            rows: vec![row("Your invoice is ready", "Northwind", 0.0), row("Team sync notes", "Sam Lee", 0.0), row("Flight check-in is open", "Contoso Air", 0.0)],
+            extra: ex(&[("total", "1,204"), ("threads_unread", "11")]),
+            ..Default::default()
+        },
+        "x" => Feed { value: Some(2400.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "Laminar"), ("posts", "1,204"), ("following", "318")]), ..Default::default() },
+        "tiktok" => Feed { value: Some(8900.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "Laminar Dock"), ("likes", "142K"), ("videos", "86"), ("following", "41")]), ..Default::default() },
+        "youtube" => Feed { value: Some(12_400.0), unit: "subscribers".into(), caption: "Subscribers".into(), extra: ex(&[("name", "Laminar"), ("views", "1.2M"), ("videos", "64")]), ..Default::default() },
+        "instagram" => Feed { value: Some(21_700.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "@laminar"), ("posts", "312")]), ..Default::default() },
         "github" | "leetcode" => {
             let mut r = rng(conn);
-            let grid: Vec<f32> = (0..371).map(|_| { let v = r(); if v < 0.35 { 0.0 } else { (v as f32 - 0.35) / 0.65 } }).collect();
+            let mut grid: Vec<f32> = (0..371).map(|_| { let v = r(); if v < 0.35 { 0.0 } else { (v as f32 - 0.35) / 0.65 } }).collect();
+            if conn == "github" {
+                // The sample's 7-day streak: the last seven days active, the one before not.
+                let n = grid.len();
+                for v in grid[n - 7..].iter_mut() {
+                    *v = v.max(0.4);
+                }
+                grid[n - 8] = 0.0;
+            }
             Feed {
                 value: Some(if conn == "github" { 1186.0 } else { 312.0 }),
                 caption: if conn == "github" { "Contributions this year".into() } else { "Problems solved".into() },
@@ -548,7 +601,7 @@ pub fn sample(conn: &str) -> Feed {
                 FeedRow { label: "NVDA".into(), value: "$142.09".into(), frac: None, delta: Some(2.11) },
                 FeedRow { label: "TSLA".into(), value: "$248.31".into(), frac: None, delta: Some(1.42) },
             ],
-            extra: [("symbol".to_string(), "TSLA".to_string())].into(),
+            extra: ex(&[("symbol", "TSLA"), ("name", "Tesla, Inc.")]),
             ..Default::default()
         },
         "crypto" => Feed {
@@ -556,7 +609,7 @@ pub fn sample(conn: &str) -> Feed {
             currency: Some("USD".into()),
             delta_pct: Some(2.3),
             series: walk(conn, 96, 94_000.0, 500.0, 25.0),
-            extra: [("symbol".to_string(), "BTC".to_string())].into(),
+            extra: ex(&[("symbol", "BTC"), ("name", "Bitcoin")]),
             ..Default::default()
         },
         "calendar" => Feed {
