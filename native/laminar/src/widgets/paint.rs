@@ -347,6 +347,28 @@ fn pill_button(c: &Canvas, out: &mut Painted, x: f32, y: f32, w: f32, h: f32, la
     out.hits.push(((x, y, w, h), act));
 }
 
+/// The fill of every level control (brightness, volume): a neutral level, text1 in dark
+/// (a lit white) and text2 in light (a calm graphite). Blue is kept for on/off (§2.3).
+fn level_fill(c: &Canvas) -> Col {
+    if c.light {
+        c.text2()
+    } else {
+        c.text1()
+    }
+}
+
+/// The one level slider: BTN_SECONDARY (28) tall, fully round, a plate track, the level
+/// fill, and `glyph` at Caption size in the card colour inside the fill's start. Its hit
+/// area spans the track, so a click sets the level at that point.
+#[allow(clippy::too_many_arguments)]
+fn slider(c: &Canvas, out: &mut Painted, x: f32, y: f32, w: f32, level: f32, glyph: &str, act: WAct) {
+    let h = style::BTN_SECONDARY;
+    c.rr(x, y, w, h, h / 2.0, c.plate());
+    c.rr(x, y, (w * level.clamp(0.0, 1.0)).max(h), h, h / 2.0, level_fill(c));
+    c.glyph(glyph, x + h / 2.0, y + h / 2.0, style::CAPTION.size, c.halo());
+    out.hits.push(((x, y - style::SP[1], w, h + style::SP[3]), act));
+}
+
 /// What a face shows at a glance.
 #[derive(Clone)]
 enum Vis {
@@ -1843,7 +1865,11 @@ fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look
                         let week: f64 = s.iter().rev().take(7).sum();
                         vec![(super::grouped(s[s.len() - 1] as i64), "Today".into()), (super::grouped(week as i64), "7 days".into()), (compact(mean(s)), "Daily avg".into())]
                     }
-                    _ => Vec::new(),
+                    // One Large recipe across families (§3 detail order): the history chart,
+                    // then the same three numbers the -chart variants compute.
+                    "plausible" | "umami" => vec![(super::grouped(s[s.len() - 1] as i64), "Today".into()), (super::grouped(mean(s).round() as i64), "Daily avg".into()), (super::grouped(max_of(s) as i64), "Best day".into())],
+                    _ if cur.is_some() => vec![(money(s[s.len() - 1], cur), "Today".into()), (money(mean(s), cur), "Daily avg".into()), (money(max_of(s), cur), "Best day".into())],
+                    _ => vec![(compact(s[s.len() - 1]), "Today".into()), (compact(mean(s)), "Daily avg".into()), (compact(max_of(s)), "Best day".into())],
                 };
                 if !items.is_empty() {
                     l.detail = Detail2::ChartFooter(items);
@@ -1948,7 +1974,9 @@ fn usage(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
         }
         if l.series.len() > 2 {
             l.boxed = Boxed::Spark;
-            l.detail = Detail2::Chart(Some(format!("{} days ago", l.series.len() - 1)));
+            // The history chart over the three-stat footer, like every Glance Large.
+            let s = &l.series;
+            l.detail = Detail2::ChartFooter(vec![(compact(s[s.len() - 1]), "Today".into()), (compact(mean(s)), "Daily avg".into()), (compact(max_of(s)), "Peak".into())]);
         }
         l
     } else {
@@ -2314,9 +2342,10 @@ enum RdAcc {
     Stack(Vec<(f32, Col)>, String),
     /// A status dot and a label.
     Dot(Col, String),
-    /// The last 7 days as heat cells over weekday initials: values (oldest first), colour,
-    /// today's weekday (0 = Sunday).
-    Week(Vec<f32>, Col, usize),
+    /// The last 7 days as heat cells: values (oldest first), colour, today's weekday
+    /// (0 = Sunday), and a label over the cells ("7-day streak"); with no label the cells
+    /// sit over weekday initials.
+    Week(Vec<f32>, Col, usize, String),
     /// A label (11 text2) over a sparkline in the colour (1.5 stroke, no fill).
     Spark(Vec<f64>, Col, String),
 }
@@ -2445,16 +2474,22 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: RdAcc) {
             c.text_base(&label, r, 24.0 * k, fs11, 400, c.text2(), Align::Right, slot_w);
             c.chart(slot_x, 30.0 * k, slot_w, 10.0 * k, &vals, col, ChartOpts { fill: false, dot: false, stroke: style::STROKE_SPARK * k, smooth: vals.len() >= 8 });
         }
-        RdAcc::Week(vals, col, today) => {
+        RdAcc::Week(vals, col, today, label) => {
             let (cell, gap) = (8.0 * k, 2.5 * k);
             let n = vals.len().min(7);
+            let top = if label.is_empty() { 18.0 * k } else { 31.0 * k };
+            if !label.is_empty() {
+                c.text_base(&label, r, 25.0 * k, fs11, 400, c.text2(), Align::Right, slot_w);
+            }
             for i in 0..7usize {
                 let cx = r - (7 - i) as f32 * (cell + gap) + gap;
                 let v = if i + n >= 7 { vals[vals.len() + i - 7] } else { 0.0 };
-                c.rr(cx, 18.0 * k, cell, cell, 2.0 * k, rd_heat_fill(c, v, col));
-                let wd = (today + 1 + i) % 7;
-                let ink = if i == 6 { c.text1() } else { c.text3() };
-                c.text_base(&"SMTWTFS"[wd..wd + 1], cx + cell / 2.0, 38.0 * k, style::MICRO.size * k, 600, ink, Align::Center, cell * 2.0);
+                c.rr(cx, top, cell, cell, 2.0 * k, rd_heat_fill(c, v, col));
+                if label.is_empty() {
+                    let wd = (today + 1 + i) % 7;
+                    let ink = if i == 6 { c.text1() } else { c.text3() };
+                    c.text_base(&"SMTWTFS"[wd..wd + 1], cx + cell / 2.0, 38.0 * k, style::MICRO.size * k, 600, ink, Align::Center, cell * 2.0);
+                }
             }
         }
     }
@@ -2603,8 +2638,8 @@ fn rd_row(c: &Canvas, out: &mut Painted, r: &LRow, base: f32, pitch: f32) {
             m + RD_DOT + dot_gap
         }
         Lead::Bar(col) => {
-            c.rr(m, cy - 7.0, 3.0, 14.0, 1.5, col);
-            m + 3.0 + style::SP[2]
+            c.rr(m, cy - 6.5, 3.0, 13.0, 1.5, col);
+            m + EV_TEXT
         }
         Lead::Glyph(g) => {
             let gs = if small { 14.0 } else { 16.0 };
@@ -2878,7 +2913,7 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
     let col = f.map(|_| color);
     let count = f.and_then(|f| f.value).map(|v| super::grouped(v.round() as i64));
     let streak = f.and_then(|f| f.extra.get("streak")).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-    let caption = if streak > 0 { format!("{streak}-day streak") } else { unit.to_string() };
+    let streak_s = if streak > 0 { format!("{streak}-day streak") } else { String::new() };
     match sh {
         Shape::Mini => {
             // Visual-led: the last 7 weeks as a 7×7 block.
@@ -2889,8 +2924,9 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
         }
         Shape::Dock => match &count {
             Some(v) => {
+                // The caption says what the number is; the streak labels Dock L's week.
                 let last: Vec<f32> = grid.iter().rev().take(7).rev().copied().collect();
-                rd_dock(c, &Vis::Badge(*badge), DockText::new(v, &caption), RdAcc::Week(last, color, today));
+                rd_dock(c, &Vis::Badge(*badge), DockText::new(v, unit), RdAcc::Week(last, color, today, streak_s.clone()));
             }
             None => {
                 let k = c.h / 54.0;
@@ -2901,41 +2937,58 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
             }
         },
         Shape::Small => {
+            // The Small chart pattern (stripe-chart, plausible-chart): badge and context on
+            // the top line, the count as the hero, the heat map under it to the margin.
             let m = style::M_SMALL;
             let bs = style::BADGE_HEADER;
             c.badge(badge, m, m, bs);
-            let tx = m + bs + style::SP[2];
+            let lx = m + bs + style::SP[1];
+            let fs = style::FOOT.size;
             match &count {
                 Some(v) => {
-                    c.text_base(v, tx, m + bs / 2.0 + c.cap_h(style::TITLE.size) / 2.0, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tx);
-                    c.text_base(&caption, m, 106.0, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+                    // "contributions" says what the hero is; the streak follows when it fits.
+                    let top = if streak > 0 { fit_label(c, &[format!("{unit} · {streak}d streak"), unit.to_string()], fs, 400, c.w - m - lx) } else { unit.to_string() };
+                    c.text_base(&top, lx, 28.0, fs, 400, c.text2(), Align::Left, c.w - m - lx);
+                    let (v, vfs) = fit_value(c, v, style::HERO_S, c.w - 2.0 * m);
+                    c.text_base(&v, m, 62.0, vfs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
                 }
                 None => {
-                    skeleton(c, tx, m + bs / 2.0 - 5.0, 40.0, 10.0);
-                    skeleton(c, m, 106.0 - 8.0, 40.0, 8.0);
+                    skeleton(c, lx, 28.0 - 8.0, 52.0, 8.0);
+                    let ch = c.cap_h(style::HERO_S.size);
+                    skeleton(c, m, 62.0 - ch, 56.0, ch);
                 }
             }
-            rd_heat_cells(c, grid, today, c.w - m, 40.0, 13, 5.5, style::HEAT_GAP, 1.5, col);
+            // 7 rows from y 72 to the bottom margin, as many weeks as fill the width.
+            let gap = 1.5;
+            let cell = ((c.h - m - 72.0) - 6.0 * gap) / 7.0;
+            let weeks = ((c.w - 2.0 * m + gap) / (cell + gap)).floor() as usize;
+            rd_heat_cells(c, grid, today, c.w - m, 72.0, weeks, cell, gap, 1.0, col);
         }
         _ => {
+            // Glance grid: hero 32 at cap top 16, caption at 58, the heat map in the right
+            // block, and the identity (badge 16) with the streak on the third line.
             let m = style::M_CARD;
-            c.badge(badge, m, m, style::BADGE_HEADER);
             match &count {
                 Some(v) => {
-                    let (v, fs) = fit_value(c, v, style::HERO_S, 80.0);
-                    c.text_base(&v, m, 58.0, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w);
-                    c.text_base(unit, m, 74.0, style::CAPTION.size, 400, c.text2(), Align::Left, 80.0);
+                    let (v, fs) = fit_value(c, v, style::HERO, 108.0);
+                    c.text_cap(&v, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
+                    c.text_base(unit, m, 58.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, 108.0);
                 }
                 None => {
-                    let ch = c.cap_h(style::HERO_S.size);
-                    skeleton(c, m, 58.0 - ch, 48.0, ch);
-                    skeleton(c, m, 74.0 - 8.0, 40.0, 8.0);
+                    let ch = c.cap_h(style::HERO.size);
+                    skeleton(c, m, m, 64.0, ch);
+                    skeleton(c, m, 58.0 - 8.0, 40.0, 8.0);
                 }
             }
-            // 16 weeks, today on the right margin, centred in the 16…80 band.
+            let ibs = 16.0;
+            c.badge(badge, m, 76.0 - c.cap_h(style::FOOT.size) / 2.0 - ibs / 2.0, ibs);
+            let third = if f.is_none() { String::new() } else if streak > 0 { streak_s.clone() } else { "No streak yet".to_string() };
+            c.text_base(&third, m + ibs + style::SP[2], 76.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, 108.0 - ibs);
+            // Right block x 132…252, y 16…80: 7 rows, today on the right margin.
             let (cell, gap) = (7.0, style::HEAT_GAP);
             let gh = 7.0 * cell + 6.0 * gap;
-            rd_heat_cells(c, grid, today, c.w - m, m + (style::SEP_Y_LARGE - 2.0 * m - gh) / 2.0, 16, cell, gap, 2.0, col);
+            let weeks = ((c.w - m - 132.0 + gap) / (cell + gap)).floor() as usize;
+            rd_heat_cells(c, grid, today, c.w - m, m + (64.0 - gh) / 2.0, weeks, cell, gap, 2.0, col);
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
                 let Some(f) = f else {
@@ -2962,7 +3015,8 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
                         })
                         .collect();
                     rd_stats(c, &items, 136.0, 152.0, false);
-                    let foot = if streak > 0 { format!("{streak}-day streak · active {active} of the last 365 days") } else { format!("Active {active} of the last 365 days") };
+                    // The streak is already on the third line above.
+                    let foot = format!("Active {active} of the last 365 days");
                     rd_foot(c, &foot, "");
                 } else {
                     // GitHub Activity stays about contributions (GitHub Overview owns the
@@ -3207,7 +3261,7 @@ fn rd_list_model(c: &Canvas, conn: &str, f: &Feed, sh: Shape) -> LModel {
                 }
                 let trail = if large || is_today { rd_when_time(&r.value) } else { r.value.clone() };
                 let mut lr = LRow::new(&r.label, trail);
-                lr.lead = Lead::Bar(RED);
+                lr.lead = Lead::Bar(CAL);
                 if let (0, Some(m)) = (i, soon) {
                     if r.label == next_title {
                         lr.trail = format!("in {m}m");
@@ -3710,11 +3764,9 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
             }
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
-                let later: Vec<_> = after.iter().skip(if has { 1 } else { 0 }).take(3).collect();
+                let later: Vec<Ev> = after.iter().skip(if has { 1 } else { 0 }).take(3).map(|r| ev_from(&r.label, &r.value)).collect();
                 let b0 = style::DETAIL_TOP + c.cap_h(style::BODY.size);
-                for (i, r) in later.iter().enumerate() {
-                    rd_row(c, out, &LRow::new(&r.label, when_short(&r.value)), b0 + i as f32 * style::ROW_L, style::ROW_L);
-                }
+                event_rows(c, &later.iter().collect::<Vec<_>>(), b0, 3);
                 // The footnote closes the region at the bottom margin.
                 let n = f.value.unwrap_or(0.0) as i64;
                 let foot = if later.is_empty() && has && !after.is_empty() { "Nothing after that".to_string() } else if later.is_empty() { "Nothing else scheduled".to_string() } else if n == 1 { "1 event today".to_string() } else { format!("{n} events today") };
@@ -4299,15 +4351,18 @@ fn events(x: &Ctx) -> Option<Vec<Ev>> {
     Some(
         f.rows
             .iter()
-            .map(|r| {
-                let (day, time) = match r.value.split_once(' ') {
-                    Some((d, t)) if t.contains(':') && !d.contains(':') => (d.to_string(), t.to_string()),
-                    _ => (String::new(), r.value.clone()),
-                };
-                Ev { title: r.label.clone(), day, time }
-            })
+            .map(|r| ev_from(&r.label, &r.value))
             .collect(),
     )
+}
+
+/// A calendar feed row ("Design review", "Tue 9:00 AM") as an event.
+fn ev_from(label: &str, value: &str) -> Ev {
+    let (day, time) = match value.split_once(' ') {
+        Some((d, t)) if t.contains(':') && !d.contains(':') => (d.to_string(), t.to_string()),
+        _ => (String::new(), value.to_string()),
+    };
+    Ev { title: label.to_string(), day, time }
 }
 
 /// An event's time with its day unless it is today: "2:00 PM", "Tue 9:00 AM".
@@ -4447,10 +4502,6 @@ fn dial(c: &Canvas, cx: f32, cy: f32, r: f32, h: u32, m: u32, s: Option<u32>, da
             }
         }
     }
-    if let Some(code) = code {
-        let fs = style::MICRO.size * k;
-        c.text_cap(code, cx, cy + r * 0.42 - c.cap_h(fs) / 2.0, fs, style::MICRO.weight, alpha(ink, 0.55), Align::Center, r * 2.0);
-    }
     let hand = |deg: f32, len: f32, tail: f32, t: f32, col: Col| {
         let a = deg.to_radians();
         c.line(cx - tail * a.sin(), cy + tail * a.cos(), cx + len * a.sin(), cy - len * a.cos(), t, col);
@@ -4464,6 +4515,16 @@ fn dial(c: &Canvas, cx: f32, cy: f32, r: f32, h: u32, m: u32, s: Option<u32>, da
     c.circle(cx, cy, (r * 0.045).max(1.2), ORANGE);
     if r >= 40.0 {
         c.circle(cx, cy, r * 0.018, c.halo());
+    }
+    if let Some(code) = code {
+        // Over the hands, on a 1.5 px halo of the face colour, so the code always reads.
+        let fs = style::MICRO.size * k;
+        let ch = c.cap_h(fs);
+        let top = cy + r * 0.42 - ch / 2.0;
+        let w = c.measure(code, fs, style::MICRO.weight, Font::Text).0;
+        let hp = 1.5 * k;
+        c.rr(cx - w / 2.0 - hp, top - hp, w + 2.0 * hp, ch + 2.0 * hp, (ch / 2.0 + hp).min(3.0 * k), face);
+        c.text_cap(code, cx, top, fs, style::MICRO.weight, alpha(ink, 0.7), Align::Center, r * 2.0);
     }
 }
 
@@ -4593,6 +4654,13 @@ fn month_grid(c: &Canvas, n: &super::Now, x0: f32, w: f32, letter_base: f32, fir
         let today = i as u32 == n.weekday;
         c.text_base(d, x0 + colw * (i as f32 + 0.5), letter_base, style::MICRO.size, style::MICRO.weight, if today { RED } else { c.text3() }, Align::Center, colw);
     }
+    month_grid_numbers(c, n, x0, w, first_base, pitch, fs, weight, disc);
+}
+
+/// The day numbers of `month_grid` (no weekday letters).
+#[allow(clippy::too_many_arguments)]
+fn month_grid_numbers(c: &Canvas, n: &super::Now, x0: f32, w: f32, first_base: f32, pitch: f32, fs: f32, weight: u32, disc: f32) {
+    let colw = w / 7.0;
     let first = n.first_weekday();
     for day in 1..=n.days_in_month() {
         let idx = first + day - 1;
@@ -4696,7 +4764,7 @@ fn clock(c: &Canvas, out: &mut Painted, kind: ClockKind, x: &Ctx, sh: Shape) {
         ClockKind::Analog => analog(c, &t, sh),
         ClockKind::AnalogSquare => analog_square(c, &t, sh),
         ClockKind::Segment => segment(c, &t, sh),
-        ClockKind::Month => month(c, &t, sh),
+        ClockKind::Month => month(c, x, &t, sh),
     }
 }
 
@@ -4742,19 +4810,49 @@ fn dock_time(c: &Canvas, t: &Cl, x0: f32, caption: &str, right: f32) {
     c.text_base(caption, x0, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, right - x0);
 }
 
-/// Up to `max` event rows from baseline `base0`: time column, a calendar-colour bar, title.
-fn event_rows(c: &Canvas, evs: &[&Ev], base0: f32, max: usize) -> usize {
+/// Event rows (`event_row`) from baseline `base0`, one per ROW_L, using at most `slots`
+/// row slots; returns the slots used.
+fn event_rows(c: &Canvas, evs: &[&Ev], base0: f32, slots: usize) -> usize {
+    // Later days get a Micro day header ("Tuesday") when it and an event under it fit;
+    // otherwise the event carries its day in the time ("Tue 9:00 AM").
     let m = style::M_CARD;
-    let shown: Vec<&&Ev> = evs.iter().take(max).collect();
-    let tcol = shown.iter().map(|e| c.measure(&ev_when(e), style::FOOT.size, 500, Font::Text).0).fold(52.0f32, f32::max) + style::SP[3];
-    for (i, e) in shown.iter().enumerate() {
-        let base = base0 + i as f32 * style::ROW_L;
-        c.text_base(&ev_when(e), m, base, style::FOOT.size, 500, c.text2(), Align::Left, tcol);
-        let bx = m + tcol;
-        c.rr(bx, base - 11.0, 3.0, 13.0, 1.5, BLUE);
-        c.text_base(&e.title, bx + 8.0, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, c.w - m - bx - 8.0);
+    let mut last = String::from("today");
+    let mut i = 0;
+    for e in evs {
+        if i >= slots {
+            break;
+        }
+        let day = e.day.to_lowercase();
+        let later = !day.is_empty() && day != "today";
+        let mut time = e.time.clone();
+        if later && day != last {
+            if i + 2 <= slots {
+                c.text_base(&rd_day_full(&e.day), m, base0 + i as f32 * style::ROW_L, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, c.w - 2.0 * m);
+                i += 1;
+                last = day;
+            } else {
+                time = ev_when(e);
+            }
+        }
+        event_row(c, m, c.w - m, base0 + i as f32 * style::ROW_L, &e.title, &time, style::BODY.size);
+        i += 1;
     }
-    shown.len()
+    i
+}
+
+/// The calendar's one accent: event bars, the today circle, the calendar badge.
+const CAL: Col = RED;
+/// Where an event title starts after its bar (3 px bar, 6 px gap).
+const EV_TEXT: f32 = 3.0 + 6.0;
+
+/// The one calendar event row every calendar face uses: a 3×13 bar in the calendar
+/// accent, the title (Body, text1) and the time right-aligned (Footnote 11/500, text2).
+#[allow(clippy::too_many_arguments)]
+fn event_row(c: &Canvas, x: f32, right: f32, base: f32, title: &str, time: &str, ls: f32) {
+    c.rr(x, base - c.cap_h(ls) / 2.0 - 6.5, 3.0, 13.0, 1.5, CAL);
+    let tx = x + EV_TEXT;
+    let tw = if time.is_empty() { 0.0 } else { c.text_base(time, right, base, style::FOOT.size, 500, c.text2(), Align::Right, (right - tx) * 0.5) + style::SP[3] };
+    c.text_base(title, tx, base, ls, style::BODY.weight, c.text1(), Align::Left, right - tx - tw);
 }
 
 /// Large fallback: Week / Day of year / Days left.
@@ -4837,7 +4935,8 @@ fn digital(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape, with_wx: bool) {
                 c.text_cap(&t.day[..3].to_uppercase(), m, 16.0, style::MICRO.size, style::MICRO.weight, RED, Align::Left, 60.0);
             }
             let aw = c.measure(t.ap, style::MICRO.size, style::MICRO.weight, Font::Text).0 + 3.0;
-            let fs = fit(c, &t.time, 40.0, if with_wx { 26.0 } else { 30.0 }, 300, Font::Text, c.w - 2.0 * m - aw);
+            // §2.2: every Small time or temperature hero is 32, fitting down to 26.
+            let fs = fit(c, &t.time, style::HERO_S_TIME.size, style::HERO_S_TIME.min, 300, Font::Text, c.w - 2.0 * m - aw);
             time_ap(c, &t.time, t.ap, m, 86.0, fs, style::time_weight(fs), c.text1(), 1.0);
             let cap = if with_wx { format!("{}, {md}", &t.day[..3]) } else { format!("{} {}", t.mon, n.day) };
             c.text_base(&cap, m, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
@@ -4878,24 +4977,23 @@ fn digital(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape, with_wx: bool) {
                     // The next hours: hour, icon, temperature in six columns.
                     let (rx, _, rw, _) = detail_region(c);
                     let cw = rw / 6.0;
+                    // The weather family's hours: real sunrise/sunset for sun or moon, and
+                    // the same "2 PM" labels as Weather Hourly.
+                    let hours = wx.map(wx_hours).unwrap_or_default();
                     for i in 0..6usize {
                         let cx = rx + cw * (i as f32 + 0.5);
                         let hour = (n.hour as usize + i) % 24;
-                        let (label, w_i, tt) = match wx {
-                            Some(w) if i == 0 => ("Now".to_string(), Some((w.code, w.is_day)), format!("{:.0}°", d0(w.temp_c))),
-                            Some(w) if w.hourly.len() >= i => {
-                                let (hh, tc, code) = w.hourly[i - 1];
-                                (format!("{} {}", h12(hh as u32), ampm(hh as u32)), Some((code, (6..19).contains(&hh))), format!("{:.0}°", d0(tc)))
-                            }
-                            _ => (if i == 0 { "Now".into() } else { format!("{} {}", h12(hour as u32), ampm(hour as u32)) }, None, "--°".into()),
+                        let (label, e, tt) = match hours.get(i) {
+                            Some((l, e, t)) => (l.clone(), Some(*e), t.clone()),
+                            None => (if i == 0 { "Now".into() } else { hour12(hour as u32) }, None, "--°".into()),
                         };
-                        c.text_base(&label, cx, base0, style::FOOT.size, 500, c.text2(), Align::Center, cw);
+                        c.text_base(&label, cx, base0, style::FOOT.size, 500, if i == 0 { c.text1() } else { c.text2() }, Align::Center, cw);
                         let is = 22.0;
-                        match w_i {
-                            Some((code, day)) => draw_vis(c, &Vis::Emoji(weather_emoji(code, day)), cx - is / 2.0, 134.0, is),
+                        match e {
+                            Some(e) => draw_vis(c, &Vis::Emoji(e), cx - is / 2.0, 134.0, is),
                             None => c.glyph(G_CLOUD, cx, 134.0 + is / 2.0, is * 0.7, c.text3()),
                         }
-                        c.text_base(&tt, cx, 178.0, style::TITLE.size, style::TITLE.weight, if w_i.is_some() { c.text1() } else { c.text3() }, Align::Center, cw);
+                        c.text_base(&tt, cx, 178.0, style::TITLE.size, style::TITLE.weight, if e.is_some() { c.text1() } else { c.text3() }, Align::Center, cw);
                     }
                 } else {
                     match events(x).filter(|e| !e.is_empty()) {
@@ -5046,7 +5144,8 @@ fn world(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
             let r = if sh == Shape::Mini { 20.0 * k } else { 19.0 * k };
             for (i, (label, key)) in cities.iter().take(nc).enumerate() {
                 let (h, m, s, _) = city_time(n, key);
-                dial(c, x0 + slot * (i as f32 + 0.5), c.h / 2.0, r, h, m, Some(s), night(h), Some(&city_code(label)), k);
+                let code = (sh != Shape::Mini).then(|| city_code(label));
+                dial(c, x0 + slot * (i as f32 + 0.5), c.h / 2.0, r, h, m, Some(s), night(h), code.as_deref(), k);
             }
         }
         Shape::Small => {
@@ -5065,12 +5164,20 @@ fn world(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
         Shape::Medium | Shape::Large => {
             let m = style::M_CARD;
             let slot = (c.w - 2.0 * m) / 3.0;
-            let r = 25.0;
+            // Dial, city, then its time and offset: everything Small shows, for three cities.
+            let r = 19.0;
             for (i, (label, key)) in cities.iter().take(3).enumerate() {
-                let (h, mm, s, _) = city_time(n, key);
+                let (h, mm, s, wd) = city_time(n, key);
                 let cx = m + slot * (i as f32 + 0.5);
-                dial(c, cx, m - 2.0 + r, r, h, mm, Some(s), night(h), None, 1.0);
-                c.text_base(&city_short(c, label, style::FOOT.size, 600, slot - 4.0), cx, 80.0, style::FOOT.size, 600, c.text1(), Align::Center, slot);
+                dial(c, cx, m + r, r, h, mm, Some(s), night(h), None, 1.0);
+                c.text_base(&city_short(c, label, style::FOOT.size, 600, slot - 4.0), cx, 67.0, style::FOOT.size, 600, c.text1(), Align::Center, slot);
+                // The offset is never cut: at 10 px with no room left, AM/PM gives way (the
+                // dial's face already says day or night).
+                let off = fmt_hours(zone_diff(n, h, mm, wd).0);
+                let full = format!("{}:{:02} {} \u{00B7} {off}", h12(h), mm, ampm(h));
+                let fs = rd_fit(c, &full, style::FOOT.size, style::FOOT.min, 400, slot - 2.0);
+                let line = if c.measure(&full, fs, 400, Font::Text).0 <= slot - 2.0 { full } else { format!("{}:{:02} \u{00B7} {off}", h12(h), mm) };
+                c.text_base(&line, cx, 80.0, fs, 400, c.text2(), Align::Center, slot);
             }
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
@@ -5086,16 +5193,33 @@ fn zone_rows(c: &Canvas, n: &super::Now, cities: &[&(String, String)]) {
     let m = style::M_CARD;
     let names_w = cities.iter().map(|(l, _)| c.measure(l, style::BODY.size, style::BODY.weight, Font::Text).0).fold(0.0f32, f32::max);
     let ox = (m + names_w + style::SP[5]).min(112.0);
+    let vs = style::VALUE.size;
+    // The time column is as wide as the widest time, so every row's offset gets the same
+    // room; the offset itself is never cut ("Tomorrow, +14h" → "Tmrw +14h" → "+14h").
+    let tw_max = cities
+        .iter()
+        .map(|(_, key)| {
+            let (h, mm, _, _) = city_time(n, key);
+            time_ap_w(c, &format!("{}:{:02}", h12(h), mm), ampm(h), vs, style::VALUE.weight, 1.0)
+        })
+        .fold(0.0f32, f32::max);
+    let room = c.w - m - tw_max - style::SP[3] - ox;
     for (i, (label, key)) in cities.iter().enumerate() {
         let (h, mm, _, wd) = city_time(n, key);
         let base = style::DETAIL_TOP + 16.0 + i as f32 * style::ROW_L;
         let (diff, dname) = zone_diff(n, h, mm, wd);
         let tm = format!("{}:{:02}", h12(h), mm);
-        let vs = style::VALUE.size;
         let gw = time_ap_w(c, &tm, ampm(h), vs, style::VALUE.weight, 1.0);
         time_ap(c, &tm, ampm(h), c.w - m - gw, base, vs, style::VALUE.weight, c.text1(), 1.0);
         c.text_base(label, m, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, ox - m - style::SP[2]);
-        c.text_base(&format!("{dname}, {}", fmt_hours(diff)), ox, base, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - gw - ox - style::SP[1]);
+        let off = fmt_hours(diff);
+        let short = match dname {
+            "Tomorrow" => "Tmrw",
+            "Yesterday" => "Yday",
+            d => d,
+        };
+        let o = fit_label(c, &[format!("{dname}, {off}"), format!("{short} {off}"), off.clone()], style::FOOT.size, style::FOOT.weight, room);
+        c.text_base(&o, ox, base, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w * 2.0);
     }
 }
 
@@ -5141,7 +5265,7 @@ fn world_time(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
             c.glyph(g, mg + 6.0, 16.0 + c.cap_h(ts) / 2.0, 12.0, gcol);
             c.text_cap(&label, mg + 16.0, 16.0, ts, style::TITLE.weight, c.text1(), Align::Left, c.w - 2.0 * mg - 16.0);
             let aw = c.measure(tap, style::MICRO.size, style::MICRO.weight, Font::Text).0 + 3.0;
-            let fs = fit(c, &tm, 36.0, 26.0, 300, Font::Text, c.w - 2.0 * mg - aw);
+            let fs = fit(c, &tm, style::HERO_S_TIME.size, style::HERO_S_TIME.min, 300, Font::Text, c.w - 2.0 * mg - aw);
             time_ap(c, &tm, tap, mg, 86.0, fs, style::time_weight(fs), c.text1(), 1.0);
             c.text_base(&offset, mg, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * mg);
         }
@@ -5157,7 +5281,8 @@ fn world_time(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
             let left_w = c.w - 2.0 * mg - hw - style::SP[6];
             c.glyph(g, mg + 6.0, 16.0 + c.cap_h(ts) / 2.0, 12.0, gcol);
             c.text_cap(&label, mg + 16.0, 16.0, ts, style::TITLE.weight, c.text1(), Align::Left, c.w - 2.0 * mg - 16.0);
-            let hero_s = 40.0;
+            // The time is this card's only idea: Hero XL, like Clock.
+            let hero_s = style::HERO_XL.size;
             time_ap(c, &tm, tap, mg, 62.0, hero_s, style::time_weight(hero_s), c.text1(), 1.0);
             c.text_base(&offset, mg, 80.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, left_w);
             if sh == Shape::Large {
@@ -5221,25 +5346,9 @@ fn week(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
             medium_week(c, n, 0.0, false);
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
-                let m = style::M_CARD;
                 match events(x).filter(|e| !e.is_empty()) {
                     Some(evs) => {
-                        // A day chip ("TODAY", "TUE"), the title, the time at the right.
-                        let chip = |e: &Ev| match e.day.to_lowercase().as_str() {
-                            "" => String::new(),
-                            d if d.chars().count() > 5 => d.chars().take(3).collect::<String>().to_uppercase(),
-                            d => d.to_uppercase(),
-                        };
-                        let shown: Vec<&Ev> = evs.iter().take(3).collect();
-                        let cw = shown.iter().map(|e| c.measure(&chip(e), style::MICRO.size, style::MICRO.weight, Font::Text).0).fold(0.0f32, f32::max);
-                        let tx = (m + cw + style::SP[3]).max(52.0);
-                        for (i, e) in shown.iter().enumerate() {
-                            let base = style::DETAIL_TOP + 16.0 + i as f32 * style::ROW_L;
-                            c.text_base(&chip(e), m, base, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, cw + 4.0);
-                            let tw = c.measure(&e.time, style::FOOT.size, 500, Font::Text).0;
-                            c.text_base(&e.time, c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, tw + 4.0);
-                            c.text_base(&e.title, tx, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, c.w - m - tw - style::SP[3] - tx);
-                        }
+                        event_rows(c, &evs.iter().collect::<Vec<_>>(), style::DETAIL_TOP + 16.0, 3);
                     }
                     None => year_stats(c, n, 164.0),
                 }
@@ -5292,9 +5401,9 @@ fn today(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
             c.text_base(&n.day.to_string(), m, 62.0, style::HERO_XL.size, style::HERO_XL.weight, c.text1(), Align::Left, c.w * 2.0);
             match next {
                 Some(e) => {
-                    c.rr(m, 88.0 - c.cap_h(style::CAPTION.size) / 2.0 - 6.0, 3.0, 12.0, 1.5, BLUE);
-                    c.text_base(&e.title, m + 7.0, 88.0, style::CAPTION.size, 600, c.text1(), Align::Left, c.w - 2.0 * m - 7.0);
-                    c.text_base(&e.time, m + 7.0, 104.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w * 2.0);
+                    c.rr(m, 88.0 - c.cap_h(style::CAPTION.size) / 2.0 - 6.5, 3.0, 13.0, 1.5, CAL);
+                    c.text_base(&e.title, m + EV_TEXT, 88.0, style::CAPTION.size, 600, c.text1(), Align::Left, c.w - 2.0 * m - EV_TEXT);
+                    c.text_base(&e.time, m + EV_TEXT, 104.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w * 2.0);
                 }
                 None => {
                     c.text_base(t.mon, m, 88.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
@@ -5316,8 +5425,8 @@ fn today(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
                 Some(e) => {
                     let when = format!(" · {}", e.time);
                     let ww = c.measure(&when, style::CAPTION.size, 400, Font::Text).0;
-                    c.rr(m, 78.0 - 11.0, 3.0, 13.0, 1.5, BLUE);
-                    let tx = m + 8.0;
+                    c.rr(m, 78.0 - c.cap_h(style::BODY.size) / 2.0 - 6.5, 3.0, 13.0, 1.5, CAL);
+                    let tx = m + EV_TEXT;
                     let tw = c.text_base(&e.title, tx, 78.0, style::BODY.size, 600, c.text1(), Align::Left, c.w - m - tx - ww);
                     c.text_base(&when, tx + tw, 78.0, style::CAPTION.size, 400, c.text2(), Align::Left, ww + 4.0);
                 }
@@ -5617,10 +5726,24 @@ fn segment(c: &Canvas, t: &Cl, sh: Shape) {
     }
 }
 
-fn month(c: &Canvas, t: &Cl, sh: Shape) {
+fn month(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
     let n = &t.n;
     match sh {
         Shape::Mini => mini_tile(c, n, t.k),
+        Shape::Dock if t.wide => {
+            // The week strip, then the month and what is left of it in the slot.
+            let k = t.k;
+            let m = style::M_DOCK * k;
+            let left = n.days_in_month() - n.day;
+            let cap = if left == 1 { "1 day left".to_string() } else { format!("{left} days left") };
+            let sw = c.measure(&cap, style::FOOT.size * k, style::FOOT.weight, Font::Text).0.max(c.measure(&t.mon[..3], style::VALUE.size * k, style::VALUE.weight, Font::Text).0) + 1.0;
+            let sx = c.w - m - sw;
+            let x0 = m;
+            week_row(c, n, x0, sx - 16.0 * k - x0, 20.0 * k, 41.0 * k, style::MICRO.size * k, style::FOOT.size * k, 600, 18.0 * k, true);
+            c.rr((sx - 8.0 * k).round(), 14.0 * k, 1.0, 26.0 * k, 0.0, c.sep());
+            c.text_base(&t.mon[..3], sx, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Left, sw);
+            c.text_base(&cap, sx, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, sw);
+        }
         Shape::Dock => dock_week(c, t),
         Shape::Small => {
             let m = style::M_SMALL;
@@ -5630,8 +5753,30 @@ fn month(c: &Canvas, t: &Cl, sh: Shape) {
             month_grid(c, n, m, c.w - 2.0 * m, 38.0, 52.0, pitch, style::MICRO.size, 500, 14.0);
         }
         Shape::Medium => {
-            cal_header(c, t.mon, &format!("{} days left", n.days_in_month() - n.day));
-            medium_week(c, n, 0.0, true);
+            // Small's month (name over the grid) in a 112-wide left region; the next two
+            // events today on the right.
+            let m = style::M_CARD;
+            let gw = 112.0;
+            c.text_cap(&t.mon.to_uppercase(), m, m, style::MICRO.size, style::MICRO.weight, c.text1(), Align::Left, gw);
+            let rows = month_rows(n);
+            let first = 38.0;
+            let pitch = ((80.0 - first) / (rows as f32 - 1.0)).min(14.0);
+            month_grid_numbers(c, n, m, gw, first, pitch, style::MICRO.size, 500, (pitch + 1.5).min(13.0));
+            c.rr((m + gw + style::SP[3]).round(), m, 1.0, 80.0 - m, 0.0, c.sep());
+            let rx = m + gw + style::SP[6];
+            let evs = events(x).unwrap_or_default();
+            let today: Vec<&Ev> = evs.iter().filter(|e| e.day.is_empty() || e.day.eq_ignore_ascii_case("today")).take(2).collect();
+            if today.is_empty() {
+                let (a, b) = if evs.is_empty() { (format!("{} days left", n.days_in_month() - n.day), format!("in {}", t.mon)) } else { ("No more events".to_string(), "today".to_string()) };
+                c.text_base(&a, rx, 29.0, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, c.w - m - rx);
+                c.text_base(&b, rx, 44.0, style::FOOT.size, 500, c.text2(), Align::Left, c.w - m - rx);
+            }
+            // Stacked in this narrow column: bar and title, the time under the title.
+            for (i, e) in today.iter().enumerate() {
+                let base = 29.0 + i as f32 * 34.0;
+                event_row(c, rx, c.w - m, base, &e.title, "", style::BODY.size);
+                c.text_base(&e.time, rx + EV_TEXT, base + 15.0, style::FOOT.size, 500, c.text2(), Align::Left, c.w - m - rx - EV_TEXT);
+            }
         }
         Shape::Large => {
             let m = style::M_CARD;
@@ -5722,7 +5867,16 @@ fn clock12(m: f32) -> (String, &'static str) {
 
 /// "2PM" for an hour of the day.
 fn hour12(h: u32) -> String {
-    format!("{}{}", h12(h), ampm(h))
+    // A thin space keeps "2 PM" one word at 10–11 px while it still reads as two parts.
+    format!("{}\u{2009}{}", h12(h), ampm(h))
+}
+
+/// Now and the next full hours as (label, emoji, temperature), with moons between the real
+/// sunset and sunrise. Weather Hourly and Clock & Weather Large both use it.
+fn wx_hours(w: &laminar_sys::weather::Weather) -> Vec<(String, &'static str, String)> {
+    let (rise, set) = if w.sunrise.is_empty() || w.sunset.is_empty() { (360.0, 1140.0) } else { (mins(&w.sunrise), mins(&w.sunset)) };
+    let day_at = |h: u8| (rise..set).contains(&(h as f32 * 60.0));
+    std::iter::once(("Now".to_string(), weather_emoji(w.code, w.is_day), deg(w.temp_c))).chain(w.hourly.iter().map(|(h, t, code)| (hour12(*h as u32), weather_emoji(*code, day_at(*h)), deg(*t)))).collect()
 }
 
 /// A time with its AM/PM in Micro, top-aligned to the digits' cap top, 3 px after them
@@ -5921,9 +6075,7 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
     let emoji = weather_emoji(w.code, w.is_day);
     let hl = format!("H:{} L:{}", deg(w.high_c), deg(w.low_c));
     // Now, then the next full hours (moons after sunset).
-    let (rise, set) = if w.sunrise.is_empty() || w.sunset.is_empty() { (360.0, 1140.0) } else { (mins(&w.sunrise), mins(&w.sunset)) };
-    let day_at = |h: u8| (rise..set).contains(&(h as f32 * 60.0));
-    let hours: Vec<(String, &'static str, String)> = std::iter::once(("Now".to_string(), emoji, temp.clone())).chain(w.hourly.iter().map(|(h, t, code)| (hour12(*h as u32), weather_emoji(*code, day_at(*h)), deg(*t)))).collect();
+    let hours = wx_hours(w);
     let days: Vec<WDay> = w.daily.iter().enumerate().map(|(i, (d, hi, lo, code))| WDay { label: if i == 0 { "Today".to_string() } else { weekday_of(d) }, emoji: weather_emoji(*code, true), hi: *hi, lo: *lo }).collect();
     let banner = k == WeatherKind::Banner;
     let ink = if banner {
@@ -6212,8 +6364,9 @@ fn sun_mark(c: &Canvas, cx: f32, top: f32, size: f32, rising: bool) {
 /// radius `r` centred on `cx`, and (by day) the travelled part in orange with the sun on it.
 #[allow(clippy::too_many_arguments)]
 fn sun_path(c: &Canvas, cx: f32, hy: f32, r: f32, (x0, x1): (f32, f32), frac: Option<f32>, (track_t, done_t): (f32, f32), dot_r: f32, night: Option<f32>) {
-    c.line(x0, hy + 0.5, x1, hy + 0.5, 1.0, c.sep());
-    c.arc(cx, hy, r, track_t, 180.0, 360.0, c.track());
+    // Horizon and the day's path in text3 so both read on light and dark glass.
+    c.line(x0, hy + 0.5, x1, hy + 0.5, 1.0, c.text3());
+    c.arc(cx, hy, r, track_t.max(1.5), 180.0, 360.0, c.text3());
     if let Some(f) = frac {
         c.arc(cx, hy, r, done_t, 180.0, 180.0 + 180.0 * f, ORANGE);
         let a = (180.0 + 180.0 * f).to_radians();
@@ -6225,12 +6378,25 @@ fn sun_path(c: &Canvas, cx: f32, hy: f32, r: f32, (x0, x1): (f32, f32), frac: Op
             c.circle_stroke(px, py, dot_r - 0.25, alpha(hex(0xC45500), 0.4), 0.5);
         }
     }
-    // At night the sun travels back under the horizon, from sunset (right) to sunrise (left):
-    // a small grey dot just below the line says where it is.
+    // At night the sun travels back under the horizon, from sunset (right) to sunrise (left),
+    // on a shallow arc: the part travelled so far is dotted in the night accent, and a dot of
+    // the same colour marks where it is now.
     if let Some(f) = night {
+        let ry = r * 0.16;
         let d = (dot_r * 0.75).max(2.0);
-        let px = cx + r * (std::f32::consts::PI * f).cos();
-        c.circle(px, hy + 1.0 + d + 1.5, d, c.text2());
+        let at = |t: f32| {
+            let a = std::f32::consts::PI * t;
+            (cx + r * a.cos(), hy + 1.0 + ry * a.sin())
+        };
+        let len = std::f32::consts::PI * r * f;
+        let steps = (len / 4.5).floor() as usize;
+        for i in 0..steps {
+            let (px, py) = at(f * i as f32 / steps.max(1) as f32);
+            c.circle(px, py, 0.9, alpha(PURPLE, 0.6));
+        }
+        let (px, py) = at(f);
+        c.circle(px, py, d + 1.5, c.halo());
+        c.circle(px, py, d, PURPLE);
     }
 }
 
@@ -6286,7 +6452,8 @@ fn sun(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, sh: Shape) {
             // No night dot here: under the horizon it would land on the hero time. At night
             // the arc is all track, which already says the sun is down.
             sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), frac, (2.0, 2.5), 4.0, None);
-            let hs = style::HERO_S.size;
+            let aw = c.measure(ap, style::MICRO.size, style::MICRO.weight, Font::Text).0 + 3.0;
+            let hs = fit(c, &t, style::HERO_S_TIME.size, style::HERO_S_TIME.min, 300, Font::Text, c.w - 2.0 * m - aw);
             time_ampm(c, &t, ap, m, 86.0, hs, style::time_weight(hs), t1, t2, Align::Left);
             c.text_base(next_l, m, 106.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, c.w - 2.0 * m);
         }
@@ -6831,9 +6998,9 @@ fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
         Shape::Small => {
             let m = style::M_SMALL;
             c.text_cap(&v.label, m, 16.0, style::MICRO.size, style::MICRO.weight, v.col, Align::Left, c.w - 2.0 * m);
-            let role = Type { weight: style::time_weight(style::HERO_S.size), ..style::HERO_S };
+            let role = style::HERO_S_TIME;
             let (t, fs) = fit_value(c, &v.time, role, c.w - 2.0 * m);
-            c.text_base(&t, m, 52.0, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(&t, m, 52.0, fs, style::time_weight(fs), c.text1(), Align::Left, c.w * 2.0);
             c.text_base(&v.caption, m, 70.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
             let p = style::BTN_PRIMARY_SMALL;
             timer_buttons(c, out, k, &v, c.w - m, c.h - m - p / 2.0, p, style::BTN_SECONDARY_SMALL, style::SP[3]);
@@ -6917,6 +7084,11 @@ fn art_note(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, ax: f32, ay: f32, s: 
 /// The transport row as bare glyphs (prev, play/pause, next) at the given centres. `dim`
 /// draws it at 0.35 and inert, for when nothing is playing.
 #[allow(clippy::too_many_arguments)]
+/// The Bar's transport capsule keeps its shape, but its glyphs are the transport's: GLYPH_IN
+/// × the secondary and primary buttons of the Medium/Large and Small sizes.
+const CAPSULE_GLYPHS: [f32; 3] = [style::BTN_SECONDARY * style::GLYPH_IN, style::BTN_PRIMARY * style::GLYPH_IN, style::BTN_SECONDARY * style::GLYPH_IN];
+const CAPSULE_GLYPHS_S: [f32; 3] = [style::BTN_SECONDARY_SMALL * style::GLYPH_IN, style::BTN_PRIMARY_SMALL * style::GLYPH_IN, style::BTN_SECONDARY_SMALL * style::GLYPH_IN];
+
 fn controls(c: &Canvas, out: &mut Painted, xs: [f32; 3], cy: f32, sizes: [f32; 3], playing: bool, dim: bool) {
     let play = if playing { G_PAUSE_FILL } else { G_PLAY_FILL };
     let ink = if dim { alpha(c.text1(), 0.35) } else { c.text1() };
@@ -6927,12 +7099,6 @@ fn controls(c: &Canvas, out: &mut Painted, xs: [f32; 3], cy: f32, sizes: [f32; 3
             out.hits.push(((xs[i] - hd / 2.0, cy - hd / 2.0, hd, hd), a));
         }
     }
-}
-
-/// A plate button drawn at 0.35 with no hit of its own: the idle stand-in for a control.
-fn dim_plate(c: &Canvas, cx: f32, cy: f32, d: f32, g: &str) {
-    c.circle(cx, cy, d / 2.0, alpha(c.plate(), 0.35));
-    transport_glyph(c, g, cx, cy, d * style::GLYPH_IN, alpha(c.text1(), 0.35));
 }
 
 /// The muted red. Light theme takes the deeper red so white text on it reaches 4.5:1.
@@ -7077,11 +7243,6 @@ fn paused_overlay(c: &Canvas, cx: f32, cy: f32, d: f32) {
     transport_glyph(c, G_PLAY_FILL, cx, cy, d * 0.5, WHITE);
 }
 
-/// A secondary (plate) play/pause button.
-fn play_plate(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, d: f32, playing: bool) {
-    round_button(c, out, cx, cy, d, c.plate(), if playing { G_PAUSE_FILL } else { G_PLAY_FILL }, c.text1(), WAct::MediaPlay);
-}
-
 /// The primary play/pause button: a text1 disc with a card-coloured glyph.
 fn play_primary(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, d: f32, playing: bool, a: f32) {
     let g = if playing { G_PAUSE_FILL } else { G_PLAY_FILL };
@@ -7093,19 +7254,78 @@ fn play_primary(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, d: f32, playing
     }
 }
 
-/// The Large transport row: prev and next plates (28) either side of the primary play (36),
-/// centres `gap` apart. Dimmed and inert when nothing is playing.
-fn transport_row(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, gap: f32, t: &Track) {
-    let a = if t.idle { 0.35 } else { 1.0 };
-    let s = style::BTN_SECONDARY;
-    for (dx, g, act) in [(-gap, G_PREV_FILL, WAct::MediaPrev), (gap, G_NEXT_FILL, WAct::MediaNext)] {
-        c.circle(cx + dx, cy, s / 2.0, alpha(c.plate(), a));
-        transport_glyph(c, g, cx + dx, cy, s * style::GLYPH_IN, alpha(c.text1(), a));
-        if !t.idle {
-            out.hits.push(((cx + dx - s / 2.0, cy - s / 2.0, s, s), act));
+/// Transport button sizes (§2.4): (primary, secondary, gap between edges).
+#[derive(Clone, Copy)]
+enum TSize {
+    /// Medium and Large: 36 / 28, 12 apart.
+    Card,
+    /// Small, and a Medium whose two text lines leave 32 px: 28 / 24, 8 apart.
+    Small,
+    /// Dock pills, scaled by the pill: 30 / 26, 8 apart.
+    Dock(f32),
+}
+
+impl TSize {
+    fn dims(self) -> (f32, f32, f32) {
+        match self {
+            TSize::Card => (style::BTN_PRIMARY, style::BTN_SECONDARY, style::SP[5]),
+            TSize::Small => (style::BTN_PRIMARY_SMALL, style::BTN_SECONDARY_SMALL, style::SP[3]),
+            TSize::Dock(k) => (style::BTN_PRIMARY_DOCK * k, style::BTN_SECONDARY_DOCK * k, style::SP[3] * k),
         }
     }
-    play_primary(c, out, cx, cy, style::BTN_PRIMARY, t.playing, a);
+}
+
+/// Which transport buttons a face shows.
+#[derive(Clone, Copy, PartialEq)]
+enum TButtons {
+    /// Previous, play/pause, next.
+    Full,
+    /// Play/pause, next.
+    PlayNext,
+    /// Play/pause alone.
+    Play,
+}
+
+/// Width of a transport row.
+fn transport_w(size: TSize, b: TButtons) -> f32 {
+    let (p, s, g) = size.dims();
+    match b {
+        TButtons::Full => p + 2.0 * (s + g),
+        TButtons::PlayNext => p + s + g,
+        TButtons::Play => p,
+    }
+}
+
+/// The one media transport (§2.4): the primary play/pause is a filled text1 disc with a
+/// card-coloured glyph, prev and next are secondary plates; every glyph is GLYPH_IN × its
+/// button. `x` is the row's left, centre or right per `align`. Idle: dimmed and inert.
+#[allow(clippy::too_many_arguments)]
+fn transport(c: &Canvas, out: &mut Painted, x: f32, cy: f32, align: Align, size: TSize, b: TButtons, t: &Track) {
+    let (p, s, g) = size.dims();
+    let w = transport_w(size, b);
+    let mut bx = match align {
+        Align::Left => x,
+        Align::Right => x - w,
+        _ => x - w / 2.0,
+    };
+    let a = if t.idle { 0.35 } else { 1.0 };
+    let secondary = |out: &mut Painted, cx: f32, glyph: &str, act: WAct| {
+        c.circle(cx, cy, s / 2.0, alpha(c.plate(), a));
+        transport_glyph(c, glyph, cx, cy, s * style::GLYPH_IN, alpha(c.text1(), a));
+        if !t.idle {
+            let hd = s.max(style::HIT_MIN);
+            out.hits.push(((cx - hd / 2.0, cy - hd / 2.0, hd, hd), act));
+        }
+    };
+    if b == TButtons::Full {
+        secondary(out, bx + s / 2.0, G_PREV_FILL, WAct::MediaPrev);
+        bx += s + g;
+    }
+    play_primary(c, out, bx + p / 2.0, cy, p, t.playing, a);
+    bx += p + g;
+    if b != TButtons::Play {
+        secondary(out, bx + s / 2.0, G_NEXT_FILL, WAct::MediaNext);
+    }
 }
 
 /// A calm three-bar level mark (text2) with its bottom on `base`, while playing.
@@ -7291,20 +7511,13 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     c.glyph(G_MUSIC, m + p / 2.0, c.h / 2.0, p * style::GLYPH_IN, c.text3());
                     52.0 * kk
                 };
-                // Dock L keeps its slot: the control it will hold, dimmed.
+                // Dock L keeps its slot: the controls it will hold, dimmed.
                 let cy = c.h / 2.0;
                 let mut right = c.w - m;
                 if wide {
-                    let pcx = if k == MediaKind::Full {
-                        let ns = 14.0 * kk;
-                        let ncx = c.w - m - ns / 2.0;
-                        transport_glyph(c, G_NEXT_FILL, ncx, cy, ns, alpha(c.text1(), 0.35));
-                        ncx - ns / 2.0 - style::SP[3] * kk - pd / 2.0
-                    } else {
-                        c.w - m - pd / 2.0
-                    };
-                    dim_plate(c, pcx, cy, pd, G_PLAY_FILL);
-                    right = pcx - pd / 2.0 - style::SP[3] * kk;
+                    let b = if k == MediaKind::Full { TButtons::PlayNext } else { TButtons::Play };
+                    transport(c, out, c.w - m, cy, Align::Right, TSize::Dock(kk), b, &t);
+                    right = c.w - m - transport_w(TSize::Dock(kk), b) - style::SP[3] * kk;
                 }
                 c.text_base("Not playing", x0, 30.0 * kk, style::TITLE.size * kk, style::TITLE.weight, c.text1(), Align::Left, right - x0);
                 let hint = "Play in any app";
@@ -7320,7 +7533,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
             let x0 = 56.0 * kk;
             // The slot is only as wide as what it holds, so the title keeps its room.
             let used = match (k, track_timeline(&t)) {
-                (MediaKind::Full, _) => pd + style::SP[3] * kk + 14.0 * kk,
+                (MediaKind::Full, _) => transport_w(TSize::Dock(kk), TButtons::PlayNext),
                 (MediaKind::Bar, Some(_)) => slot_w,
                 (MediaKind::Bar, None) => pd + style::SP[3] * kk + LEVEL_W * kk,
                 _ => pd,
@@ -7335,13 +7548,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
             }
             let cy = c.h / 2.0;
             match k {
-                MediaKind::Full => {
-                    let ns = 14.0 * kk;
-                    let ncx = c.w - m - ns / 2.0;
-                    transport_glyph(c, G_NEXT_FILL, ncx, cy, ns, c.text1());
-                    out.hits.push(((ncx - 14.0 * kk, cy - 14.0 * kk, 28.0 * kk, 28.0 * kk), WAct::MediaNext));
-                    play_plate(c, out, ncx - ns / 2.0 - style::SP[3] * kk - pd / 2.0, cy, pd, t.playing);
-                }
+                MediaKind::Full => transport(c, out, c.w - m, cy, Align::Right, TSize::Dock(kk), TButtons::PlayNext, &t),
                 MediaKind::Bar => match track_timeline(&t) {
                     Some((pos, len)) => {
                         let f = (pos / len.max(1.0)).clamp(0.0, 1.0);
@@ -7349,12 +7556,11 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                         c.bar(slot_x, 33.0 * kk, slot_w, style::METER_H_COMPACT * kk, f, c.text1());
                     }
                     None => {
-                        let pcx = c.w - m - pd / 2.0;
-                        play_plate(c, out, pcx, cy, pd, t.playing);
-                        level_glyph(c, pcx - pd / 2.0 - style::SP[3] * kk - LEVEL_W * kk, cy + 5.0 * kk, t.playing, kk);
+                        transport(c, out, c.w - m, cy, Align::Right, TSize::Dock(kk), TButtons::Play, &t);
+                        level_glyph(c, c.w - m - pd - style::SP[3] * kk - LEVEL_W * kk, cy + 5.0 * kk, t.playing, kk);
                     }
                 },
-                _ => play_plate(c, out, c.w - m - pd / 2.0, cy, pd, t.playing),
+                _ => transport(c, out, c.w - m, cy, Align::Right, TSize::Dock(kk), TButtons::Play, &t),
             }
         }
         Shape::Small => {
@@ -7375,18 +7581,20 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     card_track_text(c, &Track { artist, ..t.clone() }, m, inner, 90.0, 106.0, style::CAPTION.size, None);
                 }
                 MediaKind::Full => {
-                    art_or_idle(c, x, wic, &t, m, m, 40.0, r);
+                    // Art 32 leaves the track two clear lines over the transport row.
+                    art_or_idle(c, x, wic, &t, m, m, 32.0, style::R_MIN + 2.0);
                     let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
-                    card_track_text(c, &t2, m, inner, 70.0, 84.0, style::FOOT.size, None);
-                    // Prev's left ink edge on the margin, next's right ink edge on the other.
-                    // Idle, the row stays (dimmed) so the layout doesn't collapse.
-                    controls(c, out, [m + 7.0, c.w / 2.0, c.w - m - 7.0], 98.0, [14.0, 18.0, 14.0], t.playing, t.idle);
+                    card_track_text(c, &t2, m, inner, 60.0, 73.0, style::FOOT.size, None);
+                    // The shared transport, centred on the bottom margin. Idle, the row stays
+                    // (dimmed) so the layout doesn't collapse.
+                    let p = style::BTN_PRIMARY_SMALL;
+                    transport(c, out, c.w / 2.0, c.h - m - p / 2.0 + 1.0, Align::Center, TSize::Small, TButtons::Full, &t);
                 }
                 MediaKind::Compact => {
                     art_or_idle(c, x, wic, &t, m, m, 52.0, r);
-                    let p = style::BTN_SECONDARY;
+                    let p = style::BTN_PRIMARY_SMALL;
                     if !t.idle {
-                        play_plate(c, out, c.w - m - p / 2.0, m + p / 2.0, p, t.playing);
+                        transport(c, out, c.w - m, m + p / 2.0, Align::Right, TSize::Small, TButtons::Play, &t);
                     }
                     let artist = if t.idle { "Play in any app".to_string() } else { t.artist.clone() };
                     card_track_text(c, &Track { artist, ..t.clone() }, m, inner, 86.0, 106.0, style::CAPTION.size, None);
@@ -7401,8 +7609,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     card_track_text(c, &t2, m, inner, 66.0, 80.0, style::FOOT.size, None);
                     if let Some((pos, len)) = track_timeline(&t) {
                         // With a timeline, the capsule's place holds the track's progress.
-                        let p = style::BTN_SECONDARY;
-                        play_plate(c, out, c.w - m - p / 2.0, m + s / 2.0, p, t.playing);
+                        transport(c, out, c.w - m, m + s / 2.0, Align::Right, TSize::Small, TButtons::Play, &t);
                         c.bar(m, 96.0, inner, style::METER_H_COMPACT, (pos / len.max(1.0)).clamp(0.0, 1.0), c.text1());
                         return;
                     }
@@ -7416,7 +7623,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     let (by, bh) = (86.0, 20.0);
                     c.rr(m, by, inner, bh, bh / 2.0, alpha(c.plate(), if t.idle { 0.35 } else { 1.0 }));
                     let mid = c.w / 2.0;
-                    controls(c, out, [mid - 32.0, mid, mid + 32.0], by + bh / 2.0, [10.0, 12.0, 10.0], t.playing, t.idle);
+                    controls(c, out, [mid - 32.0, mid, mid + 32.0], by + bh / 2.0, CAPSULE_GLYPHS_S, t.playing, t.idle);
                 }
             }
         }
@@ -7438,7 +7645,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                         c.text_base(&t.status_line(), tx, m + s, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - tx);
                     }
                     separator(c, 128.0);
-                    transport_row(c, out, c.w / 2.0, 166.0, 56.0, &t);
+                    transport(c, out, c.w / 2.0, 166.0, Align::Center, TSize::Card, TButtons::Full, &t);
                 }
                 MediaKind::Compact => {
                     // An art-led listening card: big cover, the track beside it, one button.
@@ -7501,7 +7708,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     };
                     let (_, y0, _, h) = detail_region(c);
                     let cy = if foot.is_empty() { y0 + h / 2.0 } else { 140.0 };
-                    transport_row(c, out, c.w / 2.0, cy, 56.0, &t);
+                    transport(c, out, c.w / 2.0, cy, Align::Center, TSize::Card, TButtons::Full, &t);
                     if !foot.is_empty() {
                         c.text_base(&foot, c.w / 2.0, 184.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Center, c.w - 2.0 * m);
                     }
@@ -7535,7 +7742,9 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
             let fs = fit_down(c, &t.title, style::TITLE.size, style::TITLE.min, style::TITLE.weight, right - tx);
             c.text_base(&t.title, tx, style::HEADER_BASE, fs, style::TITLE.weight, c.text1(), Align::Left, right - tx);
             c.text_base(&t.artist, tx, 47.0, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - m - tx);
-            controls(c, out, [104.0, 144.0, 184.0], 66.0, [16.0, 20.0, 16.0], t.playing, false);
+            // Two text lines leave 32 px under them: the Small transport sizes, on the text.
+            let p = style::BTN_PRIMARY_SMALL;
+            transport(c, out, tx, 80.0 - p / 2.0, Align::Left, TSize::Small, TButtons::Full, t);
         }
         MediaKind::Compact => {
             let s = 56.0;
@@ -7550,7 +7759,7 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
             // Title, artist and a third line (album, app, or "Playing" / "Paused"), so the
             // Medium always adds a layer over the Small.
             card_track_text(c, t, tx, w, 36.0, 52.0, style::CAPTION.size, Some((68.0, t.third())));
-            play_plate(c, out, c.w - m - pd / 2.0, c.h / 2.0, pd, t.playing);
+            transport(c, out, c.w - m, c.h / 2.0, Align::Right, TSize::Card, TButtons::Play, t);
         }
         MediaKind::Disc => {
             // The record at inset 12, so its curve keeps clear of the card's corner.
@@ -7562,11 +7771,9 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
                 return;
             }
             card_track_text(c, t, tx, c.w - m - tx, 30.0, 45.0, style::CAPTION.size, None);
-            // Plates, like every other media Medium: play/pause, then next.
-            let (p, cy) = (style::BTN_SECONDARY, 66.0);
-            play_plate(c, out, tx + p / 2.0, cy, p, t.playing);
-            let ncx = tx + p * 1.5 + style::SP[3];
-            round_button(c, out, ncx, cy, p, c.plate(), G_NEXT_FILL, c.text1(), WAct::MediaNext);
+            // The shared transport under the two text lines: play/pause, then next.
+            let p = style::BTN_PRIMARY_SMALL;
+            transport(c, out, tx, 80.0 - p / 2.0, Align::Left, TSize::Small, TButtons::PlayNext, t);
         }
         _ => {
             let s = if track_timeline(t).is_some() { 40.0 } else { 32.0 };
@@ -7581,14 +7788,14 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
                     let (by, bh) = (56.0, 24.0);
                     c.rr(m, by, c.w - 2.0 * m, bh, bh / 2.0, alpha(c.plate(), 0.35));
                     let mid = c.w / 2.0;
-                    controls(c, out, [mid - 64.0, mid, mid + 64.0], by + bh / 2.0, [12.0, 14.0, 12.0], false, true);
+                    controls(c, out, [mid - 64.0, mid, mid + 64.0], by + bh / 2.0, CAPSULE_GLYPHS, false, true);
                 }
                 return;
             }
             match track_timeline(t) {
                 Some((pos, len)) => {
                     // A header row (art, title, artist, play), then the track's progress.
-                    play_plate(c, out, c.w - m - pd / 2.0, 36.0, pd, t.playing);
+                    transport(c, out, c.w - m, 36.0, Align::Right, TSize::Small, TButtons::Play, t);
                     card_track_text(c, t, tx, right - tx, style::HEADER_BASE, 47.0, style::CAPTION.size, None);
                     c.bar(m, 70.0, c.w - 2.0 * m, style::METER_H_COMPACT, (pos / len.max(1.0)).clamp(0.0, 1.0), c.text1());
                     c.text_base(&mmss(pos), m, 86.0, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, 80.0);
@@ -7613,7 +7820,7 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
                     c.rr(m, by, c.w - 2.0 * m, bh, bh / 2.0, c.plate());
                     let cy = by + bh / 2.0;
                     let mid = c.w / 2.0;
-                    controls(c, out, [mid - 64.0, mid, mid + 64.0], cy, [12.0, 14.0, 12.0], t.playing, false);
+                    controls(c, out, [mid - 64.0, mid, mid + 64.0], cy, CAPSULE_GLYPHS, t.playing, false);
                 }
             }
         }
@@ -7628,21 +7835,15 @@ fn bar_volume(c: &Canvas, out: &mut Painted, x: &Ctx) {
     let muted = x.control.muted == Some(true);
     let name = x.hub.output_name.as_deref().map(short_device).filter(|d| !d.is_empty()).unwrap_or_else(|| "Volume".into());
     let level = if muted { "Muted".to_string() } else { format!("{:.0}%", vol * 100.0) };
-    // Label row and a 28 px capsule, centred as one block in the region.
-    let bh = 28.0;
+    // Label row and the shared slider, centred as one block in the region.
+    let bh = style::BTN_SECONDARY;
     let block = c.cap_h(style::FOOT.size) + style::SP[5] + bh;
     let top = y0 + (h - block) / 2.0;
     let base = top + c.cap_h(style::FOOT.size);
     let lw = c.measure(&level, style::FOOT.size, 500, Font::Text).0;
     c.text_base(&name, x0, base, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, w - lw - style::SP[3]);
     c.text_base(&level, x0 + w, base, style::FOOT.size, 500, if muted { RED } else { c.text2() }, Align::Right, w);
-    let by = base + style::SP[5];
-    c.rr(x0, by, w, bh, bh / 2.0, c.track());
-    c.rr(x0, by, (w * if muted { 0.0 } else { vol }).max(bh), bh, bh / 2.0, if muted { c.text3() } else { BLUE });
-    // The speaker glyph rides at the capsule's start, on the fill.
-    let gcx = x0 + bh / 2.0;
-    c.glyph(if muted { G_MUTE } else { G_VOL }, gcx, by + bh / 2.0, bh * style::GLYPH_IN, WHITE);
-    out.hits.push(((x0, by - 4.0, w, bh + 8.0), WAct::Volume));
+    slider(c, out, x0, base + style::SP[5], w, if muted { 0.0 } else { vol }, if muted { G_MUTE } else { G_VOL }, WAct::Volume);
 }
 
 /// "Speakers (Realtek(R) Audio)" → "Speakers".
@@ -7656,14 +7857,15 @@ fn output_face(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let g = if muted { G_MUTE } else { G_VOL };
     let pct = format!("{:.0}%", vol * 100.0);
     let dev = x.hub.output_name.as_deref().map(short_device).filter(|d| !d.is_empty());
-    let fill_col = if muted { c.text3() } else { BLUE };
+    // Volume is a level, not on/off: the neutral level fill at every size.
+    let fill_col = if muted { c.text3() } else { level_fill(c) };
     match sh {
         Shape::Mini => {
             out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mute));
             let kk = c.h / 54.0;
             let d = 40.0 * kk;
             let t = style::METER_H_COMPACT * kk;
-            c.ring(c.w / 2.0, c.h / 2.0, d / 2.0 - t / 2.0, t, if muted { 0.0 } else { vol }, BLUE);
+            c.ring(c.w / 2.0, c.h / 2.0, d / 2.0 - t / 2.0, t, if muted { 0.0 } else { vol }, fill_col);
             c.glyph(g, c.w / 2.0, c.h / 2.0, 16.0 * kk, c.text1());
         }
         Shape::Dock => {
@@ -7717,11 +7919,8 @@ fn output_face(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let tx = m + p + style::SP[3];
             let name = dev.clone().unwrap_or_else(|| "Volume".into());
             c.text_base(&name, tx, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, c.w - m - pw - style::SP[3] - tx);
-            // The slider: a 24 px capsule, filled to the volume.
-            let (bx, by, bw, bh) = (m, 56.0, c.w - 2.0 * m, 24.0);
-            c.rr(bx, by, bw, bh, bh / 2.0, c.track());
-            c.rr(bx, by, (bw * vol).max(bh), bh, bh / 2.0, fill_col);
-            out.hits.push(((bx, by - 4.0, bw, bh + 8.0), WAct::Volume));
+            // The shared level slider, where Brightness has its own.
+            slider(c, out, m, 52.0, c.w - 2.0 * m, if muted { 0.0 } else { vol }, g, WAct::Volume);
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
                 let (x0, y0, w, h) = detail_region(c);
@@ -7750,80 +7949,24 @@ fn output_face(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
 }
 
 fn mic_face(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
-    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mic));
+    // The same toggle face as Dark Mode and Keep Awake: name, state, a switch on Dock L and
+    // Medium, and on = a blue mark with a white glyph (§2.3); muted = the plate.
     let muted = x.hub.mic_muted == Some(true);
-    let state = if muted { "Muted" } else { "On" };
-    let (fill, g, ink) = if muted { (mute_red(c), G_MIC_OFF, WHITE) } else { (c.plate(), G_MIC, c.text1()) };
-    let state_col = if muted { mute_red(c) } else { c.text2() };
-    match sh {
-        Shape::Mini => {
-            let kk = c.h / 54.0;
-            let p = 40.0 * kk;
-            c.rr((c.w - p) / 2.0, (c.h - p) / 2.0, p, p, style::concentric(style::DOCK_R, style::M_MINI) * kk, fill);
-            c.glyph(g, c.w / 2.0, c.h / 2.0, p * style::GLYPH_IN, ink);
-        }
-        Shape::Dock => {
-            let kk = c.h / 54.0;
-            let m = style::M_DOCK * kk;
-            let p = style::BADGE_DOCK * kk;
-            c.rr(m, (c.h - p) / 2.0, p, p, p * style::BADGE_R, fill);
-            c.glyph(g, m + p / 2.0, c.h / 2.0, p * style::GLYPH_IN, ink);
-            let x0 = 52.0 * kk;
-            let wide = c.w >= c.h * 3.4;
-            let label = if muted { "Unmute" } else { "Mute" };
-            let fs = style::FOOT.size * kk;
-            let pw = c.measure(label, fs, 600, Font::Text).0 + 2.0 * style::SP[5] * kk;
-            let right = if wide { c.w - m - pw - style::SP[3] * kk } else { c.w - m };
-            c.text_base(state, x0, 30.0 * kk, style::VALUE.size * kk, style::VALUE.weight, c.text1(), Align::Left, right - x0);
-            c.text_base("Microphone", x0, 44.0 * kk, fs, style::FOOT.weight, c.text2(), Align::Left, right - x0);
-            if wide {
-                let ph = style::BTN_SECONDARY_DOCK * kk;
-                let (px, py) = (c.w - m - pw, (c.h - ph) / 2.0);
-                c.rr(px, py, pw, ph, ph / 2.0, c.plate());
-                c.text_cap(label, px + pw / 2.0, py + (ph - c.cap_h(fs)) / 2.0, fs, 600, c.text1(), Align::Center, pw);
-                out.hits.push(((px, py.min((c.h - 28.0 * kk) / 2.0), pw, ph.max(28.0 * kk)), WAct::Mic));
-            }
-        }
-        Shape::Small => {
-            let p = 44.0;
-            c.rr((c.w - p) / 2.0, 22.0, p, p, p * style::BADGE_R, fill);
-            c.glyph(g, c.w / 2.0, 22.0 + p / 2.0, p * style::GLYPH_IN, ink);
-            c.text_base("Microphone", c.w / 2.0, 88.0, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Center, c.w - 2.0 * style::M_SMALL);
-            c.text_base(state, c.w / 2.0, 104.0, style::FOOT.size, style::FOOT.weight, state_col, Align::Center, c.w - 2.0 * style::M_SMALL);
-        }
-        Shape::Medium => {
-            let m = style::M_CARD;
-            let p = 44.0;
-            c.rr(m, 26.0, p, p, p * style::BADGE_R, fill);
-            c.glyph(g, m + p / 2.0, 26.0 + p / 2.0, p * style::GLYPH_IN, ink);
-            let tx = 76.0;
-            // Label, state and what that means for apps: three lines centred on the plate.
-            c.text_base("Microphone", tx, 40.0, style::VALUE.size, style::VALUE.weight, c.text1(), Align::Left, c.w - m - tx);
-            c.text_base(state, tx, 57.0, style::CAPTION.size, style::CAPTION.weight, state_col, Align::Left, c.w - m - tx);
-            let note = if muted { "Apps can't hear you" } else { "Apps can use it" };
-            c.text_base(note, tx, 73.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - tx);
-        }
-        Shape::Large => {
-            // A state tile, then two facts.
-            let m = style::M_CARD;
-            let i = 6.0;
-            let (tw, th) = (c.w - 2.0 * i, 112.0);
-            c.rr(i, i, tw, th, style::concentric(style::CARD_R, i), c.plate());
-            let d = 56.0;
-            let (cx, cy) = (i + style::SP[6] + d / 2.0, i + th / 2.0);
-            c.circle(cx, cy, d / 2.0, if muted { mute_red(c) } else { c.plate() });
-            c.glyph(g, cx, cy, d * style::GLYPH_IN, ink);
-            let tx = cx + d / 2.0 + style::SP[6];
-            c.text_base("Microphone", tx, cy - 4.0, style::VALUE.size, style::VALUE.weight, c.text1(), Align::Left, c.w - i - style::SP[6] - tx);
-            c.text_base(state, tx, cy + 16.0, style::BODY.size, 400, state_col, Align::Left, c.w - i - style::SP[6] - tx);
-            // Real facts: what muting does, and what a click will do now. (The device
-            // name would go here once the hub reports the default capture endpoint.)
-            let facts = if muted { ["Apps can't hear you", "Click to turn it back on"] } else { ["Apps can use your microphone", "Click to mute it in every app"] };
-            for (k, fact) in facts.iter().enumerate() {
-                c.text_base(fact, m, 146.0 + k as f32 * style::ROW_L, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w - 2.0 * m);
-            }
-        }
-    }
+    let st = if muted { "Muted" } else { "On" };
+    let mut f = ToolFace::new(if muted { G_MIC_OFF } else { G_MIC }, "Microphone", WAct::Mic);
+    f.state = st.into();
+    f.small = st.into();
+    f.medium = st.into();
+    f.round = true;
+    f.fill = (!muted).then(|| c.blue());
+    f.slot = ToolSlot::Switch;
+    f.slot_medium = true;
+    f.rows = vec![
+        row(G_MIC, "Apps", Trail::Text(if muted { "Can't hear you" } else { "Can use it" }.into())),
+        row(G_SETTINGS, "Sound settings", Trail::Go(WAct::Open("ms-settings:sound".into()))),
+        note_row(if muted { "Click to turn it back on" } else { "Click to mute it in every app" }),
+    ];
+    tool_face(c, out, &f, sh);
 }
 
 // ------------------------------------------------------------------ system
@@ -8212,9 +8355,15 @@ struct Glance<'a> {
     cap: &'a str,
     /// Third line (11) at baseline 76, in its colour.
     third: Option<(&'a str, Col)>,
-    /// A 6 px meter at y 70 from the left margin to this x.
-    meter: Option<(f32, Col, f32)>,
+    /// The right accessory box. A meter only ever goes here (`glance_meter`), beside the
+    /// third line, so every system meter sits in the same slot.
     acc: &'a SysAcc,
+}
+
+/// The one Glance meter slot (§3 A): a 6 px meter in the right accessory box at y 70, with
+/// the third line on the left saying what it measures.
+fn glance_meter(f: f32, col: Col) -> SysAcc {
+    SysAcc::Meter(f, col)
 }
 
 /// Glance (§3 A): hero 32/600 at cap-top 16, caption at baseline 58, a third line or meter,
@@ -8234,9 +8383,6 @@ fn sys_glance(c: &Canvas, g: &Glance) {
     c.text_base(g.cap, m, 58.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, tw);
     if let Some((t, col)) = g.third {
         c.text_base(t, m, 76.0, style::FOOT.size, style::FOOT.weight, col, Align::Left, tw);
-    }
-    if let Some((f, col, x1)) = g.meter {
-        c.bar(m, 70.0, x1 - m, style::METER_H, f, col);
     }
     match g.acc {
         SysAcc::None => {}
@@ -8511,7 +8657,6 @@ struct RingFace {
     caption: String,
     hero_glyph: Option<&'static str>,
     third: Option<(String, Col)>,
-    meter: Option<(f32, Col, f32)>,
     acc: SysAcc,
     detail: SysDetail,
 }
@@ -8524,7 +8669,11 @@ fn sys_ring(c: &Canvas, sh: Shape, r: &RingFace) {
         Shape::Small => sys_small(c, mark, &r.small_slot, &r.value, None, &r.caption, None),
         _ => {
             let third = r.third.as_ref().map(|(t, col)| (t.as_str(), *col));
-            sys_glance(c, &Glance { mark, hero: &r.value, hero_glyph: r.hero_glyph, cap: &r.caption, third, meter: r.meter, acc: &r.acc });
+            // A Large history chart shows the accessory's sparkline again, full width: the
+            // box gives way to it (as Detail2::replaces_box does for the stat cards).
+            let none = SysAcc::None;
+            let acc = if sh == Shape::Large && matches!(r.detail, SysDetail::Chart(..)) && matches!(r.acc, SysAcc::Spark(..)) { &none } else { &r.acc };
+            sys_glance(c, &Glance { mark, hero: &r.value, hero_glyph: r.hero_glyph, cap: &r.caption, third, acc });
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
                 sys_detail(c, &r.detail);
@@ -8567,7 +8716,6 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     caption: "CPU load".into(),
                     hero_glyph: None,
                     third: (cpu_hist.len() >= 2).then(|| (format!("Peak {} · last minute", sys_pct(peak)), c.text3())),
-                    meter: None,
                     acc: SysAcc::Spark(cpu_hist.clone(), BLUE),
                     detail: SysDetail::Chart(cpu_hist, BLUE, cpu / 100.0),
                 },
@@ -8592,8 +8740,7 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     caption: "Memory used".into(),
                     hero_glyph: None,
                     third: Some((gb, c.text3())),
-                    meter: None,
-                    acc: SysAcc::Meter(memf, PURPLE),
+                    acc: glance_meter(memf, PURPLE),
                     detail: SysDetail::Stats([
                         (format!("{mu:.1} GB"), "Used".into()),
                         (format!("{:.1} GB", (mt - mu).max(0.0)), "Free".into()),
@@ -8666,8 +8813,10 @@ fn sys_resource(c: &Canvas, sh: Shape, cpu: f32, mu: f32, mt: f32, cpu_hist: &[f
                 let base = c.h - style::M_CARD - 2.0;
                 sys_history(c, cpu_hist, BLUE, style::DETAIL_TOP, base - 18.0, cpu / 100.0);
                 let peak = cpu_hist.iter().copied().fold(cpu as f64, f64::max) as f32;
+                // The chart is CPU only, and its caption says so; memory stays in the meter
+                // above, where Medium gives it equal weight.
                 let pw = c.text_base(&format!("Peak {}", sys_pct(peak)), c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, c.w / 2.0);
-                c.text_base(&format!("{mu:.1} of {mt:.0} GB memory in use"), m, base, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m - pw - style::SP[3]);
+                c.text_base("CPU \u{00B7} last minute", m, base, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m - pw - style::SP[3]);
             }
         }
     }
@@ -8730,7 +8879,7 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     // One neutral level colour at every size (the slider, meters and the chosen preset):
     // text1 in dark (a white level, like a lit screen); text2 in light, so the slider is a
     // calm graphite rather than a solid black slab.
-    let fill = if c.light { c.text2() } else { c.text1() };
+    let fill = level_fill(c);
     // The value is read from the main display (DDC/CI); the plate already says brightness.
     let cap = "Main display";
     match sh {
@@ -8743,12 +8892,8 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let tw = c.measure(&pct, r.size, r.weight, Font::Text).0;
             sys_header(c, G_SUN, c.text2(), "Brightness", tw);
             c.text_base(&pct, c.w - m, style::HEADER_BASE, r.size, r.weight, c.text1(), Align::Right, c.w / 2.0);
-            // The slider: 28 tall, track = plate, fill = text1 with the sun in the card colour.
-            let (bx, bw, bh, by) = (m, c.w - 2.0 * m, style::BTN_SECONDARY, 52.0);
-            c.rr(bx, by, bw, bh, bh / 2.0, c.plate());
-            c.rr(bx, by, (bw * v.clamp(0.0, 1.0)).max(bh), bh, bh / 2.0, fill);
-            c.glyph(G_SUN, bx + bh / 2.0, by + bh / 2.0, style::CAPTION.size, c.halo());
-            out.hits.push(((bx, by - style::SP[1], bw, bh + style::SP[3]), WAct::Brightness));
+            let bh = style::BTN_SECONDARY;
+            slider(c, out, m, 52.0, c.w - 2.0 * m, v, G_SUN, WAct::Brightness);
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
                 // Presets: each pill sets its level; the chosen one is filled.
@@ -8856,11 +9001,12 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     } else {
                         SmallSlot::None
                     },
+                    // The third line names what the caption doesn't: the power state, or
+                    // the power source when the caption already is the state.
+                    third: Some((if left.is_some() { status.to_string() } else if plugged || charging { "On AC power".to_string() } else { "On battery power".to_string() }, c.text3())),
                     caption: cap,
                     hero_glyph: charging.then_some(G_BOLT),
-                    third: None,
-                    meter: Some((frac, col, c.w - 2.0 * style::M_CARD - SYS_ACC_W)),
-                    acc: SysAcc::None,
+                    acc: glance_meter(frac, col),
                     detail: SysDetail::Stats([
                         (f.extra.get("time_left").filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| "—".into()), "Time left".into()),
                         (if plugged || charging { "Plugged in" } else { "Battery" }.into(), "Power source".into()),
@@ -8889,7 +9035,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
             let (free_s, total_s, used_s) = (sys_fmt_gb(free), sys_fmt_gb(total), sys_fmt_gb((total - free).max(0.0)));
             let col = sys_disk_col(used);
             let used_pct = format!("{:.0}%", used * 100.0);
-            let stats = SysDetail::Stats([(used_s, "Used".into()), (free_s.clone(), "Free".into()), (total_s.clone(), "Total".into())]);
+            let stats = SysDetail::Stats([(used_s.clone(), "Used".into()), (free_s.clone(), "Free".into()), (total_s.clone(), "Total".into())]);
             if k == SysKind::Disk {
                 let cap = format!("Used on {head}");
                 sys_ring(
@@ -8907,8 +9053,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                         caption: cap,
                         hero_glyph: None,
                         third: Some((format!("{free_s} free of {total_s}"), c.text3())),
-                        meter: None,
-                        acc: SysAcc::Meter(used, col),
+                        acc: glance_meter(used, col),
                         detail: stats,
                     },
                 );
@@ -8922,7 +9067,8 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                 Shape::Dock => sys_dock(c, mark, &free_s, &cap, None, Some((used, col)), &SysSlot::None),
                 Shape::Small => sys_small(c, mark, &SmallSlot::Meter(used, col, used_pct), &free_s, None, &cap, None),
                 _ => {
-                    sys_glance(c, &Glance { mark, hero: &free_s, hero_glyph: None, cap: &cap, third: None, meter: Some((used, col, c.w - style::M_CARD)), acc: &SysAcc::None });
+                    let third = format!("{used_s} used of {total_s}");
+                    sys_glance(c, &Glance { mark, hero: &free_s, hero_glyph: None, cap: &cap, third: Some((&third, c.text3())), acc: &glance_meter(used, col) });
                     if sh == Shape::Large {
                         separator(c, style::SEP_Y_LARGE);
                         if drives.len() > 1 {
@@ -8953,7 +9099,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     // Large shows the shortcut as keycaps, so its third line says which
                     // window the language belongs to instead of repeating the hint.
                     let third = if sh == Shape::Large { "For the window in front" } else { "Win + Space to switch" };
-                    sys_glance(c, &Glance { mark, hero: &code, hero_glyph: None, cap: &full, third: Some((third, c.text3())), meter: None, acc: &SysAcc::None });
+                    sys_glance(c, &Glance { mark, hero: &code, hero_glyph: None, cap: &full, third: Some((third, c.text3())), acc: &SysAcc::None });
                     if sh == Shape::Large {
                         // Only the current language is known: a keycap composition for the shortcut.
                         separator(c, style::SEP_Y_LARGE);
@@ -9002,7 +9148,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     sys_small(c, mark, &slot, &t, None, &cap, None);
                 }
                 _ => {
-                    sys_glance(c, &Glance { mark, hero: &t, hero_glyph: None, cap: &since, third: Some((&third.0, third.1)), meter: None, acc: &SysAcc::None });
+                    sys_glance(c, &Glance { mark, hero: &t, hero_glyph: None, cap: &since, third: Some((&third.0, third.1)), acc: &SysAcc::None });
                     if sh == Shape::Large {
                         separator(c, style::SEP_Y_LARGE);
                         sys_uptime_strip(c, &x.now, days_back, boot_min, boot_day);
@@ -9543,12 +9689,6 @@ fn hours_of(x: &Ctx) -> Vec<f64> {
     (0..24).map(|h| *x.hub.screen.hours.get(h).unwrap_or(&0) as f64).collect()
 }
 
-/// A time like "8 AM".
-fn hour_str(h: usize) -> String {
-    let h = h as u32;
-    format!("{} {}", h12(h), ampm(h))
-}
-
 /// Compact duration for a Mini: "46m", "6.8h", "12h".
 fn dur_mini(secs: u64) -> String {
     let h = secs as f64 / 3600.0;
@@ -9885,35 +10025,51 @@ fn apps_grid(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 (2, 2, MARK_CARD, style::M_SMALL, 10.0)
             }
         }
-        Shape::Medium => {
-            if pins.is_empty() {
-                (2, 1, MARK_CARD, style::M_CARD, MED_MARK_Y)
-            } else {
-                // Four columns, each tile centred in its 59-wide column, with names.
-                let m = style::M_CARD;
-                let cw = (c.w - 2.0 * m) / 4.0;
-                for i in 0..4 {
-                    let cx = m + cw * (i as f32 + 0.5);
-                    let ix = cx - MARK_CARD / 2.0;
-                    match pins.get(i) {
-                        Some(id) => {
-                            out.icons.push((ix, m, MARK_CARD, id.clone()));
-                            out.hits.push(((cx - cw / 2.0, 0.0, cw, c.h), WAct::App(id.clone())));
-                            let name = x.names.get(id).cloned().unwrap_or_default();
-                            c.text_base(&name, cx, 76.0, style::FOOT.size, 400, c.text2(), Align::Center, cw - 4.0);
-                        }
-                        None => app_slot(c, out, ix, m, MARK_CARD, i == pins.len()),
+        Shape::Medium | Shape::Large if !pins.is_empty() => {
+            // Four columns, each tile centred in its 59-wide column, with names. Large keeps
+            // Medium's row pixel for pixel and adds a second labelled row (pitch 44 tile +
+            // 16 label + 12 gap); it never draws empty placeholders, and with fewer than 8
+            // pins it closes with a footnote on the bottom margin.
+            let m = style::M_CARD;
+            let cw = (c.w - 2.0 * m) / 4.0;
+            let large = sh == Shape::Large;
+            let pitch = MARK_CARD + style::SP[6] + gap;
+            let cells = if large { 8 } else { 4 };
+            for i in 0..cells {
+                let cx = m + cw * ((i % 4) as f32 + 0.5);
+                let ty = m + (i / 4) as f32 * pitch;
+                let ix = cx - MARK_CARD / 2.0;
+                match pins.get(i) {
+                    Some(id) => {
+                        out.icons.push((ix, ty, MARK_CARD, id.clone()));
+                        let hy = if large { ty - m } else { 0.0 };
+                        out.hits.push(((cx - cw / 2.0, hy, cw, if large { pitch } else { c.h }), WAct::App(id.clone())));
+                        let name = x.names.get(id).cloned().unwrap_or_default();
+                        c.text_base(&name, cx, ty + 60.0, style::FOOT.size, 400, c.text2(), Align::Center, cw - 4.0);
                     }
+                    None if i == pins.len() => {
+                        app_slot(c, out, ix, ty, MARK_CARD, true);
+                        if large {
+                            c.text_base("Add", cx, ty + 60.0, style::FOOT.size, 400, c.text3(), Align::Center, cw - 4.0);
+                        }
+                    }
+                    // Medium keeps its four slots; Large draws no empty plates.
+                    None if !large => app_slot(c, out, ix, ty, MARK_CARD, false),
+                    None => {}
                 }
-                return;
             }
+            if large && pins.len() < cells {
+                let n = pins.len();
+                rd_foot(c, &format!("{n} pinned \u{00B7} Edit in Launchpad"), "");
+                out.hits.push(((m, c.h - m - 16.0, c.w - 2.0 * m, 20.0), WAct::Search));
+            }
+            return;
         }
+        Shape::Medium => (2, 1, MARK_CARD, style::M_CARD, MED_MARK_Y),
         Shape::Large => {
-            let rows = if pins.is_empty() { 2 } else { 3 };
+            let rows = 2;
             let w = 4.0 * MARK_CARD + 3.0 * gap;
-            let h = rows as f32 * MARK_CARD + (rows - 1) as f32 * gap;
-            let top = if pins.is_empty() { 24.0 } else { (c.h - h) / 2.0 };
-            (4, rows, MARK_CARD, (c.w - w) / 2.0, top)
+            (4, rows, MARK_CARD, (c.w - w) / 2.0, 24.0)
         }
     };
     for i in 0..cols * rows {
@@ -10024,16 +10180,23 @@ fn notes(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             note_tile(c, m, m, bs);
             let tx = m + bs + style::SP[3];
             c.text_base(lines[0], tx, style::HEADER_BASE, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tx);
-            let (pitch, last) = if sh == Shape::Large { (18.0, c.h - m) } else { (18.0, 80.0) };
-            let fits = (((last - 56.0) / pitch).floor() as usize) + 1;
             let body: Vec<&&str> = lines.iter().skip(1).collect();
+            let large = sh == Shape::Large;
+            // Medium: two lines at the Medium pitch. Large: list rows at ROW_L in text1, up to
+            // six; with fewer, a footnote closes the card on the bottom margin.
+            let (first, pitch, fits, ink) = if large { (RD_ROW1, style::ROW_L, 6, c.text1()) } else { (56.0, style::ROW_M, 2, c.text2()) };
             if body.is_empty() {
-                c.text_base("Click to add more", m, 56.0, style::BODY.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
+                c.text_base("Click to add more", m, first, style::BODY.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
             for (i, l) in body.iter().take(fits).enumerate() {
                 // More lines than fit: the last one fades instead of stopping short.
-                let col = if i + 1 == fits && body.len() > fits { c.text3() } else { c.text2() };
-                c.text_base(l, m, 56.0 + i as f32 * pitch, style::BODY.size, 400, col, Align::Left, c.w - 2.0 * m);
+                let col = if i + 1 == fits && body.len() > fits { c.text3() } else { ink };
+                c.text_base(l, m, first + i as f32 * pitch, style::BODY.size, 400, col, Align::Left, c.w - 2.0 * m);
+            }
+            if large && body.len() < fits {
+                let n = lines.len();
+                let foot = format!("{} \u{00B7} Click to edit", if n == 1 { "1 line".to_string() } else { format!("{n} lines") });
+                rd_foot(c, &foot, "");
             }
         }
     }
@@ -10175,20 +10338,35 @@ fn timeline(c: &Canvas, x: &Ctx, sh: Shape) {
             header(c, &badge, "Today", Some((value.as_str(), c.text1())));
             let w = c.w - 2.0 * m;
             let bw = (w / 24.0 * 0.6).round();
-            hour_bars(c, &vals, now, 3600.0, m, style::CONTENT_TOP, w, 22.0, bw);
-            hour_ticks(c, &ticks4, m, w, bw, 79.0);
-            if sh == Shape::Large {
-                separator(c, style::SEP_Y_LARGE);
-                let used: Vec<usize> = (0..24).filter(|h| vals[*h] > 0.0).collect();
-                match (used.first(), used.is_empty()) {
-                    (Some(first), false) => {
-                        let busiest = (0..24).max_by(|a, b| vals[*a].partial_cmp(&vals[*b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
-                        let (a, b, n) = (hour_str(*first), hour_str(busiest), format!("{}h", used.len()));
-                        stat_footer(c, [(&a, "First use"), (&b, "Busiest hour"), (&n, "Active hours")], 132.0);
+            if sh != Shape::Large {
+                hour_bars(c, &vals, now, 3600.0, m, style::CONTENT_TOP, w, 22.0, bw);
+                hour_ticks(c, &ticks4, m, w, bw, 79.0);
+                return;
+            }
+            // Header face (§3): the chart is the idea, so it takes the content region, then a
+            // separator and the stat footer with its labels on the bottom margin.
+            hour_bars(c, &vals, now, 3600.0, m, style::CONTENT_TOP, w, 76.0, bw);
+            hour_ticks(c, &ticks4, m, w, bw, 133.0);
+            separator(c, 142.0);
+            let used: Vec<usize> = (0..24).filter(|h| vals[*h] > 0.0).collect();
+            match used.first() {
+                Some(first) => {
+                    let busiest = (0..24).max_by(|a, b| vals[*a].partial_cmp(&vals[*b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
+                    let cw = w / 3.0;
+                    let lb = c.h - m;
+                    let vb = lb - style::SP[6];
+                    let vs = style::VALUE.size;
+                    for (i, h) in [*first, busiest].iter().enumerate() {
+                        let h = *h as u32;
+                        time_ap(c, &h12(h).to_string(), ampm(h), m + i as f32 * cw, vb, vs, style::VALUE.weight, c.text1(), 1.0);
                     }
-                    _ => {
-                        c.text_base("Counting from now", c.w / 2.0, 152.0, style::CAPTION.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                    c.text_base(&format!("{}h", used.len()), m + 2.0 * cw, vb, vs, style::VALUE.weight, c.text1(), Align::Left, cw);
+                    for (i, l) in ["First use", "Busiest hour", "Active hours"].iter().enumerate() {
+                        c.text_base(l, m + i as f32 * cw, lb, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, cw - style::SP[3]);
                     }
+                }
+                None => {
+                    c.text_base("Counting from now", c.w / 2.0, 172.0, style::CAPTION.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
                 }
             }
         }
@@ -10294,19 +10472,20 @@ fn volume_row(c: &Canvas, out: &mut Painted, x: &Ctx, cy: f32) {
     let m = style::M_CARD;
     let muted = x.control.muted == Some(true);
     let g = if muted { G_MUTE } else { G_VOL };
-    c.glyph(g, m + 8.0, cy, 16.0, c.text2());
     let fs = style::FOOT.size;
     let base = cy + c.cap_h(fs) / 2.0;
-    let (tx0, tx1) = (m + 28.0, c.w - m - 40.0);
+    let tx1 = c.w - m - 40.0;
     match volume_text(x) {
         Some((pct, f)) => {
-            out.hits.push(((m - 6.0, cy - 14.0, 28.0, 28.0), WAct::Mute));
-            c.bar(tx0, cy - style::METER_H / 2.0, tx1 - tx0, style::METER_H, f, BLUE);
+            // The shared level slider; its speaker glyph mutes.
+            let h = style::BTN_SECONDARY;
+            slider(c, out, m, cy - h / 2.0, tx1 - m, f, g, WAct::Volume);
+            out.hits.push(((m, cy - h / 2.0, h, h), WAct::Mute));
             c.text_base(&pct, c.w - m, base, fs, 500, c.text2(), Align::Right, 40.0);
-            out.hits.push(((tx0, cy - 12.0, tx1 - tx0, 24.0), WAct::Volume));
         }
         None => {
-            c.text_base("Volume unavailable", tx0, base, fs, 400, c.text2(), Align::Left, c.w - m - tx0);
+            c.glyph(g, m + 8.0, cy, 16.0, c.text2());
+            c.text_base("Volume unavailable", m + 28.0, base, fs, 400, c.text2(), Align::Left, c.w - m - m - 28.0);
         }
     }
 }
@@ -10461,7 +10640,7 @@ fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str,
                     let g = if x.control.muted == Some(true) { G_MUTE } else { G_VOL };
                     c.glyph(g, sx + 6.0 * k, base - c.cap_h(fs) / 2.0, fs, c.text2());
                     c.text_base(&pct, sx + sw, base, fs, 500, c.text2(), Align::Right, sw - 16.0 * k);
-                    c.bar(sx, 32.0 * k, sw, style::METER_H_COMPACT * k, f, BLUE);
+                    c.bar(sx, 32.0 * k, sw, style::METER_H_COMPACT * k, f, level_fill(c));
                     out.hits.push(((sx, 0.0, sw, c.h), WAct::Volume));
                 }
             }
@@ -10506,8 +10685,9 @@ fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str,
             }
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
-                volume_row(c, out, x, style::DETAIL_TOP + style::ROW_L / 2.0);
-                link_rows(c, out, extra, style::DETAIL_TOP + style::ROW_L + style::SP[1]);
+                // The level slider on the region's top, then the links under it.
+                volume_row(c, out, x, style::DETAIL_TOP + style::BTN_SECONDARY / 2.0);
+                link_rows(c, out, extra, style::DETAIL_TOP + style::BTN_SECONDARY + style::SP[3]);
             }
         }
     }
@@ -10924,7 +11104,7 @@ fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
             c.text_base("Settings", c.w / 2.0, 88.0, style::TITLE.size, 600, c.text1(), Align::Center, c.w - 2.0 * style::M_SMALL);
             c.text_base("Windows", c.w / 2.0, 104.0, style::FOOT.size, 400, c.text2(), Align::Center, c.w - 2.0 * style::M_SMALL);
         }
-        Shape::Medium => {
+        Shape::Medium | Shape::Large => {
             let m = style::M_CARD;
             let p = 44.0;
             cc_plate(c, G_SETTINGS, m, 26.0, p, pf, pi);
@@ -10935,37 +11115,18 @@ fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
             c.text_base("Settings", tx, 44.0, style::TITLE.size, 600, c.text1(), Align::Left, bl - style::SP[3] - tx);
             c.text_base("Windows", tx, 60.0, style::CAPTION.size, 400, c.text2(), Align::Left, bl - style::SP[3] - tx);
             buttons(out, n, c.w - m, 48.0, d, style::SP[3], style::BTN_SECONDARY);
-        }
-        Shape::Large => {
-            // A state tile with the gear, then Medium's shortcuts (plus Apps) as a row of
-            // labelled round buttons on the bottom margin.
-            let inset = style::SP[2];
-            let th = 112.0;
-            c.rr(inset, inset, c.w - 2.0 * inset, th, style::concentric(style::CARD_R, inset), c.plate());
-            let d = 56.0;
-            let (cx, cy) = (inset + style::M_CARD + d / 2.0, inset + th / 2.0);
-            // A card-coloured disc, so the gear separates from the tile behind it.
-            c.circle(cx, cy, d / 2.0, c.halo());
-            c.glyph(G_SETTINGS, cx, cy, 32.0, c.text1());
-            let tx = cx + d / 2.0 + style::SP[5];
-            let vs = style::VALUE.size;
-            c.text_base("Settings", tx, cy - 2.0, vs, 600, c.text1(), Align::Left, c.w - inset - style::M_CARD - tx);
-            c.text_base("Windows", tx, cy + 16.0, style::BODY.size, 400, c.text2(), Align::Left, c.w - inset - style::M_CARD - tx);
-            let m = style::M_CARD;
-            let row = [(G_SCREEN, "Display", "display"), (G_VOL, "Sound", "sound"), (G_WIFI, "Network", "network"), (G_APPS, "Apps", "appsfeatures")];
-            let col_w = (c.w - 2.0 * m) / row.len() as f32;
-            let bd = style::BTN_SECONDARY;
-            let fs = style::FOOT.size;
-            let base = c.h - m - style::SP[1];
-            let bcy = base - c.cap_h(fs) - style::SP[3] - bd / 2.0;
-            let top = inset + th + style::SP[2];
-            for (i, (g, label, page)) in row.into_iter().enumerate() {
-                let x0 = m + i as f32 * col_w;
-                let bx = x0 + col_w / 2.0;
-                c.circle(bx, bcy, bd / 2.0, pf);
-                c.glyph(g, bx, bcy, bd * style::GLYPH_IN, pi);
-                c.text_base(label, bx, base, fs, 500, c.text2(), Align::Center, col_w);
-                out.hits.push(((x0, top, col_w, c.h - top - style::SP[2]), open(page)));
+            if sh == Shape::Large {
+                // Like every single-action tool: Medium unchanged, then glyph-led rows for
+                // the pages the shortcut buttons above don't cover.
+                tool_rows(
+                    c,
+                    out,
+                    &[
+                        row(G_APPS, "Apps", Trail::Go(open("appsfeatures"))),
+                        row(G_BT, "Bluetooth & devices", Trail::Go(open("bluetooth"))),
+                        row(G_PALETTE, "Personalisation", Trail::Go(open("personalization"))),
+                    ],
+                );
             }
         }
     }

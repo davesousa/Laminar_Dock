@@ -48,6 +48,9 @@ Font choice is automatic from size (see §8.3). The weight given here is what to
 | Footnote | 11 | 400 / 500 | text2 (meta text3) | Trailing row values, dock caption, meter labels |
 | Micro | 10 | 600 | text3 or accent | Axis ticks, weekday letters, "PM", mode labels ("FOCUS"); ≤ 6 chars may be uppercase |
 
+- **Time and temperature heroes** (one rule for clocks, weather, sun and timers):
+  - Medium: a time that is the card's only idea (clock, clock-weather, world-time) is Hero XL 44/300. A time or temperature that shares the card with a visual (analog, analog-square, weather, weather-detail, sunrise-sunset, timers) is Hero 32/300. weather-banner's 44 is its designed composition.
+  - Small: every time or temperature hero is 32 at `time_weight`, fitting down to 26 (`style::HERO_S_TIME`).
 - Nothing below 10 px, except Mini values, which may fit down to 11.
 - "AM/PM" suffix: Micro 10/600 text2, top-aligned to the hero's cap top, 3 px after the digits.
 - Mini value: 14/600, fit to 11.
@@ -85,7 +88,9 @@ System accents. Dark uses the iOS dark values already in paint.rs. Light swaps a
 - **Semantic up/down:** green/red only where "up" is a judgment: money, prices, followers. A zero or missing change is text2.
 - **Identity accent:** each widget's chart, meter and ring use the service colour or one fixed metric colour. CPU = blue, memory = purple, battery = green (yellow ≤ 20%, red ≤ 10%), disk = orange, Claude/AI tokens = Claude orange, analytics = blue.
 - An AI-token chart is never green "because it's a chart".
-- **On/off controls:** on = blue fill + white glyph. Off = plate + text1 glyph.
+- **On/off controls:** on = blue fill + white glyph. Off = plate + text1 glyph. A live microphone is "on" (blue); muted is the plate.
+- **Level controls** (brightness, volume): one `slider()` in every family: BTN_SECONDARY (28) tall, fully round, plate track, the glyph at Caption size in the card colour inside the fill. The fill (and any level meter or ring) is the neutral `level_fill()`: text1 in dark, text2 in light. Blue stays for on/off.
+- **Calendar accent:** red, for every event bar, the today circle and the calendar badge. All five calendar faces draw events with the shared `event_row()` (bar 3×13, title Body text1, time Footnote 11/500 text2 right-aligned, ROW_L pitch, Micro day headers for later days).
 - **Primary action button:** the widget's mode colour (Focus red, Timer blue, Stopwatch orange).
 
 ### 2.4 Badges, icons, controls
@@ -96,6 +101,8 @@ System accents. Dark uses the iOS dark values already in paint.rs. Light swaps a
 | Fluent glyph | 18 / 22 | 16 in a 30 plate | 16 in a 28 plate | 16 (header), 24 (Large feature) |
 | Primary button | — | 30 | 28 | 36 |
 | Secondary button | — | 26 | 24 | 28 |
+
+- **Media transport:** every media face uses `transport()`: the primary play/pause is a filled text1 disc with a card-coloured glyph, prev/next are secondary plates. A Medium whose two text lines leave only 32 px under them (now-playing, now-playing-disc) uses the Small sizes. now-playing-bar keeps its capsule, with glyphs at the transport's sizes.
 
 - Glyph inside a button or plate = 0.45 × its diameter.
 - Hit targets ≥ 28.
@@ -181,7 +188,7 @@ System accents. Dark uses the iOS dark values already in paint.rs. Light swaps a
 - **Single-action tools** (dark-mode, focus, notifications, show-desktop, keep-awake, screenshot, run, search, recycle-bin, windows-settings):
   - Small: plate 44 centred at y 22; label 13/600 centred, baseline 88; state 11 text2, baseline 104.
   - Medium: plate 44 at (16, 26), label + state to its right.
-  - Large: a state tile at inset 6 (radius 12), full width and 112 tall, with a glyph 32 in a 56 circle (blue when on), label 17/600 and state 13 text2. Below it, two footnote rows of real facts (e.g. "Until 6:00 PM", "3 notifications", "Recycle bin: 214 MB"). Use a one-line description only when no fact exists.
+  - Large: Medium unchanged (§3), then the separator at 96 and up to three glyph-led rows at ROW_L (leading 16 glyph; trailing fact, keycap or chevron), or a footnote row. microphone and windows-settings follow the same pattern. (The earlier full-width "state tile" Large is retired: it broke Large = Medium pixel for pixel.)
 - **Clocks:**
   - Time heroes use weight 300 at ≥ 32, 400 at 20–31 and 600 below 20. Never 200.
   - Seconds only in Large digital, in text3.
@@ -201,7 +208,9 @@ System accents. Dark uses the iOS dark values already in paint.rs. Light swaps a
   - brightness with no data: shows the setup state (§7) with "Not supported on this display", not "—".
 - **Lists/feeds** (linear, agenda, github-overview, top-cpu, top-memory, recent-files, watchlist): keep the row pitch. Large shows 5 rows. With fewer items, end with a footnote summary row ("6 open · 2 in progress").
   - watchlist Large keeps Medium's rows (same pitch) and adds one chart of the first symbol's day under them, since the feed carries one intraday series; Dock L shows that series as its sparkline.
-- **Apps grid:** tiles 44, radius 10, gap 12. Rows must be full. Large is a 4×3 grid; never leave an orphan tile on its own row.
+- **Apps grid:** tiles 44, radius 10, gap 12. Medium is one labelled row of four. Large keeps that row pixel for pixel and adds a second labelled row (pitch 44 + 16 + 12); it never draws empty placeholder plates, puts the "+" (labelled "Add") after the last app, and with fewer than 8 pins ends with a footnote ("5 pinned · Edit in Launchpad").
+- **System meters** (battery, memory, disk, storage): one Glance meter slot (`glance_meter()`): the third line on the left, a 6 px meter in the right accessory box at y 70.
+- **Glance Large with a history:** the chart from y 108 to ~146, then the three-stat footer (values 166, labels 182) in every family: finance and analytics "Today / Daily avg / Best day", AI usage "Today / Daily avg / Peak". A Large history chart replaces the Medium's accessory sparkline.
 
 ## 6. Light vs dark
 

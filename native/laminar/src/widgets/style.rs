@@ -52,6 +52,9 @@ pub const HERO_XL: Type = ty(44.0, 600, 28.0);
 pub const HERO: Type = ty(32.0, 600, 22.0);
 /// Small key value.
 pub const HERO_S: Type = ty(26.0, 600, 18.0);
+/// Small time or temperature hero (clocks, weather, sun, timers): 32, fitting down to 26;
+/// pass `time_weight(size)` as the weight.
+pub const HERO_S_TIME: Type = ty(32.0, 300, 26.0);
 /// Dock value, chart-header value, secondary stat values.
 pub const VALUE: Type = ty(17.0, 600, 13.0);
 /// Header-row title, list emphasis.
