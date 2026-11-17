@@ -6324,7 +6324,12 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
                     c.text_base("Humidity", r, 41.0 * kk, fs, 400, ink.t2, Align::Right, slot_w);
                 }
                 WeatherKind::Hourly | WeatherKind::Week => {
-                    let cols: Vec<(String, String)> = if k == WeatherKind::Hourly { hours.iter().skip(1).take(3).map(|(l, _, t)| (l.clone(), t.clone())).collect() } else { days.iter().skip(1).take(3).map(|d| (d.label.clone(), deg(d.hi))).collect() };
+                    // The dock slot fits three short columns: "11 PM" becomes "11p" (the Day Timeline axis style).
+                    let short = |l: &str| match l.rsplit_once(char::is_whitespace) {
+                        Some((h, ap)) if ap == "AM" || ap == "PM" => format!("{h}{}", if ap == "AM" { 'a' } else { 'p' }),
+                        _ => l.to_string(),
+                    };
+                    let cols: Vec<(String, String)> = if k == WeatherKind::Hourly { hours.iter().skip(1).take(3).map(|(l, _, t)| (short(l), t.clone())).collect() } else { days.iter().skip(1).take(3).map(|d| (d.label.clone(), deg(d.hi))).collect() };
                     let cw = slot_w / 3.0;
                     for (i, (l, t)) in cols.iter().enumerate() {
                         let cx = slot_x + cw * (i as f32 + 0.5);
