@@ -945,9 +945,10 @@ fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, con
                         separator(c, style::SEP_Y_LARGE);
                         let (x, y, w, h) = detail_region(c);
                         let bottom = y + h;
-                        // Three footer columns: value bar over label bar, from the value's baseline.
+                        // Three footer columns (two take half the row each, as the loaded
+                        // footer does): value bar over label bar, from the value's baseline.
                         let footer = |n: usize, base: f32| {
-                            let colw = w / 3.0;
+                            let colw = w / n.clamp(2, 3) as f32;
                             for i in 0..n.min(3) {
                                 skeleton(c, x + i as f32 * colw, base - 12.0, 40.0, 12.0);
                                 skeleton(c, x + i as f32 * colw, base + style::SP[6] - 8.0, 28.0, 8.0);
@@ -1105,7 +1106,8 @@ fn ident(c: &Canvas, conn: &str) -> Option<Col> {
     match conn {
         "claude_code" | "anthropic" => Some(CLAUDE),
         "openai" => Some(TEAL),
-        "codex" => Some(if c.light { hex(0x6E7378) } else { hex(0x9AA0A6) }),
+        // Full-strength ink, not a mid grey that reads as disabled or no data.
+        "codex" => Some(if c.light { hex(0x1C1C1E) } else { (1.0, 1.0, 1.0, 0.85) }),
         "openrouter" => Some(INDIGO),
         "plausible" | "umami" | "supabase" | "search_console" | "resend" => Some(BLUE),
         "github" => Some(if c.light { hex(0x2DA44E) } else { hex(0x39D353) }),
@@ -1235,6 +1237,18 @@ fn mini_money(v: f64, cur: Option<&str>) -> String {
         format!("{a:.0}")
     };
     format!("{}{body}", &full[..start])
+}
+
+/// Money for one stats row, in one format: cents only when every value is under 100
+/// ("$44.33 · $46.90 · $72.82"), else whole units throughout ("$84 · $99 · $163").
+fn money_row(vals: &[f64], cur: Option<&str>) -> Vec<String> {
+    let whole = vals.iter().any(|v| v.abs() >= 99.995);
+    vals.iter()
+        .map(|&v| {
+            let s = money(if whole { v.round() } else { v }, cur);
+            if whole { s.strip_suffix(".00").map(str::to_string).unwrap_or(s) } else { s }
+        })
+        .collect()
 }
 
 /// Mini's count (≤ 5 glyphs), the same rule as money: one decimal under 10K ("4.0K"),
@@ -1397,7 +1411,8 @@ enum Detail2 {
     Heat(Vec<f32>, usize),
     /// Followers: the next milestone and its meter, over the account's numbers in a footer
     /// (the box's number among them, so the box gives way).
-    Social(Vec<(String, String)>, Option<(f32, String)>, Col),
+    /// The milestone is (progress since the previous one, "Next: 2.5K", "100 to go").
+    Social(Vec<(String, String)>, Option<(f32, String, String)>, Col),
     /// Three stats, then the paid / trial split, its footnote and (right) the stats' period.
     Subs(Vec<(String, String)>, f32, Col, String, String),
     /// Three stats, then a secondary pill that opens the credits page (OpenRouter).
@@ -1565,15 +1580,27 @@ impl Look {
             }
             Detail2::Heat(grid, streak) => heat_weeks(c, grid, *streak, x.now.weekday as usize, self.trend()),
             Detail2::Social(items, next, meter) => {
-                if let Some((frac, label)) = next {
+                if let Some((frac, title, label)) = next {
                     let fs = style::TITLE.size;
                     let lw = c.text_base(label, rx + rw, SOCIAL_HEAD_BASE, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Right, rw / 2.0);
-                    c.text_base("Next milestone", rx, SOCIAL_HEAD_BASE, fs, style::TITLE.weight, c.text1(), Align::Left, rw - lw - style::SP[3]);
+                    c.text_base(title, rx, SOCIAL_HEAD_BASE, fs, style::TITLE.weight, c.text1(), Align::Left, rw - lw - style::SP[3]);
                     let mh = style::METER_H;
                     c.rr(rx, SOCIAL_METER_Y, rw, mh, mh / 2.0, c.track());
                     c.rr(rx, SOCIAL_METER_Y, (rw * frac.clamp(0.0, 1.0)).max(mh), mh, mh / 2.0, *meter);
                 }
-                stats_row(c, items, HDR_FOOT_BASE);
+                if items.len() == 2 {
+                    // Two numbers (Instagram) take half the row each, so no third of the
+                    // row is left empty; the left edge stays on the margin.
+                    let cw = rw / 2.0;
+                    for (i, (v, label)) in items.iter().enumerate() {
+                        let x0 = rx + i as f32 * cw;
+                        let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
+                        c.text_base(&v, x0, HDR_FOOT_BASE, fs, style::VALUE.weight, c.text1(), Align::Left, c.w);
+                        c.text_base(label, x0, HDR_FOOT_BASE + style::SP[6], style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, cw - style::SP[1]);
+                    }
+                } else {
+                    stats_row(c, items, HDR_FOOT_BASE);
+                }
             }
             Detail2::Subs(items, paid, red, note, period) => {
                 stats_row(c, items, SUBS_FOOT_BASE);
@@ -1815,7 +1842,7 @@ fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look
                 }
             }
             items.truncate(3);
-            let next = milestone(v).map(|(frac, target)| (frac, format!("{} to {}", super::grouped((target - v).ceil() as i64), compact_tight(target))));
+            let next = milestone(v).map(|(frac, target)| (frac, format!("Next: {}", compact_tight(target)), format!("{} to go", super::grouped((target - v).ceil() as i64))));
             if !items.is_empty() || next.is_some() {
                 // Brand tiles that are black (X, TikTok) fill the meter with the text ink.
                 let (r, g, b) = (badge.bg.0, badge.bg.1, badge.bg.2);
@@ -1868,7 +1895,7 @@ fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look
                     // One Large recipe across families (§3 detail order): the history chart,
                     // then the same three numbers the -chart variants compute.
                     "plausible" | "umami" => vec![(super::grouped(s[s.len() - 1] as i64), "Today".into()), (super::grouped(mean(s).round() as i64), "Daily avg".into()), (super::grouped(max_of(s) as i64), "Best day".into())],
-                    _ if cur.is_some() => vec![(money(s[s.len() - 1], cur), "Today".into()), (money(mean(s), cur), "Daily avg".into()), (money(max_of(s), cur), "Best day".into())],
+                    _ if cur.is_some() => money_row(&[s[s.len() - 1], mean(s), max_of(s)], cur).into_iter().zip(["Today", "Daily avg", "Best day"]).map(|(v, l)| (v, l.to_string())).collect(),
                     _ => vec![(compact(s[s.len() - 1]), "Today".into()), (compact(mean(s)), "Daily avg".into()), (compact(max_of(s)), "Best day".into())],
                 };
                 if !items.is_empty() {
@@ -1917,7 +1944,9 @@ fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     let g = got(x, conn);
     let tpl = match conn {
         "revenuecat" => Tpl::Glance { acc: Sk::Stat, boxed: Sk::Stat, third: false, detail: Detail::Subs },
-        "x" | "tiktok" | "youtube" | "instagram" => Tpl::Glance { acc: Sk::Stat, boxed: Sk::Stat, third: true, detail: Detail::Footer(3) },
+        "x" | "tiktok" | "youtube" => Tpl::Glance { acc: Sk::Stat, boxed: Sk::Stat, third: true, detail: Detail::Footer(3) },
+        // Instagram's API gives two account numbers (posts, following).
+        "instagram" => Tpl::Glance { acc: Sk::Stat, boxed: Sk::Stat, third: true, detail: Detail::Footer(2) },
         "cursor" => Tpl::Glance { acc: Sk::Stat, boxed: Sk::None, third: true, detail: Detail::Rows },
         "gmail" => Tpl::Glance { acc: Sk::Note, boxed: Sk::None, third: true, detail: Detail::Rows },
         "github" => Tpl::Glance { acc: Sk::Week, boxed: Sk::Week, third: false, detail: Detail::Heat },
@@ -2087,6 +2116,29 @@ impl ChartLook {
     }
 }
 
+/// A single-metric chart card's title: the metric, not the service (the badge carries the
+/// service, the line under the title the period). None for prices (titled by symbol).
+fn chart_metric(conn: &str) -> Option<&'static str> {
+    match conn {
+        "stripe" | "lemonsqueezy" | "paddle" | "shopify" | "gumroad" | "polar" => Some("Revenue"),
+        "plausible" | "umami" => Some("Visitors"),
+        "supabase" => Some("API requests"),
+        "claude_code" => Some("Tokens"),
+        "anthropic" | "openai" => Some("API spend"),
+        _ => None,
+    }
+}
+
+/// Small's top-line label for count faces, where no "$" says what the number counts.
+fn chart_small_metric(conn: &str) -> Option<&'static str> {
+    match conn {
+        "plausible" | "umami" => Some("Visitors"),
+        "supabase" => Some("Requests"),
+        "claude_code" => Some("Tokens"),
+        _ => None,
+    }
+}
+
 fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badge) -> ChartLook {
     let v = f.value.unwrap_or(0.0);
     let cur = f.currency.as_deref();
@@ -2096,7 +2148,7 @@ fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badg
     let caption = if f.caption.is_empty() { "Last 30 days".to_string() } else { f.caption.clone() };
     let mut l = ChartLook {
         badge: *badge,
-        title: def.name.trim_end_matches(" Chart").to_string(),
+        title: chart_metric(conn).map(str::to_string).unwrap_or_else(|| def.name.trim_end_matches(" Chart").to_string()),
         sub: caption.clone(),
         period: period_of(&caption),
         value: headline(f),
@@ -2110,15 +2162,15 @@ fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badg
         series: s.clone(),
         footer: Vec::new(),
     };
-    let fmt = |v: f64| if cur.is_some() { money(v, cur) } else { compact(v) };
     if !s.is_empty() {
-        l.footer = vec![(fmt(last), "Today".into()), (fmt(mean(s)), "Daily avg".into()), (fmt(max_of(s)), "Best day".into())];
+        let vals = [last, mean(s), max_of(s)];
+        let texts = if cur.is_some() { money_row(&vals, cur) } else { vals.iter().map(|v| compact(*v)).collect() };
+        l.footer = texts.into_iter().zip(["Today", "Daily avg", "Best day"]).map(|(v, l)| (v, l.to_string())).collect();
     }
     match conn {
         "claude_code" => {
             let n = s.len();
             let total: f64 = s.iter().sum();
-            l.title = def.name.to_string();
             l.sub = format!("{n} days");
             l.period = l.sub.clone();
             l.dock_cap = l.sub.clone();
@@ -2129,7 +2181,6 @@ fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badg
             }
         }
         "anthropic" | "openai" => {
-            l.title = def.name.to_string();
             l.plot = Plot::Cumulative;
             l.period = caption.clone();
             let days = s.len().max(1) as f64;
@@ -2140,16 +2191,14 @@ fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badg
                 _ => 31.0,
             };
             let avg = v / days;
-            l.footer = vec![(money(last, cur), "Today".into()), (money(avg, cur), "Daily avg".into()), (money(avg * in_month, cur), "Projected".into())];
+            l.footer = money_row(&[last, avg, avg * in_month], cur).into_iter().zip(["Today", "Daily avg", "Projected"]).map(|(v, l)| (v, l.to_string())).collect();
         }
         "plausible" | "umami" => {
-            l.title = "Visitors".into();
             l.value = super::grouped(v.round() as i64);
             l.dock_cap = "Visitors".into();
             l.footer = vec![(super::grouped(last as i64), "Today".into()), (super::grouped(mean(s).round() as i64), "Daily avg".into()), (super::grouped(max_of(s) as i64), "Best day".into())];
         }
         "supabase" => {
-            l.title = "API requests".into();
             l.sub = l.period.clone();
             l.dock_cap = "API requests".into();
             // The usage API returns sub-day buckets over 7 days: summed into 7 daily bars,
@@ -2196,11 +2245,9 @@ fn chart_look(c: &Canvas, def: &Def, x: &Ctx, conn: &str, f: &Feed, badge: &Badg
 fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
     // The loading skeleton names the card the way the loaded header will.
-    let title = match conn {
-        "plausible" | "umami" => "Visitors".to_string(),
-        "supabase" => "API requests".to_string(),
-        "claude_code" | "anthropic" | "openai" => def.name.to_string(),
-        _ => match &g {
+    let title = match chart_metric(conn) {
+        Some(m) => m.to_string(),
+        None => match &g {
             Got::Feed(f) => f.extra.get("symbol").cloned().unwrap_or_else(|| def.name.trim_end_matches(" Chart").to_string()),
             _ => def.name.trim_end_matches(" Chart").to_string(),
         },
@@ -2246,10 +2293,20 @@ fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
                 }
                 None => 0.0,
             };
-            // The period beside the change ("30 days"); its short form ("24h") only when
-            // both won't fit whole.
+            // The label beside the change; a period's short form ("24h") only when both
+            // won't fit whole.
             let avail = right - lx - dw;
-            let period = if c.measure(&l.period, fs, 400, Font::Text).0 <= avail { l.period.clone() } else { short_period(&l.period) };
+            let fits = |t: &str| c.measure(t, fs, 400, Font::Text).0 <= avail;
+            // Counts name what they count ("Visitors · 30d", or just "Visitors"); money
+            // shows the period, since "$" already says what the number is.
+            let period = match chart_small_metric(conn) {
+                Some(m) => {
+                    let with = format!("{m} · {}", short_period(&l.period));
+                    if !l.period.is_empty() && fits(&with) { with } else { m.to_string() }
+                }
+                None if fits(&l.period) => l.period.clone(),
+                None => short_period(&l.period),
+            };
             c.text_base(&period, lx, 28.0, fs, 400, c.text2(), Align::Left, avail);
             let (v, vfs) = fit_value(c, &l.value, style::HERO_S, right - m);
             c.text_base(&v, m, 62.0, vfs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);

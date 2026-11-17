@@ -637,7 +637,13 @@ pub fn sample(conn: &str) -> Feed {
             value: Some(96_412.0),
             currency: Some("USD".into()),
             delta_pct: Some(2.3),
-            series: walk(conn, 96, 94_000.0, 500.0, 25.0),
+            // Like the real feed: the series opens at the price 2.3% below and ends on the
+            // current price, so its high, low and open are the footer's.
+            series: {
+                let w = walk(conn, 96, 94_000.0, 500.0, 25.0);
+                let (n, a, b) = (w.len() as f64 - 1.0, 96_412.0 / 1.023 - w[0], 96_412.0 - w[w.len() - 1]);
+                w.iter().enumerate().map(|(i, v)| v + a + (b - a) * i as f64 / n).collect()
+            },
             extra: ex(&[("symbol", "BTC"), ("name", "Bitcoin")]),
             ..Default::default()
         },
