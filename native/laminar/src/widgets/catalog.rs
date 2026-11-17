@@ -275,7 +275,7 @@ const B_UMAMI: Badge = mono("U", 0x1F1F24, 0xFFFFFF);
 const B_RESEND: Badge = mono("R", 0x0B0B0D, 0xFFFFFF);
 const B_LINEAR: Badge = mono("L", 0x5E6AD2, 0xFFFFFF);
 const B_SUPABASE: Badge = gly("\u{E945}", 0x1F3D2E, 0x3ECF8E);
-const B_VERCEL: Badge = gly("\u{E70E}", 0x000000, 0xFFFFFF);
+const B_VERCEL: Badge = mono("V", 0x000000, 0xFFFFFF);
 const B_GITHUB: Badge = gly("\u{E943}", 0x24292F, 0xFFFFFF);
 const B_LEETCODE: Badge = mono("LC", 0xFFA116, 0x1B1B1B);
 const B_GMAIL: Badge = gly("\u{E715}", 0xEA4335, 0xFFFFFF);
@@ -285,8 +285,8 @@ const B_YOUTUBE: Badge = gly("\u{E768}", 0xFF0033, 0xFFFFFF);
 const B_INSTAGRAM: Badge = gly("\u{E722}", 0xD62976, 0xFFFFFF);
 const B_STOCKS: Badge = gly("\u{E9D2}", 0x1F4A2C, 0x3EE06A);
 const B_CRYPTO: Badge = mono("₿", 0xF7931A, 0xFFFFFF);
-const B_CPU: Badge = gly("\u{E950}", 0x2C2C34, 0x0A84FF);
-const B_MEM: Badge = gly("\u{E964}", 0x2C2C34, 0xBF5AF2);
+const B_CPU: Badge = gly("\u{E950}", 0x0A84FF, 0xFFFFFF);
+const B_MEM: Badge = gly("\u{E964}", 0xBF5AF2, 0xFFFFFF);
 const B_CAL: Badge = gly("\u{E787}", 0xFF3B30, 0xFFFFFF);
 const B_FILES: Badge = gly("\u{E8B7}", 0xF2B84B, 0x1B1B1B);
 
@@ -311,7 +311,7 @@ pub static ALL: &[Def] = &[
     tall(w("agenda", "Agenda", "Your upcoming events.", &[Productivity], Face::List { conn: "calendar", badge: B_CAL, open: "" })),
     dock(w("whatsapp", "WhatsApp", "Shows when WhatsApp has new messages. Click to open it.", &[Productivity], Face::Tool(ToolKind::WhatsApp)), 1.0),
     // ------------------------------------------------------------ Finance
-    w("revenue-goal", "Revenue Goal", "Revenue across your connected providers against a monthly goal.", &[Finance], Face::Goal),
+    w("revenue-goal", "Revenue Goal", "Revenue across your connected providers against your goal.", &[Finance], Face::Goal),
     w("stripe", "Stripe", "Net revenue in the last 30 days.", &[Finance], Face::Stat { conn: "stripe", badge: B_STRIPE, open: "https://dashboard.stripe.com" }),
     w("stripe-chart", "Stripe Chart", "Daily net revenue for 30 days.", &[Highlights, Finance], Face::Chart { conn: "stripe", badge: B_STRIPE, open: "https://dashboard.stripe.com" }),
     w("lemonsqueezy", "Lemon Squeezy", "Revenue in the last 30 days.", &[Finance], Face::Stat { conn: "lemonsqueezy", badge: B_LEMON, open: "https://app.lemonsqueezy.com" }),
