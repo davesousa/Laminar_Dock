@@ -298,6 +298,21 @@ Checked (agent, overnight): builds with no warnings; 66 tests pass (new: Startup
 
 ⚠️ Still needs a real screen: animations (the Start reflection, hover fades, lift) can't run on a locked screen; the frosted glass itself; the see-through headroom with a real mouse (the driver can't reproduce Windows' leave tracking); the reviewers' remaining minor items (several Large cards leave empty space at the bottom, e.g. social counts, storage, RevenueCat; small-card truncation on Linear, Connectivity, Screenshot; dock S legibility of month/week).
 
+### Widget polish audit (2026-11-16, branch `widget-polish`, not released)
+
+Dave's request: make every widget polished and clean at all three sizes, as if Apple designed it. Split the work so reviewers (design) and editors (code) are different agents, and so no single agent handles all 109 widgets. No screen access during this phase.
+
+| Stage | Who | Result |
+| --- | --- | --- |
+| Design system | 1 design lead, 1 foundations editor | Spec in [widget-design.md](widget-design.md): margins, type roles, radii, colour roles, what each size shows, empty/setup/error states, review checklist. Shared tokens in `widgets/style.rs`; theme, text (tabular figures, cap-height alignment), chart, badge and placeholder helpers in `canvas.rs`/`paint.rs`. Money: cents only under $100, compact from $10K. The foundations commit (3fb56b7) went out in 0.2.8 with that release. |
+| Review | 14 reviewers, 6–10 widgets each | 503 findings across 6 renders per widget (3 dock sizes + Small, Medium, Large), dark, light and empty |
+| Edit | 8 editors, one per drawing-code family (connector cards, rich data, clocks, weather and progress, timers and media, system, tools, Control Center), each in its own worktree | Families own disjoint functions in `paint.rs`; shared changes went to the merge as requests |
+| Verify | Independent design QA per family, up to 2 fix rounds | 7 of 8 families passed. Connector cards ended with 1 major (chart-led Small cards say the period but not what is counted) and minors. |
+| Merge | Merge manager | All 8 branches merged; name clashes renamed; dead code removed; 0 warnings |
+| Consistency | 3 cross-family reviewers + a final polish editor | 21 blocker/major issues fixed: one calendar event row, one time-hero rule, one Large chart+footer recipe, shared slider and media transport, system meters in one slot, world clocks, notes, day timeline, sunrise arc at night, apps grid |
+
+Checked (agent, 2026-11-16): builds with 0 warnings; `cargo test -p laminar` 14 pass, 1 known failure (`launchpad_search::tests::real_searches` depends on installed apps, failed before this work too); category sheets rendered dark and light and looked at. ⚠️ Not checked on a real screen: frosted glass behind the new cards, dock magnification of the new dock layouts, hit areas with a real mouse, 4K display. Open minor items from QA (sample-data artefacts, a few wrapping labels such as "Dark mode" in Quick Controls, Calendar Medium's small month grid, mixed cents in Paddle/Gumroad footers) are listed in the workflow results and are the next polish pass.
+
 ### Updates in place in Settings, and Launchpad closing reliably (2026-11-16, released in 0.2.8)
 
 | Problem (Dave) | Fix |
