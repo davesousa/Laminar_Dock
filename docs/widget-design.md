@@ -200,7 +200,7 @@ System accents. Dark uses the iOS dark values already in paint.rs. Light swaps a
   - network Large: two-series chart (down blue, up green) with the current rates in the header.
   - brightness with no data: shows the setup state (§7) with "Not supported on this display", not "—".
 - **Lists/feeds** (linear, agenda, github-overview, top-cpu, top-memory, recent-files, watchlist): keep the row pitch. Large shows 5 rows. With fewer items, end with a footnote summary row ("6 open · 2 in progress").
-  - watchlist Large adds a 48 px sparkline per row between symbol and price, not wider spacing.
+  - watchlist Large keeps Medium's rows (same pitch) and adds one chart of the first symbol's day under them, since the feed carries one intraday series; Dock L shows that series as its sparkline.
 - **Apps grid:** tiles 44, radius 10, gap 12. Rows must be full. Large is a 4×3 grid; never leave an orphan tile on its own row.
 
 ## 6. Light vs dark

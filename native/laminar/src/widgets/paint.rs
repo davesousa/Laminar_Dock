@@ -704,7 +704,7 @@ fn compactish(sh: Shape) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    if rd_placeholder(c, out, def.name, "", badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -748,7 +748,7 @@ fn stat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
 #[allow(clippy::too_many_arguments)]
 fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    if rd_placeholder(c, out, def.name, "", badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -790,7 +790,7 @@ fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
 #[allow(clippy::too_many_arguments)]
 fn usage(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, badge: &Badge, open: &str, sh: Shape) {
     let g = got(x, conn);
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    if rd_placeholder(c, out, def.name, "", badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -865,6 +865,8 @@ enum Acc {
     /// The last 7 days as heat cells over weekday initials: values (oldest first), colour,
     /// today's weekday (0 = Sunday).
     Week(Vec<f32>, Col, usize),
+    /// A label (11 text2) over a sparkline in the colour (1.5 stroke, no fill).
+    Spark(Vec<f64>, Col, String),
 }
 
 /// The text of a rich Dock pill.
@@ -987,6 +989,10 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: Acc) {
             let rr = RD_DOT / 2.0 * k;
             c.circle(r - tw - style::SP[2] * k - rr, base - c.cap_h(fs11) / 2.0, rr, col);
         }
+        Acc::Spark(vals, col, label) => {
+            c.text_base(&label, r, 24.0 * k, fs11, 400, c.text2(), Align::Right, slot_w);
+            c.chart(slot_x, 30.0 * k, slot_w, 10.0 * k, &vals, col, ChartOpts { fill: false, dot: false, stroke: style::STROKE_SPARK * k, smooth: vals.len() >= 8 });
+        }
         Acc::Week(vals, col, today) => {
             let (cell, gap) = (8.0 * k, 2.5 * k);
             let n = vals.len().min(7);
@@ -1000,6 +1006,45 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: Acc) {
             }
         }
     }
+}
+
+/// `placeholder()` with this family's dock setup state: the name fits 13 → 11 (then the
+/// short name) before it ellipsizes, and Dock L puts a blue Connect pill in the accessory
+/// slot with the one-line reason under the name.
+fn rd_placeholder(c: &Canvas, out: &mut Painted, name: &str, short: &str, badge: &Badge, conn: &'static str, g: &Got, sh: Shape) -> bool {
+    let reason = match (g, sh) {
+        (Got::Setup(m), Shape::Dock) => m.clone(),
+        _ => return placeholder(c, out, name, badge, conn, g, sh),
+    };
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect(conn)));
+    let k = c.h / 54.0;
+    let m = style::M_DOCK * k;
+    let bs = style::BADGE_DOCK * k;
+    c.badge(badge, m, (c.h - bs) / 2.0, bs);
+    let x0 = m + bs + style::SP[4] * k;
+    let wide = c.w >= c.h * 3.4;
+    let mut right = c.w - m;
+    if wide {
+        let fs = style::CAPTION.size * k;
+        let ph = 26.0 * k;
+        let pw = c.measure("Connect", fs, 600, Font::Text).0 + 2.0 * 14.0 * k;
+        let (px, py) = (c.w - m - pw, (c.h - ph) / 2.0);
+        c.rr(px, py, pw, ph, ph / 2.0, c.blue());
+        c.text_cap("Connect", px + pw / 2.0, py + (ph - c.cap_h(fs)) / 2.0, fs, 600, WHITE, Align::Center, pw);
+        right = px - style::SP[4] * k;
+    }
+    let tw = right - x0;
+    let (big, min) = (style::TITLE.size * k, style::TITLE.min * k);
+    let label = if c.measure(name, min, 600, Font::Text).0 <= tw || short.is_empty() { name } else { short };
+    let fs = rd_fit(c, label, big, min, 600, tw);
+    c.text_base(label, x0, 30.0 * k, fs, 600, c.text1(), Align::Left, tw);
+    if wide {
+        let cs = rd_fit(c, &reason, style::FOOT.size * k, style::FOOT.min * k, 400, tw);
+        c.text_base(&reason, x0, 44.0 * k, cs, 400, c.text2(), Align::Left, tw);
+    } else {
+        c.text_base("Connect", x0, 44.0 * k, style::FOOT.size * k, 600, c.blue(), Align::Left, tw);
+    }
+    true
 }
 
 /// Small card top row: badge (or visual) 28 at the margin and a top-right accessory text.
@@ -1360,7 +1405,7 @@ fn heat(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
         rd_heat_layout(c, None, conn, badge, color, today, sh);
         return;
     }
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    if rd_placeholder(c, out, def.name, "", badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -1632,8 +1677,8 @@ fn rd_list_model(c: &Canvas, conn: &str, f: &Feed, sh: Shape) -> LModel {
             let total_gb = f.extra.get("total_gb").and_then(|v| v.parse::<f64>().ok());
             let frac = f.frac.unwrap_or(if mem { total_gb.map(|t| (total / t) as f32).unwrap_or(0.0) } else { (total / 100.0) as f32 });
             md.meta = if mem { format!("{} used", rd_gb(total, false)) } else { format!("{} total", rd_pct(total)) };
-            // The Small slot is 62 px: whole gigabytes keep "used" in it.
-            md.meta_small = if mem { format!("{} used", rd_gb(total, true)) } else { md.meta.clone() };
+            // The Small slot is 62 px: the same one-decimal figure, without "used".
+            md.meta_small = if mem { rd_gb(total, false) } else { md.meta.clone() };
             md.mini = if mem { rd_gb(total, true) } else { rd_pct(total) };
             match f.rows.first() {
                 Some(r) => {
@@ -1666,7 +1711,7 @@ fn rd_list_model(c: &Canvas, conn: &str, f: &Feed, sh: Shape) -> LModel {
                 }
             } else {
                 let sum: f64 = f.rows.iter().take(n).filter_map(|r| r.value.trim_end_matches('%').trim().parse::<f64>().ok()).sum();
-                format!("Top {n} apps use {} of {}", rd_pct(sum), rd_pct(total))
+                format!("Top {n} \u{00B7} {} of CPU", rd_pct(sum))
             };
             md.empty = (if mem { "\u{E964}" } else { "\u{E950}" }, "Nothing busy right now");
         }
@@ -1842,13 +1887,13 @@ fn list(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     let title = if conn == "github" { "GitHub" } else { def.name };
     if matches!(g, Got::Loading) && !matches!(sh, Shape::Mini | Shape::Dock) {
         match (conn, sh) {
-            ("github", _) => rd_github_skeleton(c, badge, sh),
+            ("github", _) => rd_github_skeleton(c, badge, &x.now, sh),
             ("calendar", Shape::Small) => rd_hero_skeleton(c, badge, 0.6),
             _ => rd_list_skeleton(c, badge, title, sh),
         }
         return;
     }
-    if placeholder(c, out, def.name, badge, conn, &g, sh) {
+    if rd_placeholder(c, out, def.name, "", badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -1978,7 +2023,7 @@ fn rd_month_bars(c: &Canvas, months: &[(u32, f32)], scale: Option<(f32, Col)>) {
 }
 
 /// Loading skeleton of GitHub Overview at Small, Medium and Large.
-fn rd_github_skeleton(c: &Canvas, badge: &Badge, sh: Shape) {
+fn rd_github_skeleton(c: &Canvas, badge: &Badge, now: &super::Now, sh: Shape) {
     if sh == Shape::Small {
         rd_hero_skeleton(c, badge, 0.5);
         return;
@@ -1993,7 +2038,8 @@ fn rd_github_skeleton(c: &Canvas, badge: &Badge, sh: Shape) {
     }
     if sh == Shape::Large {
         separator(c, style::SEP_Y_LARGE);
-        let months: Vec<(u32, f32)> = (1..=12).map(|mo| (mo, 0.0)).collect();
+        // The same rolling 12 months the data shows, so nothing shifts when it arrives.
+        let months: Vec<(u32, f32)> = (0..12u32).map(|i| ((now.month + 12 + i) % 12 + 1, 0.0)).collect();
         rd_month_bars(c, &months, None);
         skeleton(c, m, c.h - m - 8.0, 120.0, 8.0);
     }
@@ -2030,7 +2076,7 @@ fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
         }
         return;
     }
-    if placeholder(c, out, def.name, &badge, conn, &g, sh) {
+    if rd_placeholder(c, out, def.name, "", &badge, conn, &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -2056,9 +2102,11 @@ fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
             c.text_base(&ch0, c.w / 2.0, 45.0 * k, fs, 600, col0, Align::Center, c.w * 2.0);
         }
         Shape::Dock => {
-            let wide = c.w >= c.h * 3.4;
-            let d = DockText { tag: if wide { None } else { Some((&ch0, col0)) }, ..DockText::new(&first.value, &first.label) };
-            rd_dock(c, &Vis::Badge(badge), d, Acc::Pair(ch0.clone(), col0, style::VALUE, "Today".into()));
+            // Dock L adds the first symbol's day as a sparkline; the caption keeps
+            // "TSLA +1.4%" as in Dock M, so the slot labels the chart rather than repeat it.
+            let d = DockText { tag: Some((&ch0, col0)), ..DockText::new(&first.value, &first.label) };
+            let acc = if f.series.len() > 2 { Acc::Spark(f.series.clone(), col0, "Today".into()) } else { Acc::Pair(ch0.clone(), col0, style::VALUE, "Today".into()) };
+            rd_dock(c, &Vis::Badge(badge), d, acc);
         }
         _ => {
             let small = sh == Shape::Small;
@@ -2100,12 +2148,13 @@ fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
     }
 }
 
-/// Watchlist row boxes: (capsule top, capsule width, pitch). Rows fill the card margin to
-/// margin on Small and Medium; Large keeps the 24 pitch.
+/// Watchlist row boxes: (capsule top, capsule width, pitch). Three rows fill the card
+/// margin to margin on Small and Medium; Large uses Medium's pitch so its first three rows
+/// are the Medium card's.
 fn rd_watch_rows(c: &Canvas, sh: Shape, n: usize) -> Vec<(f32, f32, f32)> {
     let (m, cap_w) = if sh == Shape::Small { (style::M_SMALL, RD_CAPSULE_S) } else { (style::M_CARD, RD_CAPSULE_M) };
-    let bottom = if sh == Shape::Large { c.h } else { c.h - m };
-    let pitch = if sh == Shape::Large || n < 2 { style::ROW_L } else { (bottom - m - RD_CAPSULE_H) / (n - 1) as f32 };
+    let (bottom, span) = if sh == Shape::Large { (style::SEP_Y_LARGE - m, 3) } else { (c.h - m, n) };
+    let pitch = if span < 2 { style::ROW_L } else { (bottom - m - RD_CAPSULE_H) / (span - 1) as f32 };
     (0..n).map(|i| (m + i as f32 * pitch, cap_w, pitch)).collect()
 }
 
@@ -2118,7 +2167,7 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
         rd_next_skeleton(c, &badge, sh);
         return;
     }
-    if placeholder(c, out, def.name, &badge, "calendar", &g, sh) {
+    if rd_placeholder(c, out, def.name, "", &badge, "calendar", &g, sh) {
         return;
     }
     let Got::Feed(f) = g else { return };
@@ -2185,29 +2234,38 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
                 cap_right = c.w - m - pw - style::SP[3];
             }
             c.text_base(&cap, m, 66.0, style::CAPTION.size, 400, c.text2(), Align::Left, cap_right - m);
+            // The events after this one (the feed lists the next event first).
+            let mut skipped = false;
+            let after: Vec<_> = f
+                .rows
+                .iter()
+                .filter(|r| {
+                    if !skipped && r.label == title {
+                        skipped = true;
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+            let when_short = |v: &str| if rd_when_day(v) == "Today" { rd_when_time(v) } else { v.to_string() };
+            // §3 third line on the bottom margin: what follows it.
+            if has {
+                let then = match after.first() {
+                    Some(r) => format!("Then {} \u{00B7} {}", r.label, when_short(&r.value)),
+                    None => "Nothing else scheduled".to_string(),
+                };
+                c.text_base(&then, m, c.h.min(style::SEP_Y_LARGE) - m, style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
+            }
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
-                let mut skipped = false;
-                let later: Vec<_> = f
-                    .rows
-                    .iter()
-                    .filter(|r| {
-                        if !skipped && r.label == title {
-                            skipped = true;
-                            return false;
-                        }
-                        true
-                    })
-                    .take(3)
-                    .collect();
+                let later: Vec<_> = after.iter().skip(if has { 1 } else { 0 }).take(3).collect();
                 let b0 = style::DETAIL_TOP + c.cap_h(style::BODY.size);
                 for (i, r) in later.iter().enumerate() {
-                    let trail = if rd_when_day(&r.value) == "Today" { rd_when_time(&r.value) } else { r.value.clone() };
-                    rd_row(c, out, &LRow::new(&r.label, trail), b0 + i as f32 * style::ROW_L, style::ROW_L);
+                    rd_row(c, out, &LRow::new(&r.label, when_short(&r.value)), b0 + i as f32 * style::ROW_L, style::ROW_L);
                 }
                 // The footnote closes the region at the bottom margin.
                 let n = f.value.unwrap_or(0.0) as i64;
-                let foot = if later.is_empty() { "Nothing else today".to_string() } else if n == 1 { "1 event today".to_string() } else { format!("{n} events today") };
+                let foot = if later.is_empty() && has && !after.is_empty() { "Nothing after that".to_string() } else if later.is_empty() { "Nothing else scheduled".to_string() } else if n == 1 { "1 event today".to_string() } else { format!("{n} events today") };
                 rd_foot(c, &foot, "");
             }
         }
@@ -2231,10 +2289,11 @@ fn rd_next_skeleton(c: &Canvas, badge: &Badge, sh: Shape) {
     let ch = c.cap_h(style::VALUE.size);
     skeleton(c, m, 48.0 - ch, (c.w - 2.0 * m - bs) * 0.6, ch);
     skeleton(c, m, 66.0 - 8.0, 40.0, 8.0);
+    skeleton(c, m, c.h.min(style::SEP_Y_LARGE) - m - 8.0, 96.0, 8.0);
     if sh == Shape::Large {
         separator(c, style::SEP_Y_LARGE);
         let b0 = style::DETAIL_TOP + c.cap_h(style::BODY.size);
-        for (i, w) in [0.55, 0.4, 0.5].iter().enumerate() {
+        for (i, w) in [0.55, 0.4].iter().enumerate() {
             let b = b0 + i as f32 * style::ROW_L;
             skeleton(c, m, b - 8.0, (c.w - 2.0 * m) * w, 8.0);
             skeleton(c, c.w - m - 40.0, b - 8.0, 40.0, 8.0);
@@ -2283,7 +2342,7 @@ fn ai_all(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             Shape::Small | Shape::Dock | Shape::Mini => "Add an API key",
             _ => "Claude Code, Codex or an API key",
         };
-        placeholder(c, out, "AI Usage", &badge, "anthropic", &Got::Setup(reason.into()), sh);
+        rd_placeholder(c, out, "AI Usage", "", &badge, "anthropic", &Got::Setup(reason.into()), sh);
         return;
     }
     let total: f64 = rows.iter().filter_map(|r| r.tokens).sum();
@@ -2378,7 +2437,7 @@ fn goal(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             Shape::Small | Shape::Dock | Shape::Mini => "Connect Stripe",
             _ => "Connect Stripe or another provider",
         };
-        placeholder(c, out, "Revenue Goal", &badge, "revenue-goal", &Got::Setup(reason.into()), sh);
+        rd_placeholder(c, out, "Revenue Goal", "Revenue", &badge, "revenue-goal", &Got::Setup(reason.into()), sh);
         return;
     }
     if window.is_empty() {
@@ -2487,7 +2546,7 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagin
             if !dense {
                 bg(c, false);
             }
-            placeholder(c, out, def.name, &badge, "wallpaper", &g, sh);
+            rd_placeholder(c, out, def.name, "", &badge, "wallpaper", &g, sh);
             return;
         }
     };
@@ -2545,7 +2604,14 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagin
             let tw = px - style::SP[3] - m;
             let label_base = c.h - m - style::BTN_SECONDARY / 2.0 + c.cap_h(style::CAPTION.size) / 2.0;
             if sh == Shape::Medium || desc.is_empty() {
-                c.text_base(&title, m, label_base, fs, 600, WHITE, Align::Left, tw);
+                // The title in up to 2 lines (13/600) in the column left of the pill, its
+                // last baseline on the pill label's; it only ellipsizes past 2 lines.
+                let (tl, size) = rd_wrap_fit(c, &title, fs, fs, 600, tw);
+                let tlh = (size * 1.25).round();
+                let tn = tl.len().min(2);
+                for (i, l) in tl.iter().take(2).enumerate() {
+                    c.text_base(l, m, label_base - (tn - 1 - i) as f32 * tlh, size, 600, WHITE, Align::Left, tw);
+                }
             } else {
                 // Large: the title (up to 2 lines, 15 → 13) over the description (up to 2
                 // lines), bottom-aligned to the margin in the column left of the pill.
