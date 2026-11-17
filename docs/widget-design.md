@@ -195,6 +195,8 @@ System accents. Dark uses the iOS dark values already in paint.rs. Light swaps a
   - World-clock labels are short city names ("SF", "London", "Tokyo"), never cut mid-word ("SAN").
   - White analog faces in light theme get a separator-colour hairline.
   - analog-square Small must sit inside a card with concentric radius.
+  - Date faces (date, today, clock) name the day in red Micro capitals ("MONDAY") at every size. date and today Small are bottom-anchored (hero baseline 86); today moves its hero up (baseline 62) only when an event line sits under it.
+  - Week strips and month grids: today's disc is at most the day column − 2 and keeps 2 px clear of the neighbouring dates (`today_disc()`); a strip too narrow for that widens its columns rather than shrinking the disc under its numeral.
 - **Weather:** the reference family. Temperature follows the time-hero weights. Keep emoji icons. Large forecast rows use the 24-row pitch.
 - **Timers:** label Micro in the mode colour.
   - Small: hero top-left; reset (secondary 24) and play (primary 28) right-aligned on the bottom margin line, 8 apart.
