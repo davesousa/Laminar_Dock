@@ -339,9 +339,7 @@ enum Vis {
     Badge(Badge),
     /// Progress ring: fraction, colour, text inside (may be empty).
     Ring(f32, Col, String),
-    Glyph(&'static str, Col),
-    /// No face uses it now (weather places its emoji by their ink); kept for new faces.
-    #[allow(dead_code)]
+    /// A colour emoji filling the box (the clock-and-weather face's icon).
     Emoji(&'static str),
 }
 
@@ -440,10 +438,6 @@ fn draw_vis(c: &Canvas, v: &Vis, x: f32, y: f32, size: f32) {
                     c.text_cap(t, x + r, y + r - c.cap_h(fs) / 2.0, fs, 600, c.text1(), Align::Center, size);
                 }
             }
-        }
-        Vis::Glyph(g, col) => {
-            c.rr(x, y, size, size, size * style::BADGE_R, c.plate());
-            c.glyph(g, x + size / 2.0, y + size / 2.0, size * 0.5, *col);
         }
         Vis::Emoji(e) => {
             c.text(e, x + size / 2.0, y + size * 0.02, size * 0.8, 400, c.text1(), Align::Center, size * 1.4, Font::Text);
@@ -986,7 +980,6 @@ fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, con
     }
     true
 }
-
 
 pub fn paint(c: &Canvas, def: &Def, x: &Ctx, dense: bool, wic: &IWICImagingFactory) -> Painted {
     let mut out = Painted::default();
@@ -9112,7 +9105,6 @@ fn sys_uptime_strip(c: &Canvas, now: &super::Now, days_back: i64, boot_min: i64,
     c.text_base(&when, m, c.h - m - 4.0, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m);
 }
 
-
 // ------------------------------------------------------------------ tools
 // One layout for every single-action tool (docs/widget-design.md §3, §5): a control mark
 // (a circle for on/off toggles, a rounded plate for launchers), its name and state.
@@ -9179,23 +9171,6 @@ fn mark_box(c: &Canvas, sh: Shape) -> (f32, f32, f32) {
         Shape::Small => ((c.w - MARK_CARD) / 2.0, SMALL_MARK_Y, MARK_CARD),
         Shape::Medium | Shape::Large => (style::M_CARD, MED_MARK_Y, MARK_CARD),
     }
-}
-
-/// Where a tile's plate sits (centre and size), to draw on top of it.
-fn plate_center(c: &Canvas, dense: bool) -> (f32, f32, f32) {
-    let sh = if dense {
-        if c.w > c.h * 1.5 {
-            Shape::Dock
-        } else {
-            Shape::Mini
-        }
-    } else if c.w >= 180.0 {
-        Shape::Medium
-    } else {
-        Shape::Small
-    };
-    let (x, y, s) = mark_box(c, sh);
-    (x + s / 2.0, y + s / 2.0, s)
 }
 
 /// A control mark: a circle (toggles) or a rounded plate (launchers). Filled with `fill`
@@ -9432,61 +9407,6 @@ fn tool_rows(c: &Canvas, out: &mut Painted, rows: &[TRow]) {
     }
 }
 
-/// A control tile: a plate with an icon (filled with `col` when on) and its name.
-#[allow(clippy::too_many_arguments)]
-fn tile(c: &Canvas, out: &mut Painted, g: &str, label: &str, on: bool, col: Col, act: WAct, dense: bool) {
-    tile_sub(c, out, g, label, "", on, col, act, dense);
-}
-
-/// A control tile with a state line. The shared tool layout, without Large rows.
-#[allow(clippy::too_many_arguments)]
-fn tile_sub(c: &Canvas, out: &mut Painted, g: &str, label: &str, sub: &str, on: bool, col: Col, act: WAct, dense: bool) {
-    let sh = if dense {
-        if c.w > c.h * 1.5 {
-            Shape::Dock
-        } else {
-            Shape::Mini
-        }
-    } else if c.w >= 180.0 {
-        Shape::Medium
-    } else {
-        Shape::Small
-    };
-    out.hits.push(((0.0, 0.0, c.w, c.h), act.clone()));
-    let (mx, my, ms) = mark_box(c, sh);
-    mark(c, g, mx, my, ms, false, on.then_some(col));
-    if label.is_empty() || sh == Shape::Mini {
-        return;
-    }
-    // Labels are runtime strings here, so draw them directly with the face's geometry.
-    match sh {
-        Shape::Dock => {
-            let k = dock_k(c);
-            let x0 = mx + ms + style::SP[4] * k;
-            let tw = c.w - style::M_DOCK * k - x0;
-            let ls = fit(c, label, style::TITLE.size * k, style::TITLE.min * k, 600, Font::Text, tw);
-            if sub.is_empty() {
-                c.text_base(label, x0, 32.0 * k, ls, 600, c.text1(), Align::Left, c.w);
-            } else {
-                c.text_base(label, x0, 26.0 * k, ls, 600, c.text1(), Align::Left, c.w);
-                c.text_base(sub, x0, 40.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, tw);
-            }
-        }
-        Shape::Small => {
-            let inner = c.w - 2.0 * style::M_SMALL;
-            let ls = fit(c, label, style::TITLE.size, style::TITLE.min, 600, Font::Text, inner);
-            c.text_base(label, c.w / 2.0, SMALL_NAME_BASE, ls, 600, c.text1(), Align::Center, c.w);
-            c.text_base(sub, c.w / 2.0, SMALL_STATE_BASE, style::FOOT.size, 400, c.text2(), Align::Center, inner);
-        }
-        _ => {
-            let tw = c.w - style::M_CARD - MED_TEXT_X;
-            let ls = fit(c, label, style::VALUE.size, style::VALUE.min, 600, Font::Text, tw);
-            c.text_base(label, MED_TEXT_X, MED_NAME_BASE, ls, 600, c.text1(), Align::Left, c.w);
-            c.text_base(sub, MED_TEXT_X, MED_STATE_BASE, style::CAPTION.size, 400, c.text2(), Align::Left, tw);
-        }
-    }
-}
-
 /// The icon plate used by tiles: radius 0.25 × size, glyph 0.45 × size.
 fn plate(c: &Canvas, g: &str, x: f32, y: f32, p: f32, fill: Col, ink: Col) {
     c.rr(x, y, p, p, p * style::BADGE_R, fill);
@@ -9673,20 +9593,8 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
         ToolKind::Connectivity => connectivity(c, out, x, sh),
         ToolKind::ControlTiles => control_tiles(c, out, x, sh),
         ToolKind::Toggles => toggles(c, out, x, sh),
+        ToolKind::WinSettings => win_settings(c, out, sh),
         ToolKind::WinUpdate => win_update(c, out, x, sh),
-        ToolKind::WinSettings => {
-            let mut f = ToolFace::new(G_SETTINGS, "Windows Settings", open("ms-settings:"));
-            f.short = "Settings";
-            f.small = "System and apps".into();
-            f.medium = "System, apps, network and more".into();
-            f.slot = ToolSlot::Key("Win + I");
-            f.rows = vec![
-                row(G_KEYBOARD, "Shortcut", Trail::Key("Win + I")),
-                row(G_UPDATE, "Windows Update", Trail::Go(open("ms-settings:windowsupdate"))),
-                row(G_PALETTE, "Personalisation", Trail::Go(open("ms-settings:personalization"))),
-            ];
-            tool_face(c, out, &f, sh);
-        }
         ToolKind::DarkMode => {
             let on = x.control.dark;
             let mut f = ToolFace::new(G_MOON, "Dark mode", WAct::Dark);
@@ -10313,83 +10221,357 @@ fn timeline(c: &Canvas, x: &Ctx, sh: Shape) {
 
 // ------------------------------------------------------------------ Control Center
 
-fn round_toggle(c: &Canvas, cx: f32, cy: f32, r: f32, g: &str, on: bool) {
-    c.circle(cx, cy, r, if on { BLUE } else { c.ink(0.12) });
-    c.glyph(g, cx, cy, r * 0.8, if on { WHITE } else { c.text1() });
+const G_CHECK: &str = "\u{E73E}";
+const G_APPS: &str = "\u{E71D}";
+
+/// Is a dock pill the wide one (Dock L), which adds an accessory slot? Same rule as `compact_sum`.
+fn cc_wide(c: &Canvas) -> bool {
+    c.w >= c.h * 3.4
+}
+
+/// The Dock L accessory slot: (x, width), scaled to the pill.
+fn cc_slot(c: &Canvas) -> (f32, f32) {
+    let k = c.h / 54.0;
+    let w = (c.w * 0.34).round();
+    (c.w - style::M_DOCK * k - w, w)
+}
+
+/// On/off colours (§2.3): on = blue fill + white ink, off = plate + text1 ink.
+fn cc_fill(c: &Canvas, on: bool) -> (Col, Col) {
+    if on {
+        (BLUE, WHITE)
+    } else {
+        (c.plate(), c.text1())
+    }
+}
+
+/// A round radio button: blue when on, plate when off, plate with a faded glyph when the
+/// radio isn't there (`None`). `d` is its diameter.
+fn round_toggle(c: &Canvas, cx: f32, cy: f32, d: f32, g: &str, on: Option<bool>) {
+    let (fill, ink) = cc_fill(c, on == Some(true));
+    let ink = if on.is_none() { alpha(c.text1(), 0.5) } else { ink };
+    c.circle(cx, cy, d / 2.0, fill);
+    c.glyph(g, cx, cy, d * style::GLYPH_IN, ink);
+}
+
+/// A rounded-square glyph plate (radius 0.25 × size, glyph 0.45 × size).
+fn cc_plate(c: &Canvas, g: &str, x: f32, y: f32, s: f32, fill: Col, ink: Col) {
+    c.rr(x, y, s, s, s * style::BADGE_R, fill);
+    c.glyph(g, x + s / 2.0, y + s / 2.0, s * style::GLYPH_IN, ink);
+}
+
+/// A red count badge (diameter `d`) with a card-coloured ring, centred on (cx, cy) but
+/// kept 3 px inside the card. No number draws a plain attention dot.
+fn count_badge(c: &Canvas, cx: f32, cy: f32, d: f32, n: Option<u32>) {
+    let ring = 1.5;
+    let r = d / 2.0;
+    let edge = style::SP[1] + 1.0;
+    let cx = cx.min(c.w - edge - r - ring);
+    let cy = cy.max(edge + r + ring);
+    c.circle(cx, cy, r + ring, c.halo());
+    c.circle(cx, cy, r, RED);
+    if let Some(n) = n {
+        let t = if n > 9 { "9+".to_string() } else { n.to_string() };
+        let fs = style::MICRO.size;
+        c.text_cap(&t, cx, cy - c.cap_h(fs) / 2.0, fs, 700, WHITE, Align::Center, d * 2.0);
+    }
+}
+
+/// A right chevron in text3 whose ink ends at `right`, centred on `cy`.
+fn chevron(c: &Canvas, right: f32, cy: f32) {
+    c.glyph(G_CHEV, right - 3.0, cy, 10.0, c.text3());
+}
+
+/// Large detail rows at the 24 pitch from `top`: Body label at the left, then either a
+/// trailing footnote (shortcuts) or a chevron (links). Each row is a hit area.
+fn link_rows(c: &Canvas, out: &mut Painted, items: Vec<(&str, &str, WAct)>, top: f32) {
+    let m = style::M_CARD;
+    let ls = style::BODY.size;
+    for (i, (label, trailing, act)) in items.into_iter().enumerate() {
+        let y = top + i as f32 * style::ROW_L;
+        let base = y + (style::ROW_L + c.cap_h(ls)) / 2.0;
+        let mut right = c.w - m;
+        if trailing.is_empty() {
+            chevron(c, right, base - c.cap_h(ls) / 2.0);
+            right -= 10.0 + style::SP[3];
+        } else {
+            let tw = c.text_base(trailing, right, base, style::FOOT.size, 500, c.text2(), Align::Right, c.w * 0.5);
+            right -= tw + style::SP[3];
+        }
+        c.text_base(label, m, base, ls, style::BODY.weight, c.text1(), Align::Left, right - m);
+        out.hits.push(((style::SP[3], y, c.w - 2.0 * style::SP[3], style::ROW_L), act));
+    }
+}
+
+/// The volume, as "64%" (or "Muted"), and the meter fraction (0 when muted).
+fn volume_text(x: &Ctx) -> Option<(String, f32)> {
+    let v = x.control.volume?;
+    if x.control.muted == Some(true) {
+        Some(("Muted".to_string(), 0.0))
+    } else {
+        Some((format!("{:.0}%", (v * 100.0).clamp(0.0, 100.0)), v))
+    }
+}
+
+/// Large volume slider row centred on `cy`: speaker (mutes), track (sets), percentage.
+fn volume_row(c: &Canvas, out: &mut Painted, x: &Ctx, cy: f32) {
+    let m = style::M_CARD;
+    let muted = x.control.muted == Some(true);
+    let g = if muted { G_MUTE } else { G_VOL };
+    c.glyph(g, m + 8.0, cy, 16.0, c.text2());
+    let fs = style::FOOT.size;
+    let base = cy + c.cap_h(fs) / 2.0;
+    let (tx0, tx1) = (m + 28.0, c.w - m - 40.0);
+    match volume_text(x) {
+        Some((pct, f)) => {
+            out.hits.push(((m - 6.0, cy - 14.0, 28.0, 28.0), WAct::Mute));
+            c.bar(tx0, cy - style::METER_H / 2.0, tx1 - tx0, style::METER_H, f, BLUE);
+            c.text_base(&pct, c.w - m, base, fs, 500, c.text2(), Align::Right, 40.0);
+            out.hits.push(((tx0, cy - 12.0, tx1 - tx0, 24.0), WAct::Volume));
+        }
+        None => {
+            c.text_base("Volume unavailable", tx0, base, fs, 400, c.text2(), Align::Left, c.w - m - tx0);
+        }
+    }
 }
 
 /// Wi-Fi and Bluetooth: the round button switches the radio; the name opens its list.
 fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let ctl = x.control;
+    let state = |on: Option<bool>| match on {
+        Some(true) => "On",
+        Some(false) => "Off",
+        None => "Unavailable",
+    };
     let rows = [
         (G_WIFI, "Wi-Fi", ctl.wifi, WAct::Wifi, WAct::WifiMenu),
         (G_BT, "Bluetooth", ctl.bluetooth, WAct::Bluetooth, WAct::Open("ms-settings:bluetooth".into())),
     ];
-    if matches!(sh, Shape::Mini | Shape::Dock) {
-        let slot = c.w / 2.0;
-        for (i, (g, _, on, act, _)) in rows.into_iter().enumerate() {
-            let cx = slot * (i as f32 + 0.5);
-            round_toggle(c, cx, c.h / 2.0, (c.h * 0.32).min(slot * 0.42), g, on == Some(true));
-            out.hits.push(((slot * i as f32, 0.0, slot, c.h), act));
+    let k = c.h / 54.0;
+    match sh {
+        Shape::Mini => {
+            // One mark: the Wi-Fi button.
+            let (g, _, on, act, _) = rows.into_iter().next().unwrap();
+            round_toggle(c, c.w / 2.0, c.h / 2.0, 40.0 * k, g, on);
+            if on.is_some() {
+                out.hits.push(((0.0, 0.0, c.w, c.h), act));
+            }
         }
-        return;
-    }
-    let rh = (c.h - 16.0) / rows.len() as f32;
-    let r = if sh == Shape::Large { 22.0 } else { 18.0 };
-    for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
-        let cy = 8.0 + rh * (i as f32 + 0.5);
-        let cx = 14.0 + r;
-        round_toggle(c, cx, cy, r, g, on == Some(true));
-        let tx = cx + r + 10.0;
-        let state = match on {
-            Some(true) => "On",
-            Some(false) => "Off",
-            None => "Unavailable",
-        };
-        c.tw(name, tx, cy - 17.0, 12.5, 600, c.text1(), c.w - tx - 22.0);
-        c.tw(state, tx, cy + 1.0, 11.0, 400, c.text2(), c.w - tx - 22.0);
-        c.glyph(G_CHEV, c.w - 14.0, cy, 9.0, c.text3());
-        out.hits.push(((tx - 4.0, cy - rh / 2.0, c.w - tx + 4.0, rh), more));
-        if on.is_some() {
-            out.hits.push(((cx - r - 4.0, cy - r - 4.0, 2.0 * r + 8.0, 2.0 * r + 8.0), act));
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let d = style::BADGE_DOCK * k;
+            let half = c.w / 2.0;
+            let wide = cc_wide(c);
+            for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
+                let x0 = half * i as f32;
+                if !wide {
+                    // Dock M: each button centred in its half.
+                    round_toggle(c, x0 + half / 2.0, c.h / 2.0, d, g, on);
+                    if on.is_some() {
+                        out.hits.push(((x0, 0.0, half, c.h), act));
+                    }
+                    continue;
+                }
+                // Dock L: each half gains its name and state.
+                let cx = x0 + m + d / 2.0;
+                round_toggle(c, cx, c.h / 2.0, d, g, on);
+                let tx = x0 + m + d + style::SP[3] * k;
+                let tw = x0 + half - tx - style::SP[2] * k;
+                let ns = fit(c, name, style::TITLE.size * 12.0 / 13.0 * k, style::FOOT.size * k, 600, Font::Text, tw);
+                c.text_base(name, tx, 29.0 * k, ns, 600, c.text1(), Align::Left, tw);
+                let ss = fit(c, state(on), style::FOOT.size * k, style::MICRO.size * k, 400, Font::Text, tw);
+                c.text_base(state(on), tx, 43.0 * k, ss, 400, c.text2(), Align::Left, tw + 2.0);
+                out.hits.push(((tx - style::SP[1] * k, 0.0, x0 + half - tx + style::SP[1] * k, c.h), more));
+                if on.is_some() {
+                    out.hits.push(((x0, 0.0, tx - style::SP[1] * k - x0, c.h), act));
+                }
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let d = 32.0;
+            let tx = m + d + style::SP[3];
+            let tw = c.w - m - tx;
+            for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
+                let top = if i == 0 { m } else { c.h - m - d };
+                let cy = top + d / 2.0;
+                round_toggle(c, m + d / 2.0, cy, d, g, on);
+                let ns = fit(c, name, style::TITLE.size, 12.0, 600, Font::Text, tw);
+                // Name and state as one block, centred on the button.
+                let gap = 15.0;
+                let nb = cy - (c.cap_h(ns) + gap) / 2.0 + c.cap_h(ns);
+                c.text_base(name, tx, nb, ns, 600, c.text1(), Align::Left, tw + 4.0);
+                c.text_base(state(on), tx, nb + gap, style::FOOT.size, 400, c.text2(), Align::Left, tw);
+                out.hits.push(((tx - style::SP[1], top - style::SP[2], c.w - tx + style::SP[1], d + style::SP[4]), more));
+                if on.is_some() {
+                    out.hits.push(((m - style::SP[1], top - style::SP[1], d + style::SP[3], d + style::SP[3]), act));
+                }
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            // Two columns side by side; Large keeps this row as it is and adds links.
+            let m = style::M_CARD;
+            let d = 36.0;
+            let cy = 48.0;
+            // Column B starts just right of centre, so the two read as a pair.
+            let xs = [m, c.w / 2.0 + style::SP[3]];
+            for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
+                let x0 = xs[i];
+                let col_w = if i == 0 { xs[1] - m } else { c.w - m - xs[1] };
+                round_toggle(c, x0 + d / 2.0, cy, d, g, on);
+                let tx = x0 + d + style::SP[3];
+                let tw = x0 + col_w - tx - if i == 0 { style::SP[3] } else { 0.0 };
+                c.text_base(name, tx, 46.0, style::TITLE.size, 600, c.text1(), Align::Left, tw);
+                let st = state(on);
+                let cs = style::CAPTION.size;
+                let sw = c.text_base(st, tx, 62.0, cs, 400, c.text2(), Align::Left, tw - 12.0);
+                chevron(c, tx + sw + style::SP[1] + 6.0, 62.0 - c.cap_h(cs) / 2.0);
+                out.hits.push(((tx - style::SP[1], cy - 24.0, x0 + col_w - tx + style::SP[1], 48.0), more));
+                if on.is_some() {
+                    out.hits.push(((x0 - style::SP[1], cy - d / 2.0 - style::SP[1], d + style::SP[3], d + style::SP[3]), act));
+                }
+            }
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                link_rows(
+                    c,
+                    out,
+                    vec![
+                        ("Network & internet", "", WAct::Open("ms-settings:network".into())),
+                        ("Bluetooth & devices", "", WAct::Open("ms-settings:bluetooth".into())),
+                        ("Airplane mode", "", WAct::Open("ms-settings:network-airplanemode".into())),
+                    ],
+                    style::DETAIL_TOP,
+                );
+            }
         }
     }
 }
 
-/// A grid of control buttons, 2 or 4 across.
-fn button_grid(c: &Canvas, out: &mut Painted, items: Vec<(&'static str, &'static str, bool, WAct)>, sh: Shape) {
-    let dense = matches!(sh, Shape::Mini | Shape::Dock);
-    if sh == Shape::Mini {
-        // Just the first one.
-        if let Some((g, _, on, act)) = items.into_iter().next() {
-            tile(c, out, g, "", on, BLUE, act, true);
+/// Control tiles (Quick Toggles, Quick Controls): one tile on the Mini, a row of glyph
+/// tiles in the dock (plus volume on Dock L), 2×2 on Small, a labelled row on Medium, and
+/// on Large that row with a volume slider and `extra` rows under it.
+fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str, &'static str, bool, WAct)>, extra: Vec<(&str, &str, WAct)>, sh: Shape) {
+    let k = c.h / 54.0;
+    let tile = |tx: f32, ty: f32, tw: f32, th: f32, r: f32, g: &str, gs: f32, gy: f32, on: bool| {
+        let (fill, ink) = cc_fill(c, on);
+        c.rr(tx, ty, tw, th, r, fill);
+        c.glyph(g, tx + tw / 2.0, gy, gs, ink);
+    };
+    match sh {
+        Shape::Mini => {
+            if let Some((g, _, on, act)) = items.into_iter().next() {
+                let s = 40.0 * k;
+                let (tx, ty) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
+                tile(tx, ty, s, s, 10.0 * k, g, 18.0 * k, ty + s / 2.0, on);
+                out.hits.push(((0.0, 0.0, c.w, c.h), act));
+            }
         }
-        return;
-    }
-    // Small and Large cards: two columns (Large would otherwise stretch four tiles into
-    // tall bars); Medium and the dock: one row.
-    let cols = if matches!(sh, Shape::Small | Shape::Large) { 2 } else { items.len().min(4) };
-    let rows = items.len().div_ceil(cols);
-    let pad = if dense { 4.0 } else { 10.0 };
-    let gap = if dense { 4.0 } else { 8.0 };
-    let tw = (c.w - 2.0 * pad - gap * (cols - 1) as f32) / cols as f32;
-    // Never taller than a little over square; the grid is centred in what's left.
-    let th = ((c.h - 2.0 * pad - gap * (rows - 1) as f32) / rows as f32).min(tw * 1.15);
-    let top = (c.h - th * rows as f32 - gap * (rows - 1) as f32) / 2.0;
-    for (i, (g, label, on, act)) in items.into_iter().enumerate() {
-        let (tx, ty) = (pad + (i % cols) as f32 * (tw + gap), top + (i / cols) as f32 * (th + gap));
-        c.rr(tx, ty, tw, th, (th.min(tw) * 0.28).min(16.0), if on { BLUE } else { c.ink(0.08) });
-        let ink = if on { WHITE } else { c.text1() };
-        if dense || th < 50.0 {
-            c.glyph(g, tx + tw / 2.0, ty + th / 2.0, (th.min(tw) * 0.42).min(18.0), ink);
-        } else {
-            c.glyph(g, tx + tw / 2.0, ty + th * 0.4, 18.0, ink);
-            // A narrow tile gets the first word ("Dark" for "Dark mode") rather than edge-to-edge text.
-            let label = if c.measure(label, 10.5, 500, Font::Text).0 > tw - 12.0 { label.split_whitespace().next().unwrap_or(label) } else { label };
-            c.tc(label, tx + tw / 2.0, ty + th * 0.4 + 16.0, 10.5, 500, if on { (1.0, 1.0, 1.0, 0.9) } else { c.text2() }, tw);
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let s = style::BTN_SECONDARY_DOCK * k;
+            let gap = style::SP[1] * k;
+            let ty = (c.h - s) / 2.0;
+            for (i, (g, _, on, act)) in items.into_iter().enumerate() {
+                let tx = m + i as f32 * (s + gap);
+                tile(tx, ty, s, s, style::R_MIN * k, g, s * style::GLYPH_IN, ty + s / 2.0, on);
+                out.hits.push(((tx - gap / 2.0, 0.0, s + gap, c.h), act));
+            }
+            if cc_wide(c) {
+                if let Some((pct, f)) = volume_text(x) {
+                    let (sx, sw) = cc_slot(c);
+                    let fs = style::FOOT.size * k;
+                    let base = 26.0 * k;
+                    let g = if x.control.muted == Some(true) { G_MUTE } else { G_VOL };
+                    c.glyph(g, sx + 6.0 * k, base - c.cap_h(fs) / 2.0, fs, c.text2());
+                    c.text_base(&pct, sx + sw, base, fs, 500, c.text2(), Align::Right, sw - 16.0 * k);
+                    c.bar(sx, 32.0 * k, sw, style::METER_H_COMPACT * k, f, BLUE);
+                    out.hits.push(((sx, 0.0, sw, c.h), WAct::Volume));
+                }
+            }
         }
-        out.hits.push(((tx, ty, tw, th), act));
+        Shape::Small => {
+            let inset = style::SP[3];
+            let gap = style::SP[3];
+            let r = style::concentric(style::CARD_R, inset);
+            let tw = (c.w - 2.0 * inset - gap) / 2.0;
+            let th = (c.h - 2.0 * inset - gap) / 2.0;
+            for (i, (g, _, on, act)) in items.into_iter().enumerate() {
+                let (tx, ty) = (inset + (i % 2) as f32 * (tw + gap), inset + (i / 2) as f32 * (th + gap));
+                tile(tx, ty, tw, th, r, g, 20.0, ty + th / 2.0, on);
+                out.hits.push(((tx, ty, tw, th), act));
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            // Inset 6 → radius 12 (§2.1), gap 6: four tiles about 59.5 wide.
+            let inset = style::SP[2];
+            let gap = style::SP[2];
+            let r = style::concentric(style::CARD_R, inset);
+            let n = items.len().max(1);
+            let tw = (c.w - 2.0 * inset - gap * (n - 1) as f32) / n as f32;
+            // Medium's tile row; Large draws it unchanged in its top 96.
+            let th = style::SEP_Y_LARGE - 2.0 * inset;
+            // Every label keeps 6 px of air to each tile edge.
+            let room = tw - 2.0 * style::SP[2];
+            let labels: Vec<TileLabel> = items.iter().map(|it| tile_label(c, it.1, room)).collect();
+            // One vertical rhythm per row, so glyphs and first lines align across tiles:
+            // a two-line row lifts the glyph to make room for the second line.
+            let two = labels.iter().any(|l| l.lines.len() > 1);
+            let (gy, base) = if two { (32.0, 60.0) } else { (38.0, 67.0) };
+            let pitch = 13.0;
+            for (i, ((g, _, on, act), l)) in items.into_iter().zip(labels).enumerate() {
+                let (tx, ty) = (inset + i as f32 * (tw + gap), inset);
+                tile(tx, ty, tw, th, r, g, 20.0, gy, on);
+                let ink = if on { WHITE } else { c.text1() };
+                for (j, line) in l.lines.iter().enumerate() {
+                    c.text_base(line, tx + tw / 2.0, base + j as f32 * pitch, l.size, l.weight, ink, Align::Center, room + 1.0);
+                }
+                out.hits.push(((tx, ty, tw, th), act));
+            }
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                volume_row(c, out, x, style::DETAIL_TOP + style::ROW_L / 2.0);
+                link_rows(c, out, extra, style::DETAIL_TOP + style::ROW_L + style::SP[1]);
+            }
+        }
     }
+}
+
+/// A toggle tile's label, laid out to fit `room` without cutting a word.
+struct TileLabel {
+    lines: Vec<String>,
+    size: f32,
+    weight: u32,
+}
+
+/// One line at Footnote 11/500 when it fits; otherwise two lines split at the space
+/// nearest the middle ("Dark" / "mode"); a single long word shrinks to 10, then drops to
+/// weight 400. The ink always stays inside `room`.
+fn tile_label(c: &Canvas, s: &str, room: f32) -> TileLabel {
+    let wide = |t: &str, size: f32, weight: u32| c.measure(t, size, weight, Font::Text).0;
+    let top = style::FOOT.size;
+    let min = style::MICRO.size;
+    let lines: Vec<String> = if wide(s, top, 500) <= room {
+        vec![s.to_string()]
+    } else {
+        let mid = s.len() / 2;
+        match s.match_indices(' ').map(|(i, _)| i).min_by_key(|i| i.abs_diff(mid)) {
+            Some(i) => vec![s[..i].to_string(), s[i + 1..].to_string()],
+            None => vec![s.to_string()],
+        }
+    };
+    let widest = |size: f32, weight: u32| lines.iter().map(|l| wide(l, size, weight)).fold(0.0, f32::max);
+    let w = widest(top, 500);
+    if w <= room {
+        return TileLabel { lines, size: top, weight: 500 };
+    }
+    let size = (top * room / w).max(min);
+    if widest(size, 500) <= room {
+        return TileLabel { lines, size, weight: 500 };
+    }
+    let w4 = widest(top, 400);
+    let size = (top * room / w4).clamp(min, top);
+    TileLabel { lines, size, weight: 400 }
 }
 
 /// Dark mode, mute, snip and lock.
@@ -10401,7 +10583,8 @@ fn control_tiles(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
         (G_SNIP, "Snip", false, WAct::Snip),
         (G_LOCK, "Lock", false, WAct::Lock),
     ];
-    button_grid(c, out, items, sh);
+    let extra = vec![("Snip", "Win + Shift + S", WAct::Snip), ("Lock", "Win + L", WAct::Lock)];
+    button_grid(c, out, x, items, extra, sh);
 }
 
 /// Wi-Fi, Bluetooth, dark mode and mute.
@@ -10413,86 +10596,402 @@ fn toggles(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
         (G_MOON, "Dark mode", ctl.dark, WAct::Dark),
         (if ctl.muted == Some(true) { G_MUTE } else { G_VOL }, "Mute", ctl.muted == Some(true), WAct::Mute),
     ];
-    button_grid(c, out, items, sh);
+    let extra = vec![
+        ("Network & internet", "", WAct::Open("ms-settings:network".into())),
+        ("Bluetooth & devices", "", WAct::Open("ms-settings:bluetooth".into())),
+    ];
+    button_grid(c, out, x, items, extra, sh);
 }
 
-/// Background Apps: the tray icons in a grid (the host draws the pictures).
+/// A "+N" chip for apps that don't fit: a plate circle of diameter `d`.
+fn more_chip(c: &Canvas, cx: f32, cy: f32, d: f32, n: usize, fs: f32) {
+    c.circle(cx, cy, d / 2.0, c.plate());
+    c.text_cap(&format!("+{n}"), cx, cy - c.cap_h(fs) / 2.0, fs, 600, c.text2(), Align::Center, d * 2.0);
+}
+
+/// Background Apps: the tray icons (the host draws the pictures). `slots` cells; when
+/// there are more apps the last cell becomes "+N".
 fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let n = x.tray.len();
-    if matches!(sh, Shape::Mini | Shape::Dock) {
-        let s = (c.h * 0.42).round();
-        let slot = s + 6.0;
-        let fit_n = (((c.w - 8.0) / slot).floor() as usize).max(1).min(n);
-        for (i, (key, _)) in x.tray.iter().take(fit_n).enumerate() {
-            let ix = (c.w - fit_n as f32 * slot) / 2.0 + i as f32 * slot + 3.0;
-            out.icons.push((ix, (c.h - s) / 2.0, s, format!("tray:{key}")));
-            out.hits.push(((ix - 3.0, 0.0, slot, c.h), WAct::Tray(*key)));
+    let k = c.h / 54.0;
+    let hover_name = x.hover_tray.and_then(|h| x.tray.iter().find(|t| t.0 == h)).map(|(_, tip)| tip.lines().next().unwrap_or("").to_string()).filter(|s| !s.is_empty());
+    // Icon i at (ix, iy) with size s and a hit cell around it.
+    let place = |out: &mut Painted, i: usize, ix: f32, iy: f32, s: f32, cell: (f32, f32, f32, f32)| {
+        let (key, _) = &x.tray[i];
+        if x.hover_tray == Some(*key) && !matches!(sh, Shape::Mini | Shape::Dock) {
+            let p = style::SP[2];
+            c.rr(ix - p, iy - p, s + 2.0 * p, s + 2.0 * p, style::R_MIN + 2.0, c.plate());
         }
-        if n == 0 {
-            c.glyph(G_UP, c.w / 2.0, c.h / 2.0, c.h * 0.3, c.text2());
+        out.icons.push((ix, iy, s, format!("tray:{key}")));
+        out.hits.push((cell, WAct::Tray(*key)));
+    };
+    // How many icons to draw in `slots` cells, and how many the "+N" chip stands for.
+    let split = |slots: usize| if n > slots { (slots - 1, n - (slots - 1)) } else { (n, 0) };
+    let empty_tile = |x0: f32, y0: f32, s: f32| cc_plate(c, G_UP, x0, y0, s, c.plate(), c.text2());
+    let apps = |n: usize| if n == 1 { "1 app".to_string() } else { format!("{n} apps") };
+    match sh {
+        Shape::Mini => {
+            if n == 0 {
+                let s = 22.0 * k;
+                empty_tile((c.w - s) / 2.0, (c.h - s) / 2.0, s);
+                return;
+            }
+            // A 2×2 folder of the first four icons.
+            let (cell, gap, s) = (20.0 * k, style::SP[1] * k, 16.0 * k);
+            let grid = 2.0 * cell + gap;
+            let (x0, y0) = ((c.w - grid) / 2.0, (c.h - grid) / 2.0);
+            for i in 0..n.min(4) {
+                let (cx, cy) = (x0 + (i % 2) as f32 * (cell + gap), y0 + (i / 2) as f32 * (cell + gap));
+                place(out, i, cx + (cell - s) / 2.0, cy + (cell - s) / 2.0, s, (cx - gap / 2.0, cy - gap / 2.0, cell + gap, cell + gap));
+            }
         }
-        return;
-    }
-    let pad = 14.0;
-    c.tw("Background Apps", pad, 12.0, 12.5, 600, c.text1(), c.w - 60.0);
-    c.tr(&n.to_string(), c.w - pad, 13.0, 11.5, 400, c.text3());
-    let head = 36.0;
-    let foot = if sh == Shape::Small { 6.0 } else { 24.0 };
-    let cols = ((c.w - 2.0 * pad) / 40.0).floor().max(1.0) as usize;
-    let tile_w = (c.w - 2.0 * pad) / cols as f32;
-    let rows = (((c.h - head - foot) / tile_w).floor() as usize).max(1);
-    let isz = (tile_w * 0.5).min(22.0);
-    for (i, (key, _)) in x.tray.iter().take(cols * rows).enumerate() {
-        let (tx, ty) = (pad + (i % cols) as f32 * tile_w, head + (i / cols) as f32 * tile_w);
-        if x.hover_tray == Some(*key) {
-            c.rr(tx + 2.0, ty + 2.0, tile_w - 4.0, tile_w - 4.0, 10.0, c.ink(0.10));
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let s = 22.0 * k;
+            let pitch = 28.0 * k;
+            let y = (c.h - s) / 2.0;
+            if n == 0 {
+                empty_tile(m, y, s);
+                let fs = style::FOOT.size * k;
+                let tx = m + s + style::SP[4] * k;
+                c.text_base("None running", tx, c.h / 2.0 + c.cap_h(fs) / 2.0, fs, 400, c.text2(), Align::Left, c.w - m - tx);
+                return;
+            }
+            let slots = (((c.w - 2.0 * m + pitch - s) / pitch).floor() as usize).max(1);
+            let (show, more) = split(slots);
+            for i in 0..show {
+                let ix = m + i as f32 * pitch;
+                place(out, i, ix, y, s, (ix - (pitch - s) / 2.0, 0.0, pitch, c.h));
+            }
+            if more > 0 {
+                more_chip(c, m + show as f32 * pitch + s / 2.0, c.h / 2.0, s, more, style::FOOT.size * k);
+            }
         }
-        out.icons.push((tx + (tile_w - isz) / 2.0, ty + (tile_w - isz) / 2.0, isz, format!("tray:{key}")));
-        out.hits.push(((tx, ty, tile_w, tile_w), WAct::Tray(*key)));
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let fs = style::CAPTION.size;
+            if n == 0 {
+                empty_tile(m, m, style::BADGE_SMALL);
+                c.text_base("None running", m, 106.0, fs, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+                return;
+            }
+            // A 3×2 grid spread edge to edge inside the margins, a caption under it.
+            let s = 20.0;
+            let pitch = (c.w - 2.0 * m - s) / 2.0;
+            let (show, more) = split(6);
+            for i in 0..show {
+                let (ix, iy) = (m + (i % 3) as f32 * pitch, m + (i / 3) as f32 * pitch);
+                place(out, i, ix, iy, s, (ix - (pitch - s) / 2.0, iy - (pitch - s) / 2.0, pitch, pitch));
+            }
+            if more > 0 {
+                let (ix, iy) = (m + 2.0 * pitch, m + pitch);
+                more_chip(c, ix + s / 2.0, iy + s / 2.0, 22.0, more, style::FOOT.size);
+            }
+            let cap = hover_name.unwrap_or_else(|| apps(n));
+            c.text_base(&cap, m, 106.0, fs, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            // Header: glyph plate, title, the count (or the app under the pointer).
+            let bs = style::BADGE_HEADER;
+            cc_plate(c, G_UP, m, m, bs, c.plate(), c.text1());
+            let fs = style::FOOT.size;
+            let trailing = hover_name.unwrap_or_else(|| if n == 0 { String::new() } else { n.to_string() });
+            let tw = c.text_base(&trailing, c.w - m, style::HEADER_BASE, fs, 500, c.text2(), Align::Right, (c.w - 2.0 * m) * 0.45);
+            let tx = m + bs + style::SP[3];
+            c.text_base("Background Apps", tx, style::HEADER_BASE, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tw - style::SP[3] - tx);
+            if n == 0 {
+                let cs = style::CAPTION.size;
+                if sh == Shape::Large {
+                    // A centred empty state: a plate, the message and what will appear here.
+                    let p = 40.0;
+                    let py = 72.0;
+                    cc_plate(c, G_UP, (c.w - p) / 2.0, py, p, c.plate(), c.text2());
+                    c.text_base("No background apps", c.w / 2.0, py + p + 24.0, style::TITLE.size, 600, c.text1(), Align::Center, c.w - 2.0 * m);
+                    c.text_base("Apps that run beside the clock show here", c.w / 2.0, py + p + 42.0, style::FOOT.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                } else {
+                    c.text_base("No background apps", m, 62.0 + c.cap_h(cs) / 2.0, cs, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+                }
+                return;
+            }
+            let (cols, rows, s) = if sh == Shape::Large { (6usize, 4usize, 24.0) } else { (7, 1, 22.0) };
+            // First row centred on y 62 (as Medium); Large spreads its rows to the bottom margin.
+            let y0 = 62.0 - s / 2.0;
+            let px = (c.w - 2.0 * m - s) / (cols - 1) as f32;
+            let py = if rows > 1 { (c.h - m - s - y0) / (rows - 1) as f32 } else { 0.0 };
+            let (show, more) = split(cols * rows);
+            for i in 0..show {
+                let (ix, iy) = (m + (i % cols) as f32 * px, y0 + (i / cols) as f32 * py);
+                let ch = if rows > 1 { py } else { 36.0 };
+                place(out, i, ix, iy, s, (ix - (px - s) / 2.0, iy - (ch - s) / 2.0, px, ch));
+            }
+            if more > 0 {
+                let i = show;
+                let (ix, iy) = (m + (i % cols) as f32 * px, y0 + (i / cols) as f32 * py);
+                more_chip(c, ix + s / 2.0, iy + s / 2.0, s, more, fs);
+            }
+            // Large with rows to spare: a summary in the next row.
+            let used = (show + usize::from(more > 0)).div_ceil(cols);
+            if sh == Shape::Large && used < rows {
+                let cy = y0 + used as f32 * py + s / 2.0;
+                c.text_base(&format!("{} running", apps(n)), m, cy + c.cap_h(fs) / 2.0, fs, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+            }
+        }
     }
-    if sh != Shape::Small {
-        let hint = match x.hover_tray.and_then(|k| x.tray.iter().find(|t| t.0 == k)) {
-            Some((_, tip)) if !tip.is_empty() => tip.lines().next().unwrap_or("").to_string(),
-            _ if n == 0 => "No background apps".to_string(),
-            _ => "Click to open · right-click for the app’s menu".to_string(),
-        };
-        c.tw(&hint, pad, c.h - foot + 2.0, 11.0, 400, c.text3(), c.w - 2.0 * pad);
+}
+
+/// What Windows Update shows in each state.
+struct UpdView {
+    /// The hero (Small, Medium) and the dock value.
+    hero: String,
+    dock: String,
+    /// Caption under the hero (Small, Medium) and in the dock.
+    caption: &'static str,
+    dock_caption: &'static str,
+    /// Medium's third line.
+    third: Option<&'static str>,
+    /// Blue plate (updates waiting or a restart needed).
+    attention: bool,
+    restart: bool,
+    /// Count for the red badge; Some(None) is a plain dot.
+    badge: Option<Option<u32>>,
+    /// Couldn't ask Windows Update: the caption starts with an orange warning glyph.
+    warn: bool,
+    ok: bool,
+}
+
+fn upd_view(x: &Ctx) -> Option<UpdView> {
+    use laminar_sys::update::UpdateStatus as U;
+    let v = |hero: String, dock: String, caption, dock_caption, third, attention, badge| UpdView { hero, dock, caption, dock_caption, third, attention, restart: false, badge, warn: false, ok: false };
+    Some(match x.update? {
+        U::RestartRequired => UpdView { restart: true, ..v("Restart".into(), "Restart".into(), "to finish installing", "to finish", Some("Windows Update"), true, Some(None)) },
+        U::Pending(n) => {
+            let one = *n == 1;
+            v(n.to_string(), n.to_string(), if one { "Update waiting" } else { "Updates waiting" }, if one { "update" } else { "updates" }, Some("Windows Update"), true, Some(Some(*n)))
+        }
+        U::UpToDate => UpdView { ok: true, ..v("Up to date".into(), "Current".into(), "Windows Update", "up to date", None, false, None) },
+        U::Unknown => UpdView { warn: true, ..v("Updates".into(), "Updates".into(), "Status unavailable", "unavailable", None, false, None) },
+    })
+}
+
+/// A caption line, with the orange warning glyph first when `warn`.
+#[allow(clippy::too_many_arguments)]
+fn upd_caption(c: &Canvas, s: &str, x: f32, base: f32, size: f32, warn: bool, max_w: f32) {
+    let g = if warn { 12.0 + style::SP[1] } else { 0.0 };
+    if warn {
+        c.glyph(G_WARN, x + 6.0, base - c.cap_h(size) / 2.0, 12.0, ORANGE);
     }
+    c.text_base(s, x + g, base, size, 400, c.text2(), Align::Left, max_w - g);
 }
 
 fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
-    use laminar_sys::update::UpdateStatus as U;
-    let (sub, restart, attention) = match x.update {
-        None => ("Checking…".to_string(), false, false),
-        Some(U::RestartRequired) => ("Restart to finish installing updates".to_string(), true, true),
-        Some(U::Pending(1)) => ("1 update waiting".to_string(), false, true),
-        Some(U::Pending(n)) => (format!("{n} updates waiting"), false, true),
-        Some(U::UpToDate) => ("You’re up to date".to_string(), false, false),
-        Some(U::Unknown) => ("Status unavailable".to_string(), false, false),
-    };
     let open = WAct::Open("ms-settings:windowsupdate".into());
-    let dense = matches!(sh, Shape::Mini | Shape::Dock);
-    if dense || sh == Shape::Small {
-        tile_sub(c, out, G_UPDATE, if restart { "Restart" } else { "Updates" }, &sub, attention, BLUE, if restart { WAct::Power } else { open }, dense);
-        if attention {
-            let (cx, cy, p) = plate_center(c, dense);
-            c.circle(cx + p * 0.42, cy - p * 0.42, (p * 0.12).max(4.0), RED);
+    let view = upd_view(x);
+    let k = c.h / 54.0;
+    let restart = view.as_ref().is_some_and(|v| v.restart);
+    // The card opens Windows Update; a needed restart takes the compact cards to the power menu.
+    let card_act = if restart && sh != Shape::Medium && sh != Shape::Large && !(sh == Shape::Dock && cc_wide(c)) { WAct::Power } else { open.clone() };
+    out.hits.push(((0.0, 0.0, c.w, c.h), card_act));
+    let (fill, ink) = cc_fill(c, view.as_ref().is_some_and(|v| v.attention));
+    let glyph = if view.as_ref().is_some_and(|v| v.ok) { G_CHECK } else { G_UPDATE };
+    let ink = if view.as_ref().is_some_and(|v| v.ok) { GREEN } else { ink };
+    // The plate at (px, py) size p, with its count badge of diameter d. Only the Mini,
+    // which shows no value, numbers the badge; elsewhere the hero or value already says
+    // the count, so the plate gets the plain 8 px attention dot (as Medium does).
+    let plate_badge = |px: f32, py: f32, p: f32, d: f32| {
+        cc_plate(c, glyph, px, py, p, fill, ink);
+        if let Some(Some(b)) = view.as_ref().map(|v| v.badge) {
+            let b = if sh == Shape::Mini { b } else { None };
+            let d = if b.is_some() { d } else if sh == Shape::Mini { d * 0.625 } else if sh == Shape::Dock { 8.0 * k } else { 8.0 };
+            count_badge(c, px + p - d * 0.15, py + d * 0.15, d, b);
         }
-        return;
+    };
+    match sh {
+        Shape::Mini => {
+            let p = style::BADGE_MINI_VIS * k;
+            plate_badge((c.w - p) / 2.0, (c.h - p) / 2.0, p, 16.0 * k);
+        }
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let p = style::BADGE_DOCK * k;
+            plate_badge(m, (c.h - p) / 2.0, p, 14.0 * k);
+            let tx = m + p + style::SP[4] * k;
+            let wide = cc_wide(c);
+            let (sx, sw) = cc_slot(c);
+            let right = if wide { sx - style::SP[4] * k } else { c.w - m };
+            let Some(v) = view else {
+                skeleton(c, tx, (c.h - 10.0 * k) / 2.0, (60.0 * k).min(right - tx), 10.0 * k);
+                return;
+            };
+            // Beside a Restart button the value says "Ready", so "Restart" isn't said twice.
+            let (dock, dcap) = if wide && restart { ("Ready", "to restart") } else { (v.dock.as_str(), v.dock_caption) };
+            let role = Type { size: style::VALUE.size * k, ..style::VALUE };
+            let (val, fs) = fit_value(c, dock, role, right - tx);
+            c.text_base(&val, tx, 30.0 * k, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            upd_caption(c, dcap, tx, 44.0 * k, style::FOOT.size * k, v.warn, right - tx);
+            if wide {
+                // A pill button in the accessory slot: Restart (blue) or Open (plate).
+                let bh = style::BTN_SECONDARY_DOCK * k;
+                let label = if restart { "Restart" } else { "Open" };
+                let bw = (c.measure(label, style::FOOT.size * k, 600, Font::Text).0 + 2.0 * style::SP[5] * k).max(56.0 * k).min(sw);
+                let (bx, by) = (sx + sw - bw, (c.h - bh) / 2.0);
+                let (bf, bi) = cc_fill(c, restart);
+                c.rr(bx, by, bw, bh, bh / 2.0, bf);
+                let ls = style::FOOT.size * k;
+                c.text_cap(label, bx + bw / 2.0, by + (bh - c.cap_h(ls)) / 2.0, ls, 600, bi, Align::Center, bw);
+                out.hits.push(((bx, 0.0, bw, c.h), if restart { WAct::Power } else { open }));
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            plate_badge(m, m, style::BADGE_SMALL, 16.0);
+            let inner = c.w - 2.0 * m;
+            let Some(v) = view else {
+                let ch = c.cap_h(style::HERO_S.size);
+                skeleton(c, m, 86.0 - ch, inner * 0.6, ch);
+                skeleton(c, m, 106.0 - 8.0, 40.0, 8.0);
+                return;
+            };
+            let (val, fs) = fit_value(c, &v.hero, style::HERO_S, inner);
+            c.text_base(&val, m, 86.0, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
+            // Small says less: "updates waiting" reads on from the number; "Unavailable" fits.
+            let cap = if v.warn { "Unavailable".to_string() } else if matches!(x.update, Some(laminar_sys::update::UpdateStatus::Pending(_))) { v.caption.to_lowercase() } else { v.caption.to_string() };
+            upd_caption(c, &cap, m, 106.0, style::CAPTION.size, v.warn, inner);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let bs = style::BADGE_GLANCE;
+            let (bx, by) = (c.w - m - bs, m);
+            cc_plate(c, glyph, bx, by, bs, fill, ink);
+            match &view {
+                None => {
+                    skeleton(c, m, m, (c.w - 2.0 * m - bs - style::SP[3]) * 0.6, c.cap_h(style::HERO.size));
+                    skeleton(c, m, 58.0 - 8.0, 40.0, 8.0);
+                }
+                Some(v) => {
+                    if v.badge.is_some() {
+                        count_badge(c, bx + bs - 1.0, by + 1.0, 8.0, None);
+                    }
+                    // Beside the Restart button the hero says "Ready", so "Restart" isn't said twice.
+                    let (hero, cap) = if restart { ("Ready", "Restart to finish") } else { (v.hero.as_str(), v.caption) };
+                    let (val, fs) = fit_value(c, hero, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
+                    c.text_cap(&val, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
+                    let bw = if restart { 88.0 } else { 0.0 };
+                    let cap_w = c.w - 2.0 * m - if restart { bw + style::SP[3] } else { 0.0 };
+                    upd_caption(c, cap, m, 58.0, style::CAPTION.size, v.warn, cap_w);
+                    if let Some(t) = v.third {
+                        c.text_base(t, m, 76.0, style::FOOT.size, 400, c.text3(), Align::Left, cap_w);
+                    }
+                    if restart {
+                        let bh = style::BTN_SECONDARY;
+                        pill_button(c, out, c.w - m - bw, 80.0 - bh, bw, bh, "Restart", WAct::Power);
+                    }
+                }
+            }
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                link_rows(
+                    c,
+                    out,
+                    vec![
+                        ("Open Windows Update", "", open),
+                        ("Update history", "", WAct::Open("ms-settings:windowsupdate-history".into())),
+                        ("Advanced options", "", WAct::Open("ms-settings:windowsupdate-options".into())),
+                    ],
+                    style::DETAIL_TOP,
+                );
+            }
+        }
     }
-    out.hits.push(((0.0, 0.0, c.w, c.h), open));
-    let p = 48.0;
-    plate(c, G_UPDATE, 18.0, (c.h - p) / 2.0, p, if attention { BLUE } else { c.ink(0.12) }, if attention { WHITE } else { c.text1() });
-    let tx = 18.0 + p + 14.0;
-    let bw = if restart { 78.0 } else { 0.0 };
-    c.tw("Windows Update", tx, c.h / 2.0 - 19.0, 14.0, 600, c.text1(), c.w - tx - bw - 20.0);
-    c.tw(&sub, tx, c.h / 2.0 + 2.0, 11.5, 400, c.text2(), c.w - tx - bw - 20.0);
-    if restart {
-        let (bx, bh) = (c.w - bw - 14.0, 28.0);
-        let by = (c.h - bh) / 2.0;
-        c.rr(bx, by, bw, bh, bh / 2.0, BLUE);
-        c.tc("Restart", bx + bw / 2.0, by + 6.0, 11.5, 600, WHITE, bw);
-        out.hits.push(((bx, by, bw, bh), WAct::Power));
+}
+
+/// Windows Settings: a gear that opens Settings, with shortcuts to common pages as the
+/// card grows.
+fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
+    let open = |p: &str| WAct::Open(format!("ms-settings:{p}"));
+    out.hits.push(((0.0, 0.0, c.w, c.h), open("")));
+    let shortcuts = [(G_SCREEN, "display"), (G_VOL, "sound"), (G_WIFI, "network"), (G_BT, "bluetooth")];
+    let (pf, pi) = (c.plate(), c.text1());
+    // Round secondary buttons from the right edge `right`, centred on `cy`.
+    let buttons = |out: &mut Painted, n: usize, right: f32, cy: f32, d: f32, gap: f32, hit: f32| {
+        for (i, (g, page)) in shortcuts.iter().take(n).enumerate() {
+            let cx = right - d / 2.0 - (n - 1 - i) as f32 * (d + gap);
+            c.circle(cx, cy, d / 2.0, pf);
+            c.glyph(g, cx, cy, d * style::GLYPH_IN, pi);
+            // Hit squares are at least 28 (§2.4); neighbours may overlap into the gap.
+            let hd = (d + gap).max(hit);
+            out.hits.push(((cx - hd / 2.0, cy - hd / 2.0, hd, hd), open(page)));
+        }
+    };
+    let k = c.h / 54.0;
+    match sh {
+        Shape::Mini => {
+            let p = style::BADGE_MINI_VIS * k;
+            cc_plate(c, G_SETTINGS, (c.w - p) / 2.0, (c.h - p) / 2.0, p, pf, pi);
+        }
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let p = style::BADGE_DOCK * k;
+            cc_plate(c, G_SETTINGS, m, (c.h - p) / 2.0, p, pf, pi);
+            let tx = m + p + style::SP[4] * k;
+            let (sx, _) = cc_slot(c);
+            let right = if cc_wide(c) { sx - style::SP[4] * k } else { c.w - m };
+            c.text_base("Settings", tx, 30.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, right - tx);
+            c.text_base("Windows", tx, 44.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - tx);
+            if cc_wide(c) {
+                buttons(out, 3, c.w - m, c.h / 2.0, 22.0 * k, style::SP[1] * k, style::BTN_SECONDARY * k);
+            }
+        }
+        Shape::Small => {
+            let p = 44.0;
+            cc_plate(c, G_SETTINGS, (c.w - p) / 2.0, 22.0, p, pf, pi);
+            c.text_base("Settings", c.w / 2.0, 88.0, style::TITLE.size, 600, c.text1(), Align::Center, c.w - 2.0 * style::M_SMALL);
+            c.text_base("Windows", c.w / 2.0, 104.0, style::FOOT.size, 400, c.text2(), Align::Center, c.w - 2.0 * style::M_SMALL);
+        }
+        Shape::Medium => {
+            let m = style::M_CARD;
+            let p = 44.0;
+            cc_plate(c, G_SETTINGS, m, 26.0, p, pf, pi);
+            let tx = m + p + style::SP[5];
+            let d = style::BTN_SECONDARY;
+            let n = 3;
+            let bl = c.w - m - n as f32 * d - (n - 1) as f32 * style::SP[3];
+            c.text_base("Settings", tx, 44.0, style::TITLE.size, 600, c.text1(), Align::Left, bl - style::SP[3] - tx);
+            c.text_base("Windows", tx, 60.0, style::CAPTION.size, 400, c.text2(), Align::Left, bl - style::SP[3] - tx);
+            buttons(out, n, c.w - m, 48.0, d, style::SP[3], style::BTN_SECONDARY);
+        }
+        Shape::Large => {
+            // A state tile with the gear, then Medium's shortcuts (plus Apps) as a row of
+            // labelled round buttons on the bottom margin.
+            let inset = style::SP[2];
+            let th = 112.0;
+            c.rr(inset, inset, c.w - 2.0 * inset, th, style::concentric(style::CARD_R, inset), c.plate());
+            let d = 56.0;
+            let (cx, cy) = (inset + style::M_CARD + d / 2.0, inset + th / 2.0);
+            // A card-coloured disc, so the gear separates from the tile behind it.
+            c.circle(cx, cy, d / 2.0, c.halo());
+            c.glyph(G_SETTINGS, cx, cy, 32.0, c.text1());
+            let tx = cx + d / 2.0 + style::SP[5];
+            let vs = style::VALUE.size;
+            c.text_base("Settings", tx, cy - 2.0, vs, 600, c.text1(), Align::Left, c.w - inset - style::M_CARD - tx);
+            c.text_base("Windows", tx, cy + 16.0, style::BODY.size, 400, c.text2(), Align::Left, c.w - inset - style::M_CARD - tx);
+            let m = style::M_CARD;
+            let row = [(G_SCREEN, "Display", "display"), (G_VOL, "Sound", "sound"), (G_WIFI, "Network", "network"), (G_APPS, "Apps", "appsfeatures")];
+            let col_w = (c.w - 2.0 * m) / row.len() as f32;
+            let bd = style::BTN_SECONDARY;
+            let fs = style::FOOT.size;
+            let base = c.h - m - style::SP[1];
+            let bcy = base - c.cap_h(fs) - style::SP[3] - bd / 2.0;
+            let top = inset + th + style::SP[2];
+            for (i, (g, label, page)) in row.into_iter().enumerate() {
+                let x0 = m + i as f32 * col_w;
+                let bx = x0 + col_w / 2.0;
+                c.circle(bx, bcy, bd / 2.0, pf);
+                c.glyph(g, bx, bcy, bd * style::GLYPH_IN, pi);
+                c.text_base(label, bx, base, fs, 500, c.text2(), Align::Center, col_w);
+                out.hits.push(((x0, top, col_w, c.h - top - style::SP[2]), open(page)));
+            }
+        }
     }
 }
 

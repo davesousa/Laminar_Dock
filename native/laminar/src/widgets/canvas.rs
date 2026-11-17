@@ -577,20 +577,6 @@ impl<'a> Canvas<'a> {
         }
         m.width.min(mw)
     }
-    /// Shorthands.
-    pub fn tw(&self, s: &str, x: f32, y: f32, size: f32, weight: u32, c: Col, max_w: f32) -> f32 {
-        self.text(s, x, y, size, weight, c, Align::Left, max_w, Font::Text)
-    }
-    pub fn tr(&self, s: &str, right: f32, y: f32, size: f32, weight: u32, c: Col) -> f32 {
-        self.text(s, right, y, size, weight, c, Align::Right, right, Font::Text)
-    }
-    pub fn tc(&self, s: &str, cx: f32, y: f32, size: f32, weight: u32, c: Col, w: f32) -> f32 {
-        self.text(s, cx, y, size, weight, c, Align::Center, w, Font::Text)
-    }
-    /// Big numbers.
-    pub fn num(&self, s: &str, x: f32, y: f32, size: f32, weight: u32, c: Col) -> f32 {
-        self.text(s, x, y, size, weight, c, Align::Left, self.w, Font::Display)
-    }
     /// A Segoe Fluent Icons glyph centred on (cx, cy).
     pub fn glyph(&self, g: &str, cx: f32, cy: f32, size: f32, c: Col) {
         // Centre the glyph's ink (what you see), not its text box: icon fonts sit glyphs
