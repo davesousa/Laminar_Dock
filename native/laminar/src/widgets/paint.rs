@@ -6386,7 +6386,7 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
             let hero_w = style::time_weight(style::HERO.size);
             let cap = style::CAPTION;
             // The week's range, for the range bars (and today's in the Now card).
-            let shown = if k == WeatherKind::Week { 7 } else { 4 };
+            let shown = if k == WeatherKind::Week { 7 } else { 3 };
             let range = days.iter().take(shown).fold((w.temp_c, w.temp_c), |a, d| (a.0.min(d.lo), a.1.max(d.hi)));
             match k {
                 WeatherKind::Now => {
@@ -6475,8 +6475,9 @@ fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
                 }
                 _ => {
                     c.line(m, style::SEP_Y_LARGE + 0.5, r, style::SEP_Y_LARGE + 0.5, 1.0, ink.sep);
-                    let pitch = style::ROW_M;
-                    day_rows(c, &days[..days.len().min(4)], style::DETAIL_TOP + pitch / 2.0, pitch, range, w.temp_c, &ink);
+                    // Three rows at the Large list pitch (§5), y 108..180.
+                    let pitch = style::ROW_L;
+                    day_rows(c, &days[..days.len().min(3)], style::DETAIL_TOP + pitch / 2.0, pitch, range, w.temp_c, &ink);
                 }
             }
         }
@@ -6559,8 +6560,10 @@ fn sun_mark(c: &Canvas, cx: f32, top: f32, size: f32, rising: bool) {
 
 /// The sun's path: a horizon hairline from `x0` to `x1` at `hy`, a track-coloured arc of
 /// radius `r` centred on `cx`, and (by day) the travelled part in orange with the sun on it.
+/// At night nothing is drawn below the horizon: the all-track arc and the "Sunrise" line
+/// already say the sun is down, and a dot under the hairline read as a stray mark.
 #[allow(clippy::too_many_arguments)]
-fn sun_path(c: &Canvas, cx: f32, hy: f32, r: f32, (x0, x1): (f32, f32), frac: Option<f32>, (track_t, done_t): (f32, f32), dot_r: f32, night: Option<f32>) {
+fn sun_path(c: &Canvas, cx: f32, hy: f32, r: f32, (x0, x1): (f32, f32), frac: Option<f32>, (track_t, done_t): (f32, f32), dot_r: f32) {
     // Horizon and the day's path in text3 so both read on light and dark glass.
     c.line(x0, hy + 0.5, x1, hy + 0.5, 1.0, c.text3());
     c.arc(cx, hy, r, track_t.max(1.5), 180.0, 360.0, c.text3());
@@ -6575,26 +6578,6 @@ fn sun_path(c: &Canvas, cx: f32, hy: f32, r: f32, (x0, x1): (f32, f32), frac: Op
             c.circle_stroke(px, py, dot_r - 0.25, alpha(hex(0xC45500), 0.4), 0.5);
         }
     }
-    // At night the sun travels back under the horizon, from sunset (right) to sunrise (left),
-    // on a shallow arc: the part travelled so far is dotted in the night accent, and a dot of
-    // the same colour marks where it is now.
-    if let Some(f) = night {
-        let ry = r * 0.16;
-        let d = (dot_r * 0.75).max(2.0);
-        let at = |t: f32| {
-            let a = std::f32::consts::PI * t;
-            (cx + r * a.cos(), hy + 1.0 + ry * a.sin())
-        };
-        let len = std::f32::consts::PI * r * f;
-        let steps = (len / 4.5).floor() as usize;
-        for i in 0..steps {
-            let (px, py) = at(f * i as f32 / steps.max(1) as f32);
-            c.circle(px, py, 0.9, alpha(PURPLE, 0.6));
-        }
-        let (px, py) = at(f);
-        c.circle(px, py, d + 1.5, c.halo());
-        c.circle(px, py, d, PURPLE);
-    }
 }
 
 /// sunrise-sunset: the next sunrise or sunset, and where the sun is on today's path.
@@ -6603,11 +6586,6 @@ fn sun(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, sh: Shape) {
     let now_m = (x.now.hour * 60 + x.now.minute) as f32;
     let up = set > rise && now_m >= rise && now_m < set;
     let frac = up.then(|| ((now_m - rise) / (set - rise)).clamp(0.0, 1.0));
-    // How far through the night it is (0 at sunset, 1 at sunrise).
-    let night = (!up && set > rise).then(|| {
-        let gone = if now_m >= set { now_m - set } else { now_m + 1440.0 - set };
-        (gone / (1440.0 - (set - rise)).max(1.0)).clamp(0.0, 1.0)
-    });
     let (next_l, next_m, other_l, other_m) = if up { ("Sunset", set, "Sunrise", rise) } else { ("Sunrise", rise, "Sunset", set) };
     let until = if up {
         set - now_m
@@ -6641,14 +6619,12 @@ fn sun(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, sh: Shape) {
             if wide {
                 let hy = 38.0 * k;
                 let r = 22.0 * k;
-                sun_path(c, slot_x + slot_w / 2.0, hy, r, (slot_x, slot_x + slot_w), frac, (1.5, 1.5), 3.0 * k, night);
+                sun_path(c, slot_x + slot_w / 2.0, hy, r, (slot_x, slot_x + slot_w), frac, (1.5, 1.5), 3.0 * k);
             }
         }
         Shape::Small => {
             let m = style::M_SMALL;
-            // No night dot here: under the horizon it would land on the hero time. At night
-            // the arc is all track, which already says the sun is down.
-            sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), frac, (2.0, 2.5), 4.0, None);
+            sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), frac, (2.0, 2.5), 4.0);
             let aw = c.measure(ap, style::MICRO.size, style::MICRO.weight, Font::Text).0 + 3.0;
             let hs = fit(c, &t, style::HERO_S_TIME.size, style::HERO_S_TIME.min, 300, Font::Text, c.w - 2.0 * m - aw);
             time_ampm(c, &t, ap, m, 86.0, hs, style::time_weight(hs), t1, t2, Align::Left);
@@ -6662,7 +6638,7 @@ fn sun(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, sh: Shape) {
             c.text_base(&format!("{next_l} · in {}", dur((until * 60.0) as u64)), m, 58.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, left_w);
             let (ot, oap) = clock12(other_m);
             c.text_base(&format!("{other_l} {ot} {oap}"), m, 76.0, style::FOOT.size, 400, t3, Align::Left, left_w);
-            sun_path(c, 200.0, 72.0, 48.0, (148.0, c.w - m), frac, (2.0, 2.5), 4.0, night);
+            sun_path(c, 200.0, 72.0, 48.0, (148.0, c.w - m), frac, (2.0, 2.5), 4.0);
             if sh != Shape::Large {
                 return;
             }
@@ -6816,14 +6792,14 @@ fn weather_waiting(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: S
             if k == WeatherKind::Sun && c.w >= c.h * 3.4 {
                 let slot_w = (c.w * 0.34).round();
                 let slot_x = c.w - m - slot_w;
-                sun_path(c, slot_x + slot_w / 2.0, 38.0 * kk, 22.0 * kk, (slot_x, slot_x + slot_w), None, (1.5, 1.5), 3.0 * kk, None);
+                sun_path(c, slot_x + slot_w / 2.0, 38.0 * kk, 22.0 * kk, (slot_x, slot_x + slot_w), None, (1.5, 1.5), 3.0 * kk);
             }
         }
         Shape::Small => {
             let m = style::M_SMALL;
             let inner = c.w - 2.0 * m;
             if k == WeatherKind::Sun {
-                sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), None, (2.0, 2.5), 4.0, None);
+                sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), None, (2.0, 2.5), 4.0);
                 let ch = c.cap_h(style::HERO_S.size);
                 bar(m, 86.0 - ch, 64.0, ch);
                 bar(m, 106.0 - 8.0, 40.0, 8.0);
@@ -6870,7 +6846,7 @@ fn weather_waiting(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: S
                     bar(m, m, 84.0, ch);
                     bar(m, 58.0 - 8.0, 64.0, 8.0);
                     bar(m, 76.0 - 8.0, 40.0, 8.0);
-                    sun_path(c, 200.0, 72.0, 48.0, (148.0, r), None, (2.0, 2.5), 4.0, None);
+                    sun_path(c, 200.0, 72.0, 48.0, (148.0, r), None, (2.0, 2.5), 4.0);
                 }
                 WeatherKind::Hourly | WeatherKind::Week => {
                     let bw = 60.0;
@@ -6921,6 +6897,10 @@ fn weather_waiting(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: S
                         }
                     } else {
                         c.circle(r - es / 2.0, 14.0 + es / 2.0, es / 2.0, track);
+                        // Today's range bar, where the loaded card draws it.
+                        let h = style::METER_H_COMPACT;
+                        let cy = 78.0 - c.cap_h(style::FOOT.size) / 2.0;
+                        c.rr(174.0, cy - h / 2.0, 52.0, h, h / 2.0, track);
                     }
                 }
             }
@@ -11503,12 +11483,23 @@ fn progress(c: &Canvas, s: Span, x: &Ctx, sh: Shape) {
                 let (al, px) = if *f <= 0.0 { (Align::Left, px) } else { (Align::Center, px.min(r - c.measure(l, mic.size, mic.weight, Font::Text).0 / 2.0)) };
                 c.text_base(l, px, 132.0, mic.size, mic.weight, t3, al, 40.0);
             }
+            // Three stats on thirds, but a wide value ("319 days") pushes the next column right
+            // so each pair keeps a clear gap (up to 20); the last column stays inside the margin.
             let cw = mw / 3.0;
-            for (i, (v, l)) in [(elapsed.as_str(), "Elapsed"), (left.as_str(), "Left"), (ends.0.as_str(), ends.1.as_str())].iter().enumerate() {
-                let cx = x0 + i as f32 * cw;
-                let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
-                c.text_base(&v, cx, 166.0, fs, style::VALUE.weight, t1, Align::Left, c.w);
-                c.text_base(l, cx, 182.0, style::FOOT.size, style::FOOT.weight, t2, Align::Left, cw - style::SP[3]);
+            let stats = [(elapsed.as_str(), "Elapsed"), (left.as_str(), "Left"), (ends.0.as_str(), ends.1.as_str())];
+            let vw: Vec<f32> = stats.iter().map(|(v, _)| c.measure(v, style::VALUE.size, style::VALUE.weight, Font::Text).0).collect();
+            let gap = ((mw - vw.iter().sum::<f32>()) / 2.0).clamp(0.0, style::SP[7]);
+            let mut xs = [x0, x0 + cw, x0 + 2.0 * cw];
+            for i in 1..3 {
+                xs[i] = xs[i].max(xs[i - 1] + vw[i - 1] + gap);
+            }
+            xs[2] = xs[2].min(r - vw[2]);
+            xs[1] = xs[1].min(xs[2] - vw[1] - gap);
+            for (i, (v, l)) in stats.iter().enumerate() {
+                let room = if i < 2 { xs[i + 1] - xs[i] - gap.min(style::SP[3]) } else { r - xs[i] };
+                let (v, fs) = fit_value(c, v, style::VALUE, room);
+                c.text_base(&v, xs[i], 166.0, fs, style::VALUE.weight, t1, Align::Left, c.w);
+                c.text_base(l, xs[i], 182.0, style::FOOT.size, style::FOOT.weight, t2, Align::Left, room);
             }
         }
     }
