@@ -340,6 +340,8 @@ enum Vis {
     /// Progress ring: fraction, colour, text inside (may be empty).
     Ring(f32, Col, String),
     Glyph(&'static str, Col),
+    /// No face uses it now (weather places its emoji by their ink); kept for new faces.
+    #[allow(dead_code)]
     Emoji(&'static str),
 }
 
@@ -5669,7 +5671,14 @@ pub fn weather_emoji(code: i32, day: bool) -> &'static str {
                 "🌙"
             }
         }
-        2 => "⛅",
+        // Partly cloudy: the sun behind a cloud by day, just the cloud at night.
+        2 => {
+            if day {
+                "⛅"
+            } else {
+                "☁️"
+            }
+        }
         3 => "☁️",
         45 | 48 => "🌫️",
         51..=57 | 80..=82 => "🌦️",
@@ -5688,6 +5697,11 @@ fn d0(t: f32) -> f32 {
     } else {
         r
     }
+}
+
+/// "17°".
+fn deg(t: f32) -> String {
+    format!("{:.0}°", d0(t))
 }
 
 fn mins(hm: &str) -> f32 {
@@ -5710,186 +5724,867 @@ fn weekday_of(ymd: &str) -> String {
     DAYS[wd as usize][..3].to_string()
 }
 
-/// Columns of hours or days: label, emoji, temperature.
-fn forecast_cols(c: &Canvas, items: &[(String, &'static str, String)], x0: f32, y0: f32, w: f32, small_temp: bool) {
-    let n = items.len().max(1);
-    let colw = w / n as f32;
-    for (i, (l, e, t)) in items.iter().enumerate() {
-        let cx = x0 + colw * (i as f32 + 0.5);
-        c.tc(l, cx, y0, 10.5, 500, c.text2(), colw);
-        c.text(e, cx, y0 + 15.0, 16.0, 400, c.text1(), Align::Center, colw, Font::Text);
-        c.tc(t, cx, y0 + 40.0, if small_temp { 10.0 } else { 12.0 }, 600, c.text1(), colw);
+/// "4:58" and "PM" for minutes after midnight: 12-hour, no leading zero.
+fn clock12(m: f32) -> (String, &'static str) {
+    let m = (m.round() as i64).rem_euclid(1440) as u32;
+    (format!("{}:{:02}", h12(m / 60), m % 60), ampm(m / 60))
+}
+
+/// "2PM" for an hour of the day.
+fn hour12(h: u32) -> String {
+    format!("{}{}", h12(h), ampm(h))
+}
+
+/// A time with its AM/PM in Micro, top-aligned to the digits' cap top, 3 px after them
+/// (§2.2). `x` is the left, centre or right of the whole. Returns its width.
+#[allow(clippy::too_many_arguments)]
+fn time_ampm(c: &Canvas, t: &str, ap: &str, x: f32, base: f32, size: f32, weight: u32, col: Col, ap_col: Col, align: Align) -> f32 {
+    let mic = style::MICRO;
+    let tw = c.measure(t, size, weight, Font::Text).0;
+    let (gap, aw) = if ap.is_empty() { (0.0, 0.0) } else { (3.0, c.measure(ap, mic.size, mic.weight, Font::Text).0) };
+    let total = tw + gap + aw;
+    let left = match align {
+        Align::Left => x,
+        Align::Center => x - total / 2.0,
+        Align::Right => x - total,
+    };
+    c.text_base(t, left, base, size, weight, col, Align::Left, tw + 4.0);
+    if !ap.is_empty() {
+        c.text_cap(ap, left + tw + gap, base - c.cap_h(size), mic.size, mic.weight, ap_col, Align::Left, aw + 4.0);
+    }
+    total
+}
+
+/// Weather emoji measured to the ink (Segoe UI Emoji): at font size `s` the picture fills an
+/// `s` square that starts this far (× s) below and right of the text box's top-left.
+const EMOJI_TOP: f32 = 0.24;
+const EMOJI_LEFT: f32 = 0.18;
+
+/// A weather emoji `size` px square, centred on `cx`, with its top at `top`.
+fn draw_emoji(c: &Canvas, e: &str, cx: f32, top: f32, size: f32, col: Col) {
+    let (x, y) = (cx - size * (EMOJI_LEFT + 0.5), top - size * EMOJI_TOP);
+    if c.light {
+        emoji_shadow(c, e, x, y, size);
+    }
+    c.text(e, x, y, size, 400, col, Align::Left, size * 2.0, Font::Text);
+}
+
+/// Light cards: white emoji (clouds, snow) have almost no edge on pale glass. Under the
+/// canvas's own crisp silhouette, a soft one (about 1 px down, 2 px blur, black ≈ 0.2 at its
+/// core) gives them a shape. The blur is a ring of faint copies of the glyph's silhouette.
+fn emoji_shadow(c: &Canvas, e: &str, x: f32, y: f32, size: f32) {
+    use windows::core::HSTRING;
+    use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+    use windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NONE;
+    use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_WORD_WRAPPING_NO_WRAP};
+    let wide: Vec<u16> = e.encode_utf16().collect();
+    unsafe {
+        let Ok(f) = c.dw.CreateTextFormat(&HSTRING::from(Canvas::family(size, Font::Text)), None, DWRITE_FONT_WEIGHT(400), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, &HSTRING::from("en-us")) else { return };
+        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        let Ok(l) = c.dw.CreateTextLayout(&wide, &f, size * 2.0, size * 2.0) else { return };
+        let Ok(b) = c.dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.045 }, None) else { return };
+        // Eight taps on a 1 px circle around (0, 1) plus the centre: overlapping, they build
+        // to ≈ 0.2 under the glyph and fade out over the last 2 px.
+        let taps = [(0.0, 1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0), (0.0, 2.0), (-0.7, 0.3), (0.7, 0.3), (-0.7, 1.7), (0.7, 1.7)];
+        for (dx, dy) in taps {
+            c.dc.DrawTextLayout(windows_numerics::Vector2 { X: x + dx, Y: y + dy }, &l, &b, D2D1_DRAW_TEXT_OPTIONS_NONE);
+        }
     }
 }
 
-type Day = (String, &'static str, String, String);
+/// A temperature centred on its digits' ink, so the ° hangs off to the right.
+fn temp_mid(c: &Canvas, s: &str, cx: f32, base: f32, size: f32, weight: u32, col: Col) {
+    let dw = c.measure(s.trim_end_matches('°'), size, weight, Font::Text).0;
+    c.text_base(s, cx - dw / 2.0, base, size, weight, col, Align::Left, c.w * 2.0);
+}
+
+/// The temperature colour scale for range bars: ≤0° blue, 10° teal, 20° yellow, 30° orange,
+/// ≥35° red (light theme: the accents' light fills).
+fn temp_col(c: &Canvas, t: f32) -> Col {
+    let scale = [(0.0, BLUE), (10.0, hex(0x40C8E0)), (20.0, YELLOW), (30.0, ORANGE), (35.0, RED)];
+    let k = |i: usize| c.tone(scale[i].1, false);
+    if t <= scale[0].0 {
+        return k(0);
+    }
+    for i in 1..scale.len() {
+        if t <= scale[i].0 {
+            let f = (t - scale[i - 1].0) / (scale[i].0 - scale[i - 1].0);
+            let (a, b) = (k(i - 1), k(i));
+            return (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f, 1.0);
+        }
+    }
+    k(scale.len() - 1)
+}
+
+/// A fully round bar filled with a horizontal gradient whose stops (0..1) run from `gx0`
+/// to `gx1`, so bars sharing a scale share colours at the same x.
+#[allow(clippy::too_many_arguments)]
+fn grad_bar(c: &Canvas, x: f32, y: f32, w: f32, h: f32, gx0: f32, gx1: f32, stops: &[(f32, Col)]) {
+    use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D_RECT_F};
+    use windows::Win32::Graphics::Direct2D::{ID2D1RenderTarget, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT};
+    use windows_numerics::Vector2;
+    if w <= 0.0 || h <= 0.0 || stops.is_empty() {
+        return;
+    }
+    let st: Vec<D2D1_GRADIENT_STOP> = stops
+        .iter()
+        .map(|(p, col)| {
+            let k = c.tone(*col, false);
+            D2D1_GRADIENT_STOP { position: p.clamp(0.0, 1.0), color: D2D1_COLOR_F { r: k.0, g: k.1, b: k.2, a: k.3 } }
+        })
+        .collect();
+    unsafe {
+        let rt: &ID2D1RenderTarget = c.dc;
+        let Ok(coll) = rt.CreateGradientStopCollection(&st, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: gx0, Y: 0.0 }, endPoint: Vector2 { X: gx1.max(gx0 + 1.0), Y: 0.0 } };
+        let Ok(b) = c.dc.CreateLinearGradientBrush(&props, None, &coll) else { return };
+        let r = h / 2.0;
+        c.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, radiusX: r, radiusY: r }, &b);
+    }
+}
+
+/// A temperature range bar: track from `x` to `x + w` for `lo_t`..`hi_t`, the `a`..`b` part
+/// filled with the temperature scale, and an optional current-temperature dot.
+#[allow(clippy::too_many_arguments)]
+fn range_bar(c: &Canvas, x: f32, cy: f32, w: f32, (lo_t, hi_t): (f32, f32), (a, b): (f32, f32), now: Option<f32>, track: Col, dot: Col, ring: Col) {
+    let h = style::METER_H_COMPACT;
+    let span = (hi_t - lo_t).max(1.0);
+    let at = |t: f32| x + w * ((t - lo_t) / span).clamp(0.0, 1.0);
+    c.rr(x, cy - h / 2.0, w, h, h / 2.0, track);
+    let mut stops = vec![(0.0, temp_col(c, lo_t))];
+    for t in [0.0, 10.0, 20.0, 30.0, 35.0] {
+        if t > lo_t && t < hi_t {
+            stops.push(((t - lo_t) / span, temp_col(c, t)));
+        }
+    }
+    stops.push((1.0, temp_col(c, hi_t)));
+    let (xa, xb) = (at(a), at(b));
+    let (x0, x1) = if xb - xa < h { ((xa + xb - h) / 2.0, (xa + xb + h) / 2.0) } else { (xa, xb) };
+    grad_bar(c, x0, cy - h / 2.0, x1 - x0, h, x, x + w, &stops);
+    if let Some(t) = now {
+        let px = at(t).clamp(x0 + 1.0, x1 - 1.0);
+        c.circle(px, cy, 3.0 + 1.5, ring);
+        c.circle(px, cy, 3.0, dot);
+    }
+}
+
+/// Clear daytime sky (also the banner's setup and loading card).
+const SKY_CLEAR: (u32, u32) = (0x3F86D8, 0x2A66B6);
+
+/// Sky colours for the banner, by condition (two-stop vertical gradient). Every top stop
+/// keeps white text at 3.7:1 or better: snow is a pale wintry blue, overcast a neutral grey,
+/// rain a darker slate, night a deep navy.
+fn sky(w: &laminar_sys::weather::Weather) -> (Col, Col) {
+    let (top, bottom) = if !w.is_day {
+        (0x1B2550, 0x0E1430)
+    } else {
+        match w.code {
+            71..=77 | 85 | 86 => (0x6F86A6, 0x4F6585),
+            51..=67 | 80..=82 | 95..=99 => (0x5B6B80, 0x3A4657),
+            3 | 45 | 48 => (0x6C7A8B, 0x4B5767),
+            _ => SKY_CLEAR,
+        }
+    };
+    (hex(top), hex(bottom))
+}
+
+/// Secondary text on the banner's sky.
+const SKY_T2: f32 = 0.9;
+
+/// The banner's card: the sky gradient with a faint white inner edge.
+fn sky_card(c: &Canvas, (top, bottom): (Col, Col), sh: Shape) {
+    let r = if matches!(sh, Shape::Mini | Shape::Dock) { style::DOCK_R } else { style::CARD_R };
+    c.rr_grad(0.0, 0.0, c.w, c.h, r, top, bottom);
+    c.rr_stroke(0.0, 0.0, c.w, c.h, r, (1.0, 1.0, 1.0, 0.12), 1.0);
+}
+
+/// One forecast day.
+struct WDay {
+    label: String,
+    emoji: &'static str,
+    hi: f32,
+    lo: f32,
+}
+
+/// Colours a weather card draws with: the theme's, or white on the banner's sky.
+struct Inks {
+    t1: Col,
+    t2: Col,
+    track: Col,
+    sep: Col,
+    /// Behind the current-temperature dot (the card colour).
+    ring: Col,
+}
 
 fn weather(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open(format!("https://www.msn.com/en-ca/weather/forecast/in-{}", x.cfg.weather_city.replace(' ', "-")))));
     let Some(w) = x.weather else {
-        if k == WeatherKind::Banner && !matches!(sh, Shape::Mini | Shape::Dock) {
-            bg(c, false);
-        }
-        compact_or_text(c, sh, Vis::Glyph(G_SUN, c.text3()), "—", &x.cfg.weather_city, "Fetching weather…");
+        weather_waiting(c, out, k, x, sh);
         return;
     };
-    let city = &x.cfg.weather_city;
-    let temp = format!("{:.0}°", d0(w.temp_c));
+    if k == WeatherKind::Sun {
+        sun(c, w, x, sh);
+        return;
+    }
+    let city = x.cfg.weather_city.trim();
+    let temp = deg(w.temp_c);
     let emoji = weather_emoji(w.code, w.is_day);
-    let hourly: Vec<(String, &'static str, String)> = w.hourly.iter().enumerate().map(|(i, (h, t, code))| (if i == 0 { "Now".to_string() } else { format!("{}{}", h12(*h as u32), if *h < 12 { "a" } else { "p" }) }, weather_emoji(*code, (6..19).contains(h)), format!("{:.0}°", d0(*t)))).collect();
-    let daily: Vec<Day> = w.daily.iter().enumerate().map(|(i, (d, hi, lo, code))| (if i == 0 { "Today".to_string() } else { weekday_of(d) }, weather_emoji(*code, true), format!("{:.0}°", d0(*hi)), format!("{:.0}°", d0(*lo)))).collect();
-    if matches!(sh, Shape::Mini | Shape::Dock) {
-        let s = if k == WeatherKind::Sun {
-            // The next sunrise or sunset, not the weather.
-            let now_m = (x.now.hour * 60 + x.now.minute) as f32;
-            let (label, hm, e) = if now_m >= mins(&w.sunrise) && now_m < mins(&w.sunset) { ("Sunset", &w.sunset, "🌇") } else { ("Sunrise", &w.sunrise, "🌅") };
-            let m = mins(hm) as u32;
-            let t = format!("{}:{:02}", h12(m / 60), m % 60);
-            let t = if sh == Shape::Dock { format!("{t} {}", ampm(m / 60)) } else { t };
-            Sum::new(Vis::Emoji(e), t, if sh == Shape::Dock { label } else { "" })
+    let hl = format!("H:{} L:{}", deg(w.high_c), deg(w.low_c));
+    // Now, then the next full hours (moons after sunset).
+    let (rise, set) = if w.sunrise.is_empty() || w.sunset.is_empty() { (360.0, 1140.0) } else { (mins(&w.sunrise), mins(&w.sunset)) };
+    let day_at = |h: u8| (rise..set).contains(&(h as f32 * 60.0));
+    let hours: Vec<(String, &'static str, String)> = std::iter::once(("Now".to_string(), emoji, temp.clone())).chain(w.hourly.iter().map(|(h, t, code)| (hour12(*h as u32), weather_emoji(*code, day_at(*h)), deg(*t)))).collect();
+    let days: Vec<WDay> = w.daily.iter().enumerate().map(|(i, (d, hi, lo, code))| WDay { label: if i == 0 { "Today".to_string() } else { weekday_of(d) }, emoji: weather_emoji(*code, true), hi: *hi, lo: *lo }).collect();
+    let banner = k == WeatherKind::Banner;
+    let ink = if banner {
+        let s = sky(w);
+        sky_card(c, s, sh);
+        Inks { t1: WHITE, t2: alpha(WHITE, SKY_T2), track: alpha(WHITE, 0.22), sep: alpha(WHITE, 0.2), ring: s.1 }
+    } else {
+        Inks { t1: c.text1(), t2: c.text2(), track: c.track(), sep: c.sep(), ring: c.halo() }
+    };
+    let feels = format!("Feels like {}", deg(w.feels_c));
+    let humid = format!("{:.0}%", w.humidity);
+    match sh {
+        Shape::Mini => {
+            let k = c.h / 54.0;
+            draw_emoji(c, emoji, c.w / 2.0, 8.0 * k, style::BADGE_MINI * k, ink.t1);
+            temp_mid(c, &temp, c.w / 2.0, 45.0 * k, style::MINI_VALUE.size * k, style::MINI_VALUE.weight, ink.t1);
+        }
+        Shape::Dock => {
+            let kk = c.h / 54.0;
+            let m = style::M_DOCK * kk;
+            let bs = style::BADGE_DOCK * kk;
+            let es = bs - 2.0 * kk;
+            draw_emoji(c, emoji, m + bs / 2.0, (c.h - es) / 2.0, es, ink.t1);
+            let x0 = m + bs + style::SP[4] * kk;
+            let wide = c.w >= c.h * 3.4;
+            let slot_w = (c.w * 0.34).round();
+            let slot_x = c.w - m - slot_w;
+            let right = if wide { slot_x - style::SP[4] * kk } else { c.w - m };
+            c.text_base(&temp, x0, 30.0 * kk, style::VALUE.size * kk, style::VALUE.weight, ink.t1, Align::Left, c.w);
+            let caption = match k {
+                WeatherKind::Detail => feels.clone(),
+                WeatherKind::Hourly => hours.get(1).map(|(l, _, t)| format!("{t} at {l}")).unwrap_or_else(|| w.description.clone()),
+                WeatherKind::Week => days.get(1).map(|d| format!("Tomorrow {}", deg(d.hi))).unwrap_or_else(|| w.description.clone()),
+                _ => w.description.clone(),
+            };
+            let fs = style::FOOT.size * kk;
+            c.text_base(&caption, x0, 44.0 * kk, fs, 400, ink.t2, Align::Left, right - x0);
+            if !wide {
+                return;
+            }
+            let r = c.w - m;
+            match k {
+                WeatherKind::Detail => {
+                    c.text_base(&humid, r, 28.0 * kk, style::TITLE.size * kk, 600, ink.t1, Align::Right, slot_w);
+                    c.text_base("Humidity", r, 41.0 * kk, fs, 400, ink.t2, Align::Right, slot_w);
+                }
+                WeatherKind::Hourly | WeatherKind::Week => {
+                    let cols: Vec<(String, String)> = if k == WeatherKind::Hourly { hours.iter().skip(1).take(3).map(|(l, _, t)| (l.clone(), t.clone())).collect() } else { days.iter().skip(1).take(3).map(|d| (d.label.clone(), deg(d.hi))).collect() };
+                    let cw = slot_w / 3.0;
+                    for (i, (l, t)) in cols.iter().enumerate() {
+                        let cx = slot_x + cw * (i as f32 + 0.5);
+                        c.text_base(l, cx, 24.0 * kk, style::MICRO.size * kk, style::MICRO.weight, ink.t2, Align::Center, cw + 4.0);
+                        temp_mid(c, t, cx, 38.0 * kk, fs, 600, ink.t1);
+                    }
+                }
+                _ => {
+                    c.text_base(&format!("H {}", deg(w.high_c)), r, 26.0 * kk, fs, 500, ink.t1, Align::Right, slot_w);
+                    c.text_base(&format!("L {}", deg(w.low_c)), r, 40.0 * kk, fs, 400, ink.t2, Align::Right, slot_w);
+                }
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let r = c.w - m;
+            let inner = r - m;
+            let cap = style::CAPTION;
+            match k {
+                WeatherKind::Hourly | WeatherKind::Week => {
+                    let mut cw = inner;
+                    if k == WeatherKind::Week {
+                        let base = m + c.cap_h(style::TITLE.size);
+                        cw -= c.text_base(&temp, r, base, style::FOOT.size, 400, ink.t2, Align::Right, inner) + style::SP[3];
+                    }
+                    c.text_cap(city, m, m, style::TITLE.size, style::TITLE.weight, ink.t1, Align::Left, cw);
+                    let colw = inner / 3.0;
+                    for i in 0..3 {
+                        let cx = m + colw * (i as f32 + 0.5);
+                        if k == WeatherKind::Hourly {
+                            let Some((l, e, t)) = hours.get(i) else { break };
+                            c.text_base(l, cx, 60.0, style::MICRO.size, style::MICRO.weight, if i == 0 { ink.t1 } else { ink.t2 }, Align::Center, colw + 4.0);
+                            draw_emoji(c, e, cx, 66.0, 20.0, ink.t1);
+                            temp_mid(c, t, cx, 106.0, style::TITLE.size, 600, ink.t1);
+                        } else {
+                            let Some(d) = days.get(i) else { break };
+                            c.text_base(&d.label, cx, 52.0, style::MICRO.size, style::MICRO.weight, ink.t2, Align::Center, colw + 4.0);
+                            draw_emoji(c, d.emoji, cx, 58.0, 20.0, ink.t1);
+                            temp_mid(c, &deg(d.hi), cx, 92.0, style::TITLE.size, 600, ink.t1);
+                            temp_mid(c, &deg(d.lo), cx, 106.0, style::FOOT.size, 400, ink.t2);
+                        }
+                    }
+                }
+                _ => {
+                    let es = 24.0;
+                    draw_emoji(c, emoji, r - es / 2.0, 12.0, es, ink.t1);
+                    c.text_cap(city, m, m, style::TITLE.size, style::TITLE.weight, ink.t1, Align::Left, inner - es - style::SP[3]);
+                    c.text_base(&temp, m, 66.0, style::HERO.size, style::time_weight(style::HERO.size), ink.t1, Align::Left, c.w * 2.0);
+                    let (l1, l2) = match k {
+                        WeatherKind::Detail => (feels.clone(), format!("Humidity {humid}")),
+                        _ => (w.description.clone(), hl.clone()),
+                    };
+                    c.text_base(&l1, m, 90.0, cap.size, if banner { 600 } else { cap.weight }, if banner { WHITE } else { ink.t2 }, Align::Left, inner);
+                    c.text_base(&l2, m, 106.0, cap.size, cap.weight, ink.t2, Align::Left, inner);
+                }
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let r = c.w - m;
+            let inner = r - m;
+            let large = sh == Shape::Large;
+            let hero_w = style::time_weight(style::HERO.size);
+            let cap = style::CAPTION;
+            // The week's range, for the range bars (and today's in the Now card).
+            let shown = if k == WeatherKind::Week { 7 } else { 4 };
+            let range = days.iter().take(shown).fold((w.temp_c, w.temp_c), |a, d| (a.0.min(d.lo), a.1.max(d.hi)));
+            match k {
+                WeatherKind::Now => {
+                    let es = 40.0;
+                    draw_emoji(c, emoji, r - es / 2.0, 14.0, es, ink.t1);
+                    c.text_base(city, m, 28.0, style::TITLE.size, style::TITLE.weight, ink.t1, Align::Left, inner - es - style::SP[3]);
+                    c.text_base(&temp, m, 61.0, style::HERO.size, hero_w, ink.t1, Align::Left, c.w * 2.0);
+                    c.text_base(&w.description, m, 80.0, cap.size, cap.weight, ink.t2, Align::Left, 148.0 - m - style::SP[3]);
+                    // Today's range in the accessory box: low, bar with now, high.
+                    let fs = style::FOOT.size;
+                    let base = 78.0;
+                    let cy = base - c.cap_h(fs) / 2.0;
+                    c.text_base(&deg(w.low_c), 168.0, base, fs, 400, ink.t2, Align::Right, 40.0);
+                    range_bar(c, 174.0, cy, 52.0, range, (w.low_c, w.high_c), Some(w.temp_c), ink.track, ink.t1, ink.ring);
+                    c.text_base(&deg(w.high_c), 230.0, base, fs, 600, ink.t1, Align::Left, r - 230.0 + 8.0);
+                }
+                WeatherKind::Detail => {
+                    let col_r = 124.0;
+                    c.text_base(city, m, 28.0, style::TITLE.size, style::TITLE.weight, ink.t1, Align::Left, col_r - m);
+                    let tw = c.text_base(&temp, m, 61.0, style::HERO.size, hero_w, ink.t1, Align::Left, c.w * 2.0);
+                    let es = style::BADGE_GLANCE;
+                    draw_emoji(c, emoji, m + tw + style::SP[3] + es / 2.0, 61.0 - c.cap_h(style::HERO.size) / 2.0 - es / 2.0, es, ink.t1);
+                    c.text_base(&w.description, m, 80.0, cap.size, cap.weight, ink.t2, Align::Left, col_r - m);
+                    c.line(130.5, 16.0, 130.5, 80.0, 1.0, ink.sep);
+                    let rows = [("Feels like", deg(w.feels_c)), ("Humidity", humid.clone()), ("Wind", format!("{:.0} km/h", w.wind_kmh)), ("UV", format!("{:.0}", w.uv))];
+                    for (i, (l, v)) in rows.iter().enumerate() {
+                        let base = 28.0 + i as f32 * (80.0 - 28.0) / 3.0;
+                        let vw = c.text_base(v, r, base, style::TITLE.size, 600, ink.t1, Align::Right, r - 140.0);
+                        c.text_base(l, 140.0, base, style::FOOT.size, 400, ink.t2, Align::Left, r - 140.0 - vw - style::SP[2]);
+                    }
+                }
+                WeatherKind::Banner => {
+                    let hs = style::HERO_XL.size;
+                    let hw = c.measure(&temp, hs, 300, Font::Text).0;
+                    c.text_cap(&temp, r, m, hs, 300, WHITE, Align::Right, hw + 8.0);
+                    let es = 28.0;
+                    draw_emoji(c, emoji, r - es / 2.0, 80.0 - es, es, WHITE);
+                    let left_w = inner - hw - style::SP[6];
+                    c.text_cap(&w.description, m, m, style::VALUE.size, style::VALUE.weight, WHITE, Align::Left, left_w);
+                    c.text_base(city, m, 50.0, cap.size, cap.weight, ink.t2, Align::Left, left_w);
+                    c.text_base(&hl, m, 80.0, cap.size, cap.weight, ink.t2, Align::Left, left_w);
+                }
+                WeatherKind::Hourly | WeatherKind::Week => {
+                    let meta = if k == WeatherKind::Week { format!("{temp} {}", w.description) } else { w.description.clone() };
+                    let mw = c.text_base(&meta, r, style::HEADER_BASE, style::FOOT.size, 400, ink.t2, Align::Right, inner * 0.6);
+                    c.text_base(city, m, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, ink.t1, Align::Left, inner - mw - style::SP[3]);
+                    if k == WeatherKind::Hourly || !large {
+                        let n = if k == WeatherKind::Hourly { 6 } else { 5 };
+                        let colw = inner / n as f32;
+                        for i in 0..n {
+                            let cx = m + colw * (i as f32 + 0.5);
+                            let (l, e, hi, lo) = if k == WeatherKind::Hourly {
+                                let Some((l, e, t)) = hours.get(i) else { break };
+                                (l.clone(), *e, t.clone(), None)
+                            } else {
+                                let Some(d) = days.get(i) else { break };
+                                (d.label.clone(), d.emoji, deg(d.hi), Some(deg(d.lo)))
+                            };
+                            let lc = if k == WeatherKind::Hourly && i == 0 { ink.t1 } else { ink.t2 };
+                            // Label, emoji and temperature share y 42..80 with even gaps.
+                            c.text_base(&l, cx, 49.0, style::MICRO.size, style::MICRO.weight, lc, Align::Center, colw + 4.0);
+                            draw_emoji(c, e, cx, 52.5, 16.0, ink.t1);
+                            match lo {
+                                None => temp_mid(c, &hi, cx, 80.0, style::TITLE.size, 600, ink.t1),
+                                Some(lo) => {
+                                    let hw = c.measure(&hi, style::TITLE.size, 600, Font::Text).0;
+                                    let lw = c.measure(&lo, style::FOOT.size, 400, Font::Text).0;
+                                    let x0 = cx - (hw + style::SP[1] + lw) / 2.0;
+                                    c.text_base(&hi, x0, 80.0, style::TITLE.size, 600, ink.t1, Align::Left, hw + 4.0);
+                                    c.text_base(&lo, x0 + hw + style::SP[1], 80.0, style::FOOT.size, 400, ink.t2, Align::Left, lw + 4.0);
+                                }
+                            }
+                        }
+                    }
+                }
+                WeatherKind::Sun => {}
+            }
+            if !large {
+                return;
+            }
+            match k {
+                WeatherKind::Detail => detail_grid(c, w, &days),
+                WeatherKind::Week => {
+                    let pitch = (188.0 - style::CONTENT_TOP) / 7.0;
+                    day_rows(c, &days[..days.len().min(7)], style::CONTENT_TOP + pitch / 2.0, pitch, range, w.temp_c, &ink);
+                }
+                _ => {
+                    c.line(m, style::SEP_Y_LARGE + 0.5, r, style::SEP_Y_LARGE + 0.5, 1.0, ink.sep);
+                    let pitch = style::ROW_M;
+                    day_rows(c, &days[..days.len().min(4)], style::DETAIL_TOP + pitch / 2.0, pitch, range, w.temp_c, &ink);
+                }
+            }
+        }
+    }
+}
+
+/// Forecast rows (Large): day, emoji, low, a temperature-scale range bar, high. The first
+/// row (today) marks the current temperature on its bar. `first` is the first row's centre.
+fn day_rows(c: &Canvas, days: &[WDay], first: f32, pitch: f32, range: (f32, f32), now: f32, ink: &Inks) {
+    let m = style::M_CARD;
+    let fs = style::BODY.size;
+    for (i, d) in days.iter().enumerate() {
+        let cy = first + i as f32 * pitch;
+        let base = cy + c.cap_h(fs) / 2.0;
+        c.text_base(&d.label, m, base, fs, 600, ink.t1, Align::Left, 56.0);
+        draw_emoji(c, d.emoji, 88.0, cy - 8.0, 16.0, ink.t1);
+        c.text_base(&deg(d.lo), 132.0, base, fs, 400, ink.t2, Align::Right, 34.0);
+        range_bar(c, 142.0, cy, 72.0, range, (d.lo, d.hi), (i == 0).then_some(now), ink.track, ink.t1, ink.ring);
+        c.text_base(&deg(d.hi), c.w - m, base, fs, 600, ink.t1, Align::Right, 34.0);
+    }
+}
+
+/// weather-detail Large: two rows of three stats under the separator.
+fn detail_grid(c: &Canvas, w: &laminar_sys::weather::Weather, days: &[WDay]) {
+    let m = style::M_CARD;
+    separator(c, style::SEP_Y_LARGE);
+    let cw = (c.w - 2.0 * m) / 3.0;
+    let has_sun = !w.sunrise.is_empty() && !w.sunset.is_empty();
+    let (rise, set) = (mins(&w.sunrise), mins(&w.sunset));
+    let vs = style::VALUE.size;
+    let (t1, t2) = (c.text1(), c.text2());
+    let label = |i: usize, base: f32, s: &str| {
+        c.text_base(s, m + i as f32 * cw, base + 15.0, style::FOOT.size, 400, t2, Align::Left, cw - style::SP[3]);
+    };
+    let value = |i: usize, base: f32, s: &str| {
+        let (v, fs) = fit_value(c, s, style::VALUE, cw - style::SP[3]);
+        c.text_base(&v, m + i as f32 * cw, base, fs, style::VALUE.weight, t1, Align::Left, c.w);
+    };
+    let (a, b) = (126.0, 168.0);
+    value(0, a, &deg(w.high_c));
+    label(0, a, "High");
+    value(1, a, &deg(w.low_c));
+    label(1, a, "Low");
+    value(2, a, &if has_sun && set > rise { dur(((set - rise) * 60.0) as u64) } else { "—".into() });
+    label(2, a, "Daylight");
+    for (i, (hm, l)) in [(rise, "Sunrise"), (set, "Sunset")].iter().enumerate() {
+        if has_sun {
+            let (t, ap) = clock12(*hm);
+            time_ampm(c, &t, ap, m + i as f32 * cw, b, vs, 600, t1, t2, Align::Left);
         } else {
-            Sum::new(Vis::Emoji(emoji), temp, if sh == Shape::Dock { w.description.clone() } else { String::new() })
-        };
-        compact_sum(c, &s, sh);
-        return;
+            value(i, b, "—");
+        }
+        label(i, b, l);
     }
-    if sh == Shape::Small {
-        match k {
-            WeatherKind::Banner => {
-                let (top, bottom) = if w.is_day { (hex(0x4A90E2), hex(0x2D6CC0)) } else { (hex(0x1B2550), hex(0x0E1430)) };
-                c.rr_grad(0.0, 0.0, c.w, c.h, 18.0, top, bottom);
-                c.tw(city, 14.0, 14.0, 12.0, 600, WHITE, c.w - 28.0);
-                c.num(&temp, 14.0, 32.0, 34.0, 300, WHITE);
-                c.text(emoji, c.w - 30.0, 36.0, 24.0, 400, WHITE, Align::Center, 40.0, Font::Text);
-                c.tw(&w.description, 14.0, c.h - 26.0, 11.0, 500, (1.0, 1.0, 1.0, 0.85), c.w - 28.0);
-            }
-            WeatherKind::Hourly | WeatherKind::Week => {
-                c.tw(city, 12.0, 10.0, 11.5, 600, c.text1(), c.w - 50.0);
-                c.tr(&temp, c.w - 12.0, 10.0, 11.5, 500, c.text2());
-                let items: Vec<(String, &'static str, String)> = if k == WeatherKind::Hourly {
-                    hourly.iter().take(3).cloned().collect()
-                } else {
-                    daily.iter().take(3).map(|(l, e, hi, _)| (if l == "Today" { l.clone() } else { l.chars().take(3).collect() }, *e, hi.clone())).collect()
-                };
-                forecast_cols(c, &items, 6.0, 40.0, c.w - 12.0, false);
-            }
-            WeatherKind::Sun => sun_arc(c, w, x, true),
-            _ => {
-                c.tw(city, 14.0, 12.0, 12.0, 600, c.text1(), c.w - 28.0);
-                c.text(emoji, 14.0, 34.0, 26.0, 400, c.text1(), Align::Left, 40.0, Font::Text);
-                c.num(&temp, 52.0, 30.0, 32.0, 300, c.text1());
-                c.tw(&w.description, 14.0, 78.0, 11.0, 400, c.text2(), c.w - 28.0);
-                c.tw(&format!("H:{:.0}° L:{:.0}°", d0(w.high_c), d0(w.low_c)), 14.0, 94.0, 10.5, 400, c.text3(), c.w - 28.0);
-            }
-        }
-        return;
-    }
-    let large = sh == Shape::Large;
-    match k {
-        WeatherKind::Now => {
-            c.text(emoji, 46.0, 18.0, 40.0, 400, c.text1(), Align::Center, 80.0, Font::Text);
-            c.num(&temp, 90.0, 10.0, 40.0, 300, c.text1());
-            c.tw(&format!("H:{:.0}°  L:{:.0}°", d0(w.high_c), d0(w.low_c)), 92.0, 62.0, 12.0, 400, c.text2(), 140.0);
-            c.tr(city, c.w - 16.0, 16.0, 12.5, 600, c.text1());
-            c.tr(&w.description, c.w - 16.0, 36.0, 11.5, 400, c.text2());
-        }
-        WeatherKind::Detail => {
-            c.text(emoji, 34.0, 16.0, 30.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
-            c.num(&temp, 62.0, 10.0, 34.0, 300, c.text1());
-            c.tw(&w.description, 18.0, 62.0, 12.0, 400, c.text2(), c.w * 0.5);
-            let rows = [("Feels like", format!("{:.0}°", d0(w.feels_c))), ("Humidity", format!("{:.0}%", w.humidity)), ("Wind", format!("{:.0} km/h", w.wind_kmh)), ("UV", format!("{:.0}", w.uv))];
-            for (i, (l, v)) in rows.iter().enumerate() {
-                let y = 12.0 + i as f32 * 18.0;
-                c.tw(l, c.w * 0.55, y, 11.0, 400, c.text3(), 80.0);
-                c.tr(v, c.w - 16.0, y, 11.5, 600, c.text1());
-            }
-        }
-        WeatherKind::Hourly => {
-            c.tw(city, 16.0, 10.0, 12.0, 600, c.text1(), c.w * 0.5);
-            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 10.0, 11.5, 400, c.text2());
-            forecast_cols(c, &hourly.iter().take(6).cloned().collect::<Vec<_>>(), 12.0, 32.0, c.w - 24.0, false);
-        }
-        WeatherKind::Week if !large => {
-            c.tw(city, 16.0, 10.0, 12.0, 600, c.text1(), c.w * 0.5);
-            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 10.0, 11.5, 400, c.text2());
-            // Day, icon, then the high bright and the low dimmed, so pairs read apart.
-            let days: Vec<&Day> = daily.iter().take(7).collect();
-            let colw = (c.w - 24.0) / days.len().max(1) as f32;
-            for (i, (l, e, hi, lo)) in days.iter().enumerate() {
-                let cx = 12.0 + colw * (i as f32 + 0.5);
-                c.tc(l, cx, 32.0, 10.5, 500, c.text2(), colw);
-                c.text(e, cx, 47.0, 16.0, 400, c.text1(), Align::Center, colw, Font::Text);
-                let (hw, lw) = (c.measure(hi, 10.5, 600, Font::Text).0, c.measure(lo, 10.0, 400, Font::Text).0);
-                let x0 = cx - (hw + 2.0 + lw) / 2.0;
-                c.tw(hi, x0, 72.0, 10.5, 600, c.text1(), hw + 2.0);
-                c.tw(lo, x0 + hw + 2.0, 72.5, 10.0, 400, c.text3(), lw + 2.0);
-            }
-        }
-        WeatherKind::Week => {
-            c.tw(city, 16.0, 12.0, 12.0, 600, c.text1(), c.w * 0.5);
-            c.tr(&format!("{temp}  {}", w.description), c.w - 16.0, 12.0, 11.5, 400, c.text2());
-        }
-        WeatherKind::Banner => {
-            let (top, bottom) = if w.is_day { (hex(0x4A90E2), hex(0x2D6CC0)) } else { (hex(0x1B2550), hex(0x0E1430)) };
-            c.rr_grad(0.0, 0.0, c.w, c.h, 18.0, top, bottom);
-            c.tw(&w.description, 18.0, 18.0, 16.0, 600, WHITE, c.w * 0.55);
-            c.tw(city, 18.0, 42.0, 12.0, 400, (1.0, 1.0, 1.0, 0.8), c.w * 0.55);
-            c.tw(&format!("H:{:.0}°  L:{:.0}°", d0(w.high_c), d0(w.low_c)), 18.0, 64.0, 11.5, 400, (1.0, 1.0, 1.0, 0.8), c.w * 0.55);
-            c.text(&temp, c.w - 70.0, 18.0, 44.0, 300, WHITE, Align::Right, c.w, Font::Display);
-            c.text(emoji, c.w - 40.0, 44.0, 30.0, 400, WHITE, Align::Center, 60.0, Font::Text);
-        }
-        WeatherKind::Sun => sun_arc(c, w, x, false),
-    }
-    if large && k != WeatherKind::Sun {
-        // The week underneath (for the weekly card, from the top).
-        let start = if k == WeatherKind::Week { 40.0 } else { 108.0 };
-        if k != WeatherKind::Week {
-            c.line(14.0, start - 8.0, c.w - 14.0, start - 8.0, 1.0, if k == WeatherKind::Banner { (1.0, 1.0, 1.0, 0.2) } else { c.ink(0.08) });
-        }
-        let ink = if k == WeatherKind::Banner { WHITE } else { c.text1() };
-        let n = (((c.h - start - 6.0) / 22.0).floor() as usize).min(daily.len());
-        day_rows(c, &daily[..n], start, ink);
+    if let Some(d) = days.get(1) {
+        let x0 = m + 2.0 * cw;
+        let es = 16.0;
+        draw_emoji(c, d.emoji, x0 + es / 2.0, b - c.cap_h(vs) / 2.0 - es / 2.0, es, t1);
+        c.text_base(&deg(d.hi), x0 + es + style::SP[1], b, vs, style::VALUE.weight, t1, Align::Left, cw);
+        label(2, b, "Tomorrow");
     }
 }
 
-/// Rows of days with a temperature range bar.
-fn day_rows(c: &Canvas, days: &[Day], start: f32, ink: Col) {
-    let t = |s: &str| s.trim_end_matches('°').parse::<f32>().unwrap_or(0.0);
-    let (lo_t, hi_t) = days.iter().fold((f32::MAX, f32::MIN), |acc, d| (acc.0.min(t(&d.3)), acc.1.max(t(&d.2))));
-    let span = (hi_t - lo_t).max(1.0);
-    for (i, (l, e, hi, lo)) in days.iter().enumerate() {
-        let y = start + i as f32 * 22.0;
-        c.tw(l, 16.0, y, 11.5, 500, ink, 60.0);
-        c.text(e, 86.0, y - 2.0, 14.0, 400, ink, Align::Center, 30.0, Font::Text);
-        c.tr(lo, 132.0, y, 11.5, 400, alpha(ink, 0.6));
-        let (bx, bw) = (142.0, c.w - 142.0 - 50.0);
-        c.rr(bx, y + 6.0, bw, 4.0, 2.0, alpha(ink, 0.12));
-        let a = bx + bw * (t(lo) - lo_t) / span;
-        let b = bx + bw * (t(hi) - lo_t) / span;
-        c.rr(a, y + 6.0, (b - a).max(4.0), 4.0, 2.0, ORANGE);
-        c.tr(hi, c.w - 16.0, y, 11.5, 600, ink);
+/// An original sunrise/sunset mark: a half sun resting on a horizon, a chevron above it
+/// (up for sunrise, down for sunset). `size` is the mark's box, `top` its top.
+fn sun_mark(c: &Canvas, cx: f32, top: f32, size: f32, rising: bool) {
+    use windows::Win32::Graphics::Direct2D::{Common::D2D_RECT_F, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE};
+    let k = size / 20.0;
+    let hy = top + size * 0.82;
+    let r = if size >= 26.0 { 8.0 * size / 30.0 } else { 6.0 * k };
+    c.line(cx - size / 2.0 + 0.75, hy, cx + size / 2.0 - 0.75, hy, 1.5 * k.min(1.2), c.text2());
+    // The sun: a disc cut off just above the horizon line.
+    let cut = hy - 1.75 * k.min(1.2);
+    unsafe {
+        c.dc.PushAxisAlignedClip(&D2D_RECT_F { left: cx - r - 1.0, top: cut - r - 1.0, right: cx + r + 1.0, bottom: cut }, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    }
+    c.circle(cx, hy, r, YELLOW);
+    unsafe {
+        c.dc.PopAxisAlignedClip();
+    }
+    let (cw, ch) = (6.0 * k.min(1.33), 3.0 * k.min(1.33));
+    let cyy = top + (hy - r - top) / 2.0 - 0.5;
+    let (tip, ends) = if rising { (cyy - ch / 2.0, cyy + ch / 2.0) } else { (cyy + ch / 2.0, cyy - ch / 2.0) };
+    c.line(cx - cw / 2.0, ends, cx, tip, 1.5, ORANGE);
+    c.line(cx, tip, cx + cw / 2.0, ends, 1.5, ORANGE);
+}
+
+/// The sun's path: a horizon hairline from `x0` to `x1` at `hy`, a track-coloured arc of
+/// radius `r` centred on `cx`, and (by day) the travelled part in orange with the sun on it.
+#[allow(clippy::too_many_arguments)]
+fn sun_path(c: &Canvas, cx: f32, hy: f32, r: f32, (x0, x1): (f32, f32), frac: Option<f32>, (track_t, done_t): (f32, f32), dot_r: f32, night: Option<f32>) {
+    c.line(x0, hy + 0.5, x1, hy + 0.5, 1.0, c.sep());
+    c.arc(cx, hy, r, track_t, 180.0, 360.0, c.track());
+    if let Some(f) = frac {
+        c.arc(cx, hy, r, done_t, 180.0, 180.0 + 180.0 * f, ORANGE);
+        let a = (180.0 + 180.0 * f).to_radians();
+        let (px, py) = (cx + r * a.cos(), hy + r * a.sin());
+        // Cut out of the arc by a ring of the card colour; a fine orange rim on light cards.
+        c.circle(px, py, dot_r + 1.5, c.halo());
+        c.circle(px, py, dot_r, YELLOW);
+        if c.light {
+            c.circle_stroke(px, py, dot_r - 0.25, alpha(hex(0xC45500), 0.4), 0.5);
+        }
+    }
+    // At night the sun travels back under the horizon, from sunset (right) to sunrise (left):
+    // a small grey dot just below the line says where it is.
+    if let Some(f) = night {
+        let d = (dot_r * 0.75).max(2.0);
+        let px = cx + r * (std::f32::consts::PI * f).cos();
+        c.circle(px, hy + 1.0 + d + 1.5, d, c.text2());
     }
 }
 
-fn sun_arc(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, small: bool) {
+/// sunrise-sunset: the next sunrise or sunset, and where the sun is on today's path.
+fn sun(c: &Canvas, w: &laminar_sys::weather::Weather, x: &Ctx, sh: Shape) {
     let (rise, set) = (mins(&w.sunrise), mins(&w.sunset));
     let now_m = (x.now.hour * 60 + x.now.minute) as f32;
-    let frac = if set > rise { ((now_m - rise) / (set - rise)).clamp(0.0, 1.0) } else { 0.5 };
-    let bottom = if c.h > 150.0 { c.h - 40.0 } else { c.h - 22.0 };
-    let r = (c.w * 0.36).min(bottom - 30.0).min(if c.h > 150.0 { 110.0 } else { 56.0 });
-    let (cx, cy) = (c.w / 2.0, bottom);
-    c.arc(cx, cy, r, 2.0, 180.0, 360.0, c.ink(0.2));
-    c.arc(cx, cy, r, 2.5, 180.0, 180.0 + 180.0 * frac, ORANGE);
-    let a = (180.0 + 180.0 * frac).to_radians();
-    c.circle(cx + r * a.cos(), cy + r * a.sin(), 6.0, YELLOW);
-    c.line(12.0, cy, c.w - 12.0, cy, 1.0, c.ink(0.15));
-    let fs = if small { 10.0 } else { 11.5 };
-    c.tw(&format!("↑ {}", w.sunrise), 12.0, cy + 4.0, fs, 500, c.text2(), 80.0);
-    c.tr(&format!("{} ↓", w.sunset), c.w - 12.0, cy + 4.0, fs, 500, c.text2());
-    if !small {
-        c.tw("Sunrise & Sunset", 16.0, 10.0, 11.5, 600, c.text2(), 140.0);
-        let left = (set - now_m).max(0.0) as u64 * 60;
-        c.tr(&if left > 0 { format!("{} of daylight left", dur(left)) } else { "After sunset".into() }, c.w - 16.0, 10.0, 11.0, 400, c.text3());
+    let up = set > rise && now_m >= rise && now_m < set;
+    let frac = up.then(|| ((now_m - rise) / (set - rise)).clamp(0.0, 1.0));
+    // How far through the night it is (0 at sunset, 1 at sunrise).
+    let night = (!up && set > rise).then(|| {
+        let gone = if now_m >= set { now_m - set } else { now_m + 1440.0 - set };
+        (gone / (1440.0 - (set - rise)).max(1.0)).clamp(0.0, 1.0)
+    });
+    let (next_l, next_m, other_l, other_m) = if up { ("Sunset", set, "Sunrise", rise) } else { ("Sunrise", rise, "Sunset", set) };
+    let until = if up {
+        set - now_m
+    } else if now_m < rise {
+        rise - now_m
+    } else {
+        1440.0 - now_m + rise
+    };
+    let (t, ap) = clock12(next_m);
+    let (t1, t2, t3) = (c.text1(), c.text2(), c.text3());
+    match sh {
+        Shape::Mini => {
+            let k = c.h / 54.0;
+            sun_mark(c, c.w / 2.0, 8.0 * k, style::BADGE_MINI * k, !up);
+            let role = Type { size: style::MINI_VALUE.size * k, ..style::MINI_VALUE };
+            let (v, fs) = fit_value(c, &t, role, c.w - 2.0 * style::M_MINI * k);
+            c.text_base(&v, c.w / 2.0, 45.0 * k, fs, role.weight, t1, Align::Center, c.w * 2.0);
+        }
+        Shape::Dock => {
+            let k = c.h / 54.0;
+            let m = style::M_DOCK * k;
+            let bs = style::BADGE_DOCK * k;
+            sun_mark(c, m + bs / 2.0, (c.h - bs) / 2.0, bs, !up);
+            let x0 = m + bs + style::SP[4] * k;
+            let wide = c.w >= c.h * 3.4;
+            let slot_w = (c.w * 0.34).round();
+            let slot_x = c.w - m - slot_w;
+            let right = if wide { slot_x - style::SP[4] * k } else { c.w - m };
+            time_ampm(c, &t, ap, x0, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, t1, t2, Align::Left);
+            c.text_base(next_l, x0, 44.0 * k, style::FOOT.size * k, 400, t2, Align::Left, right - x0);
+            if wide {
+                let hy = 38.0 * k;
+                let r = 22.0 * k;
+                sun_path(c, slot_x + slot_w / 2.0, hy, r, (slot_x, slot_x + slot_w), frac, (1.5, 1.5), 3.0 * k, night);
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            // No night dot here: under the horizon it would land on the hero time. At night
+            // the arc is all track, which already says the sun is down.
+            sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), frac, (2.0, 2.5), 4.0, None);
+            let hs = style::HERO_S.size;
+            time_ampm(c, &t, ap, m, 86.0, hs, style::time_weight(hs), t1, t2, Align::Left);
+            c.text_base(next_l, m, 106.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, c.w - 2.0 * m);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let hs = style::HERO.size;
+            time_ampm(c, &t, ap, m, m + c.cap_h(hs), hs, style::time_weight(hs), t1, t2, Align::Left);
+            let left_w = 148.0 - m - style::SP[3];
+            c.text_base(&format!("{next_l} · in {}", dur((until * 60.0) as u64)), m, 58.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, left_w);
+            let (ot, oap) = clock12(other_m);
+            c.text_base(&format!("{other_l} {ot} {oap}"), m, 76.0, style::FOOT.size, 400, t3, Align::Left, left_w);
+            sun_path(c, 200.0, 72.0, 48.0, (148.0, c.w - m), frac, (2.0, 2.5), 4.0, night);
+            if sh != Shape::Large {
+                return;
+            }
+            separator(c, style::SEP_Y_LARGE);
+            let cw = (c.w - 2.0 * m) / 3.0;
+            let day = (set - rise).max(0.0);
+            let (nt, nap) = clock12((rise + set) / 2.0);
+            let vs = style::VALUE.size;
+            c.text_base(&dur((day * 60.0) as u64), m, 128.0, vs, 600, t1, Align::Left, cw);
+            time_ampm(c, &nt, nap, m + cw, 128.0, vs, 600, t1, t2, Align::Left);
+            c.text_base(&dur(((1440.0 - day) * 60.0) as u64), m + 2.0 * cw, 128.0, vs, 600, t1, Align::Left, cw);
+            for (i, l) in ["Daylight", "Solar noon", "Night"].iter().enumerate() {
+                c.text_base(l, m + i as f32 * cw, 143.0, style::FOOT.size, 400, t2, Align::Left, cw - style::SP[3]);
+            }
+            // The whole day: daylight span on a 24-hour strip, with a tick for now.
+            let (x0, sw) = (m, c.w - 2.0 * m);
+            let at = |mm: f32| x0 + sw * (mm / 1440.0).clamp(0.0, 1.0);
+            let h = style::METER_H;
+            let cy = 160.0;
+            c.rr(x0, cy - h / 2.0, sw, h, h / 2.0, c.track());
+            if set > rise {
+                let (a, b) = (at(rise), at(set));
+                grad_bar(c, a, cy - h / 2.0, b - a, h, a, b, &[(0.0, ORANGE), (0.5, YELLOW), (1.0, ORANGE)]);
+            }
+            let nx = at(now_m);
+            c.rr(nx - 1.0, cy - 6.0, 2.0, 12.0, 1.0, t1);
+            let mic = style::MICRO;
+            for (i, l) in ["12AM", "6AM", "12PM", "6PM"].iter().enumerate() {
+                let px = x0 + sw * i as f32 / 4.0;
+                let al = if i == 0 { Align::Left } else { Align::Center };
+                c.text_base(l, px, 186.0, mic.size, mic.weight, t3, al, 40.0);
+            }
+        }
+    }
+}
+
+/// No weather yet: the setup state when no location is set (§7), else a skeleton of the
+/// real layout while the first forecast loads.
+fn weather_waiting(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: Shape) {
+    let city = x.cfg.weather_city.trim();
+    let banner = k == WeatherKind::Banner;
+    if banner {
+        sky_card(c, (hex(SKY_CLEAR.0), hex(SKY_CLEAR.1)), sh);
+    }
+    let (t1, t2) = if banner { (WHITE, alpha(WHITE, SKY_T2)) } else { (c.text1(), c.text2()) };
+    let bar = |bx: f32, by: f32, bw: f32, bh: f32| {
+        if banner {
+            c.rr(bx, by, bw, bh, (bh / 2.0).min(6.0), alpha(WHITE, 0.22));
+        } else {
+            skeleton(c, bx, by, bw, bh);
+        }
+    };
+    let plate = |px: f32, py: f32, s: f32| {
+        c.rr(px, py, s, s, s * style::BADGE_R, if banner { alpha(WHITE, 0.2) } else { c.plate() });
+        c.glyph(G_SUN, px + s / 2.0, py + s / 2.0, s * style::GLYPH_IN, if banner { WHITE } else { c.yellow() });
+    };
+    if city.is_empty() {
+        // Setup: the whole card opens the location form.
+        out.hits.clear();
+        out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Connect("weather")));
+        // The widget's own short name, shorter still where it would not fit.
+        let (full, short) = match k {
+            WeatherKind::Sun => ("Sunrise & Sunset", "Sunrise"),
+            WeatherKind::Hourly | WeatherKind::Week => ("Forecast", "Forecast"),
+            _ => ("Weather", "Weather"),
+        };
+        let name_for = |avail: f32, size: f32| if c.measure(full, size, 600, Font::Text).0 <= avail { full } else { short };
+        let reason = "Choose a location";
+        // On the banner's sky the button is white with sky-blue text; elsewhere the blue pill.
+        let pill = |out: &mut Painted, px: f32, py: f32, pw: f32, ph: f32| {
+            let label = "Set location";
+            if banner {
+                c.rr(px, py, pw, ph, ph / 2.0, WHITE);
+                let fs = style::CAPTION.size;
+                c.text_cap(label, px + pw / 2.0, py + (ph - c.cap_h(fs)) / 2.0, fs, 600, hex(SKY_CLEAR.1), Align::Center, pw);
+                out.hits.push(((px, py, pw, ph), WAct::Connect("weather")));
+            } else {
+                pill_button(c, out, px, py, pw, ph, label, WAct::Connect("weather"));
+            }
+        };
+        match sh {
+            Shape::Mini => {
+                let kk = c.h / 54.0;
+                let bs = style::BADGE_DOCK * kk;
+                let (bx, by) = ((c.w - bs) / 2.0, (c.h - bs) / 2.0);
+                plate(bx, by, bs);
+                let (dx, dy, r) = (bx + bs - 1.0 * kk, by + 1.0 * kk, 3.5 * kk);
+                c.circle(dx, dy, r + 1.5 * kk, c.halo());
+                c.circle(dx, dy, r, if banner { WHITE } else { BLUE });
+            }
+            Shape::Dock => {
+                let kk = c.h / 54.0;
+                let m = style::M_DOCK * kk;
+                let bs = style::BADGE_DOCK * kk;
+                plate(m, (c.h - bs) / 2.0, bs);
+                let x0 = m + bs + style::SP[4] * kk;
+                let ts = style::TITLE.size * kk;
+                c.text_base(name_for(c.w - m - x0, ts), x0, 30.0 * kk, ts, 600, t1, Align::Left, c.w - m - x0);
+                c.text_base("Set location", x0, 44.0 * kk, style::FOOT.size * kk, 600, if banner { WHITE } else { BLUE }, Align::Left, c.w - m - x0);
+            }
+            Shape::Small => {
+                let m = style::M_SMALL;
+                plate(m, m, style::BADGE_SMALL);
+                let inner = c.w - 2.0 * m;
+                let pill_y = c.h - m - 26.0;
+                c.text_base(name_for(inner, style::TITLE.size), m, pill_y - 22.0, style::TITLE.size, 600, t1, Align::Left, inner);
+                c.text_base(reason, m, pill_y - 7.0, style::FOOT.size, 400, t2, Align::Left, inner);
+                pill(out, m, pill_y, inner, 26.0);
+            }
+            Shape::Medium => {
+                let m = style::M_CARD;
+                plate(m, m, style::BADGE_SMALL);
+                let x0 = m + style::BADGE_SMALL + style::SP[5];
+                c.text_base(name_for(c.w - m - x0, 15.0), x0, 29.0, 15.0, 600, t1, Align::Left, c.w - m - x0);
+                c.text_base(reason, x0, 46.0, style::CAPTION.size, 400, t2, Align::Left, c.w - m - x0);
+                let (bw, bh) = (96.0, 28.0);
+                pill(out, c.w - m - bw, c.h - m - bh, bw, bh);
+            }
+            Shape::Large => {
+                let bs = 48.0;
+                plate((c.w - bs) / 2.0, 36.0, bs);
+                c.text_base(full, c.w / 2.0, 108.0, 15.0, 600, t1, Align::Center, c.w - 2.0 * style::M_CARD);
+                c.text_base(reason, c.w / 2.0, 128.0, style::CAPTION.size, 400, t2, Align::Center, c.w - 2.0 * style::M_CARD);
+                let (bw, bh) = (132.0, 30.0);
+                pill(out, (c.w - bw) / 2.0, 150.0, bw, bh);
+            }
+        }
+        return;
+    }
+    let ghost = if banner { alpha(WHITE, 0.5) } else { c.text3() };
+    let track = if banner { alpha(WHITE, 0.22) } else { c.track() };
+    let sep = if banner { alpha(WHITE, 0.2) } else { c.sep() };
+    // A forecast column: a Micro label bar, an emoji disc and a temperature bar.
+    let stub = |cx: f32, label_base: f32, disc_top: f32, ds: f32, temp_base: f32| {
+        bar(cx - 9.0, label_base - 6.0, 18.0, 6.0);
+        c.circle(cx, disc_top + ds / 2.0, ds / 2.0, track);
+        bar(cx - 10.0, temp_base - 8.0, 20.0, 8.0);
+    };
+    match sh {
+        Shape::Mini => {
+            let kk = c.h / 54.0;
+            c.glyph(G_SUN, c.w / 2.0, c.h / 2.0, 22.0 * kk, ghost);
+        }
+        Shape::Dock => {
+            let kk = c.h / 54.0;
+            let m = style::M_DOCK * kk;
+            let bs = style::BADGE_DOCK * kk;
+            c.glyph(G_SUN, m + bs / 2.0, c.h / 2.0, 22.0 * kk, ghost);
+            let x0 = m + bs + style::SP[4] * kk;
+            bar(x0, (c.h - 10.0 * kk) / 2.0, (60.0 * kk).min(c.w - m - x0), 10.0 * kk);
+            if k == WeatherKind::Sun && c.w >= c.h * 3.4 {
+                let slot_w = (c.w * 0.34).round();
+                let slot_x = c.w - m - slot_w;
+                sun_path(c, slot_x + slot_w / 2.0, 38.0 * kk, 22.0 * kk, (slot_x, slot_x + slot_w), None, (1.5, 1.5), 3.0 * kk, None);
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let inner = c.w - 2.0 * m;
+            if k == WeatherKind::Sun {
+                sun_path(c, c.w / 2.0, 58.0, 40.0, (m, c.w - m), None, (2.0, 2.5), 4.0, None);
+                let ch = c.cap_h(style::HERO_S.size);
+                bar(m, 86.0 - ch, 64.0, ch);
+                bar(m, 106.0 - 8.0, 40.0, 8.0);
+                return;
+            }
+            let mut cw = inner;
+            if k == WeatherKind::Week {
+                let bw = 24.0;
+                bar(c.w - m - bw, m + c.cap_h(style::TITLE.size) - 8.0, bw, 8.0);
+                cw -= bw + style::SP[3];
+            }
+            match k {
+                WeatherKind::Hourly | WeatherKind::Week => {
+                    c.text_cap(city, m, m, style::TITLE.size, style::TITLE.weight, t1, Align::Left, cw);
+                    let colw = inner / 3.0;
+                    for i in 0..3 {
+                        let cx = m + colw * (i as f32 + 0.5);
+                        if k == WeatherKind::Hourly {
+                            stub(cx, 60.0, 66.0, 20.0, 106.0);
+                        } else {
+                            stub(cx, 52.0, 58.0, 20.0, 92.0);
+                            bar(cx - 8.0, 106.0 - 6.0, 16.0, 6.0);
+                        }
+                    }
+                }
+                _ => {
+                    let es = 24.0;
+                    c.circle(c.w - m - es / 2.0, 12.0 + es / 2.0, es / 2.0, track);
+                    c.text_cap(city, m, m, style::TITLE.size, style::TITLE.weight, t1, Align::Left, inner - es - style::SP[3]);
+                    bar(m, 66.0 - 22.0, 60.0, 22.0);
+                    bar(m, 90.0 - 8.0, 40.0, 8.0);
+                    bar(m, 106.0 - 8.0, 40.0, 8.0);
+                }
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let r = c.w - m;
+            let inner = r - m;
+            let large = sh == Shape::Large;
+            match k {
+                WeatherKind::Sun => {
+                    let ch = c.cap_h(style::HERO.size);
+                    bar(m, m, 84.0, ch);
+                    bar(m, 58.0 - 8.0, 64.0, 8.0);
+                    bar(m, 76.0 - 8.0, 40.0, 8.0);
+                    sun_path(c, 200.0, 72.0, 48.0, (148.0, r), None, (2.0, 2.5), 4.0, None);
+                }
+                WeatherKind::Hourly | WeatherKind::Week => {
+                    let bw = 60.0;
+                    bar(r - bw, style::HEADER_BASE - 8.0, bw, 8.0);
+                    c.text_base(city, m, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, t1, Align::Left, inner - bw - style::SP[3]);
+                    if k == WeatherKind::Week && large {
+                        // The seven day rows: day, emoji, range track, high.
+                        let pitch = (188.0 - style::CONTENT_TOP) / 7.0;
+                        let h = style::METER_H_COMPACT;
+                        for i in 0..7 {
+                            let cy = style::CONTENT_TOP + pitch * (i as f32 + 0.5);
+                            bar(m, cy - 4.0, 30.0, 8.0);
+                            c.circle(88.0, cy, 7.0, track);
+                            c.rr(142.0, cy - h / 2.0, 72.0, h, h / 2.0, track);
+                            bar(r - 20.0, cy - 4.0, 20.0, 8.0);
+                        }
+                        return;
+                    }
+                    let n = if k == WeatherKind::Hourly { 6 } else { 5 };
+                    let colw = inner / n as f32;
+                    for i in 0..n {
+                        stub(m + colw * (i as f32 + 0.5), 49.0, 52.5, 16.0, 80.0);
+                    }
+                }
+                WeatherKind::Banner => {
+                    let hw = 64.0;
+                    bar(r - hw, m, hw, c.cap_h(style::HERO_XL.size));
+                    let es = 28.0;
+                    c.circle(r - es / 2.0, 80.0 - es / 2.0, es / 2.0, track);
+                    let left_w = inner - hw - style::SP[6];
+                    bar(m, m, 96.0, c.cap_h(style::VALUE.size));
+                    c.text_base(city, m, 50.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, left_w);
+                    bar(m, 80.0 - 8.0, 64.0, 8.0);
+                }
+                _ => {
+                    let es = 40.0;
+                    let detail = k == WeatherKind::Detail;
+                    let title_w = if detail { 124.0 - m } else { inner - es - style::SP[3] };
+                    c.text_base(city, m, 28.0, style::TITLE.size, style::TITLE.weight, t1, Align::Left, title_w);
+                    bar(m, 61.0 - 22.0, 60.0, 22.0);
+                    bar(m, 80.0 - 8.0, 40.0, 8.0);
+                    if detail {
+                        c.line(130.5, 16.0, 130.5, 80.0, 1.0, sep);
+                        for i in 0..4 {
+                            let base = 28.0 + i as f32 * (80.0 - 28.0) / 3.0;
+                            bar(140.0, base - 8.0, 44.0, 8.0);
+                            bar(r - 28.0, base - 8.0, 28.0, 8.0);
+                        }
+                    } else {
+                        c.circle(r - es / 2.0, 14.0 + es / 2.0, es / 2.0, track);
+                    }
+                }
+            }
+            if large {
+                c.line(m, style::SEP_Y_LARGE + 0.5, r, style::SEP_Y_LARGE + 0.5, 1.0, sep);
+                let (dx, dy, dw, _) = detail_region(c);
+                for (i, f) in [1.0, 0.75, 0.5].iter().enumerate() {
+                    bar(dx, dy + 4.0 + i as f32 * style::ROW_L, dw * f, 8.0);
+                }
+            }
+        }
     }
 }
 
@@ -6832,57 +7527,187 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
 
 // ------------------------------------------------------------------ progress
 
+/// "1 day", "14 days"; on the last day, the time left today instead of "0 days".
+fn span_days(n: u32, rest_of_today: u64) -> String {
+    match n {
+        0 => dur(rest_of_today),
+        1 => "1 day".into(),
+        _ => format!("{n} days"),
+    }
+}
+
+/// A grid of units (hours, days, weeks): done ones in the accent, future ones in the track,
+/// the current one as a track dot with an accent ring. `left` is the first dot's left ink
+/// and `cy` the grid's vertical centre.
+#[allow(clippy::too_many_arguments)]
+fn unit_grid(c: &Canvas, total: u32, current: u32, cols: u32, left: f32, cy: f32, pitch: f32, dot: f32, col: Col) {
+    let rows = total.div_ceil(cols);
+    let top = cy - ((rows - 1) as f32 * pitch + dot) / 2.0;
+    let r = dot / 2.0;
+    for i in 0..total {
+        let (px, py) = (left + r + (i % cols) as f32 * pitch, top + r + (i / cols) as f32 * pitch);
+        if i < current {
+            c.circle(px, py, r, col);
+        } else {
+            c.circle(px, py, r, c.track());
+            if i == current {
+                c.circle_stroke(px, py, r - 0.75, col, 1.5);
+            }
+        }
+    }
+}
+
 fn progress(c: &Canvas, s: Span, x: &Ctx, sh: Shape) {
     let n = x.now;
-    let (total, done, label, frac) = match s {
-        Span::Day => {
-            let m = n.hour * 60 + n.minute;
-            (24u32, n.hour, "Today", m as f32 / 1440.0)
-        }
-        Span::Month => (n.days_in_month(), n.day - 1, MONTHS[n.month as usize - 1], (n.day - 1) as f32 / n.days_in_month() as f32 + (n.hour as f32 / 24.0) / n.days_in_month() as f32),
-        Span::Year => {
-            let d = n.day_of_year();
-            (52, (d - 1) / 7, "This year", (d - 1) as f32 / n.days_in_year() as f32)
-        }
-    };
-    let pct = format!("{:.0}%", frac * 100.0);
+    let mm = n.hour * 60 + n.minute;
+    let today_left = ((1440 - mm) * 60) as u64;
     let col = match s {
         Span::Day => BLUE,
         Span::Month => GREEN,
         Span::Year => ORANGE,
     };
-    if sh == Shape::Mini {
-        compact_sum(c, &Sum::new(Vis::Ring(frac, col, pct), "", ""), sh);
-        return;
-    }
-    let dense = sh == Shape::Dock;
-    let (gx, gy, gw, gh) = match sh {
-        Shape::Dock => (8.0, 8.0, c.w * 0.62, c.h - 16.0),
-        Shape::Small => (12.0, 12.0, c.w - 24.0, c.h - 46.0),
-        _ => (16.0, 14.0, c.w - 32.0, c.h - 44.0),
+    // Units, the one in progress, fraction gone, and the words around them.
+    let (total, current, cols, frac, caption, position, elapsed, left, ends, ticks) = match s {
+        Span::Day => (
+            24,
+            n.hour,
+            8,
+            mm as f32 / 1440.0,
+            "of today".to_string(),
+            format!("Hour {} of 24", n.hour + 1),
+            dur((mm * 60) as u64),
+            dur(today_left),
+            ("Midnight".to_string(), "Ends".to_string()),
+            vec![(0.0, "12AM".to_string()), (0.25, "6AM".into()), (0.5, "12PM".into()), (0.75, "6PM".into())],
+        ),
+        Span::Month => {
+            let dim = n.days_in_month();
+            let last_wd = (n.weekday + dim - n.day) % 7;
+            let mon = MONTHS[n.month as usize - 1];
+            (
+                dim,
+                n.day - 1,
+                8,
+                ((n.day - 1) as f32 + mm as f32 / 1440.0) / dim as f32,
+                format!("of {mon}"),
+                format!("Day {} of {dim}", n.day),
+                span_days(n.day - 1, 0),
+                span_days(dim - n.day, today_left),
+                (format!("{} {dim}", &mon[..3]), format!("Ends {}", &DAYS[last_wd as usize][..3])),
+                [1u32, 8, 15, 22, 29].iter().filter(|d| **d <= dim).map(|d| ((d - 1) as f32 / dim as f32, d.to_string())).collect(),
+            )
+        }
+        Span::Year => {
+            let (doy, diy) = (n.day_of_year(), n.days_in_year());
+            let week = ((doy - 1) / 7).min(51);
+            // Dec 31 is (days left) days after today.
+            let last_wd = (n.weekday + diy - doy) % 7;
+            let ticks = [(1u32, "JAN"), (4, "APR"), (7, "JUL"), (10, "OCT")]
+                .iter()
+                .map(|(m, l)| {
+                    let before: u32 = (1..*m).map(|k| super::days_in_month(n.year, k)).sum();
+                    (before as f32 / diy as f32, l.to_string())
+                })
+                .collect();
+            (
+                52,
+                week,
+                13,
+                ((doy - 1) as f32 + mm as f32 / 1440.0) / diy as f32,
+                format!("of {}", n.year),
+                format!("Week {} of 52", week + 1),
+                span_days(doy - 1, 0),
+                span_days(diy - doy, today_left),
+                ("Dec 31".to_string(), format!("Ends {}", &DAYS[last_wd as usize][..3])),
+                ticks,
+            )
+        }
     };
-    let cols = match (s, sh) {
-        (Span::Day, Shape::Small) => 6,
-        (Span::Day, _) => 12,
-        (Span::Month, Shape::Small) => 7,
-        (Span::Month, _) => 11,
-        (Span::Year, Shape::Small) => 8,
-        (Span::Year, _) => 13,
-    };
-    let rows = total.div_ceil(cols);
-    let cell = (gw / cols as f32).min(gh / rows as f32);
-    let r = cell * 0.32;
-    let ox = gx + (gw - cell * cols as f32) / 2.0;
-    for i in 0..total {
-        let (cx, cy) = (ox + cell * ((i % cols) as f32 + 0.5), gy + cell * ((i / cols) as f32 + 0.5));
-        c.circle(cx, cy, r, if i < done { col } else if i == done { alpha(col, 0.5) } else { c.ink(0.14) });
+    // Whole percent, rounded down so 100% only shows when it's over.
+    let pct = format!("{:.0}%", (frac * 100.0).floor().clamp(0.0, 100.0));
+    let (t1, t2, t3) = (c.text1(), c.text2(), c.text3());
+    match sh {
+        Shape::Mini => {
+            // Visual-led: the ring is the icon, the percent inside it.
+            let k = c.h / 54.0;
+            let d = 40.0 * k;
+            let th = (d * style::RING_T).max(3.0 * k);
+            let (cx, cy) = (c.w / 2.0, c.h / 2.0);
+            c.ring(cx, cy, (d - th) / 2.0, th, frac, col);
+            let room = d - 2.0 * th - 4.0 * k;
+            let (lo, hi) = (style::MINI_VALUE.min * k, 12.0 * k);
+            let mut v = pct.clone();
+            let mut fs = fit(c, &v, hi, lo, 600, Font::Text, room);
+            if c.measure(&v, fs, 600, Font::Text).0 > room {
+                v = v.trim_end_matches('%').to_string();
+                fs = fit(c, &v, hi, lo, 600, Font::Text, room);
+            }
+            c.text_cap(&v, cx, cy - c.cap_h(fs) / 2.0, fs, 600, t1, Align::Center, d);
+        }
+        Shape::Dock => {
+            let k = c.h / 54.0;
+            let m = style::M_DOCK * k;
+            let bs = style::BADGE_DOCK * k;
+            let th = (bs * style::RING_T).max(3.0 * k);
+            c.ring(m + bs / 2.0, m + bs / 2.0, (bs - th) / 2.0, th, frac, col);
+            let x0 = m + bs + style::SP[4] * k;
+            let wide = c.w >= c.h * 3.4;
+            let slot_w = (c.w * 0.34).round();
+            let right = if wide { c.w - m - slot_w - style::SP[4] * k } else { c.w - m };
+            c.text_base(&pct, x0, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, t1, Align::Left, c.w);
+            c.text_base(&caption, x0, 44.0 * k, style::FOOT.size * k, 400, t2, Align::Left, right - x0);
+            if wide {
+                let r = c.w - m;
+                c.text_base(&left, r, 28.0 * k, style::TITLE.size * k, 600, t1, Align::Right, slot_w);
+                c.text_base("left", r, 41.0 * k, style::FOOT.size * k, 400, t2, Align::Right, slot_w);
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let w = c.w - 2.0 * m;
+            // The grid fills the width but stays in y m..58, so even month's four rows keep
+            // a clear gap above the hero's cap top (~y67); a deeper grid shrinks to fit.
+            let rows = total.div_ceil(cols) as f32;
+            let (gy0, gy1) = (m, 58.0);
+            let pitch = (w / (cols as f32 - 1.0 + 0.68)).min((gy1 - gy0) / (rows - 1.0 + 0.68));
+            unit_grid(c, total, current, cols, m, (gy0 + gy1) / 2.0, pitch, pitch * 0.68, col);
+            let (v, fs) = fit_value(c, &pct, style::HERO_S, w);
+            c.text_base(&v, m, 86.0, fs, style::HERO_S.weight, t1, Align::Left, c.w * 2.0);
+            c.text_base(&caption, m, 106.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, w);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let r = c.w - m;
+            c.text_cap(&pct, m, m, style::HERO.size, style::HERO.weight, t1, Align::Left, c.w);
+            let left_w = 136.0 - m - style::SP[3];
+            c.text_base(&caption, m, 58.0, style::CAPTION.size, style::CAPTION.weight, t2, Align::Left, left_w);
+            c.text_base(&position, m, 76.0, style::FOOT.size, style::FOOT.weight, t3, Align::Left, left_w);
+            let (pitch, dot) = if cols > 8 { (8.9, 6.0) } else { (14.5, 10.0) };
+            let gw = (cols - 1) as f32 * pitch + dot;
+            unit_grid(c, total, current, cols, r - gw, 48.0, pitch, dot, col);
+            if sh != Shape::Large {
+                return;
+            }
+            separator(c, style::SEP_Y_LARGE);
+            // The whole span as a meter, ticked at its true positions.
+            let (x0, mw) = (m, r - m);
+            let h = style::METER_H;
+            c.bar(x0, 112.0 - h / 2.0, mw, h, frac, col);
+            let mic = style::MICRO;
+            for (f, l) in &ticks {
+                let px = x0 + mw * f;
+                let (al, px) = if *f <= 0.0 { (Align::Left, px) } else { (Align::Center, px.min(r - c.measure(l, mic.size, mic.weight, Font::Text).0 / 2.0)) };
+                c.text_base(l, px, 132.0, mic.size, mic.weight, t3, al, 40.0);
+            }
+            let cw = mw / 3.0;
+            for (i, (v, l)) in [(elapsed.as_str(), "Elapsed"), (left.as_str(), "Left"), (ends.0.as_str(), ends.1.as_str())].iter().enumerate() {
+                let cx = x0 + i as f32 * cw;
+                let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
+                c.text_base(&v, cx, 166.0, fs, style::VALUE.weight, t1, Align::Left, c.w);
+                c.text_base(l, cx, 182.0, style::FOOT.size, style::FOOT.weight, t2, Align::Left, cw - style::SP[3]);
+            }
+        }
     }
-    if dense {
-        c.text(&pct, c.w - 8.0, c.h / 2.0 - c.h * 0.2, c.h * 0.3, 600, c.text1(), Align::Right, c.w * 0.36, Font::Display);
-        return;
-    }
-    c.tw(label, gx, c.h - 24.0, 11.5, 500, c.text2(), c.w * 0.6);
-    c.tr(&pct, c.w - gx, c.h - 25.0, 12.5, 600, c.text1());
 }
 
 #[cfg(test)]

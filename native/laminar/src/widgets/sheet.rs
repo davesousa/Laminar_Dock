@@ -154,7 +154,8 @@ fn sample_weather() -> laminar_sys::weather::Weather {
         description: "Partly cloudy".into(),
         high_c: 21.0,
         low_c: 11.0,
-        hourly: (0..8).map(|i| ((13 + i) as u8 % 24, 17.0 + i as f32 * 0.5, if i % 3 == 0 { 1 } else { 2 })).collect(),
+        // The next full hours after 13:20: warming to mid-afternoon, then clear and cooling.
+        hourly: [(14, 18.0, 2), (15, 18.0, 2), (16, 17.0, 1), (17, 15.0, 1), (18, 14.0, 0), (19, 13.0, 0), (20, 12.0, 0), (21, 12.0, 0)].to_vec(),
         feels_c: 16.0,
         humidity: 62.0,
         wind_kmh: 14.0,
@@ -162,7 +163,12 @@ fn sample_weather() -> laminar_sys::weather::Weather {
         is_day: true,
         sunrise: "07:02".into(),
         sunset: "16:58".into(),
-        daily: (0..7).map(|i| (format!("2026-11-{:02}", 15 + i), 18.0 + i as f32, 9.0 + i as f32 * 0.5, [0, 2, 3, 61, 1, 2, 71][i])).collect(),
+        // Today, then a rainy midweek dip and a clear weekend.
+        daily: [(21.0, 11.0, 2), (19.0, 10.0, 3), (16.0, 9.0, 61), (13.0, 6.0, 63), (12.0, 4.0, 3), (15.0, 7.0, 1), (17.0, 9.0, 0)]
+            .iter()
+            .enumerate()
+            .map(|(i, (hi, lo, code))| (format!("2026-11-{:02}", 15 + i), *hi, *lo, *code))
+            .collect(),
         now: "2026-11-15T13:20".into(),
     }
 }
