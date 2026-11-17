@@ -8,6 +8,7 @@
 //! - `filter`: a widget id fragment or category name ("clocks"), or a comma-separated
 //!   list of exact ids ("stripe,stripe-chart")
 //! - `state=setup|error`: force every connector face into its setup or error state
+//!   (setup also clears the weather location, so the weather faces show "Set location")
 //! - `tray=N`: N sample tray apps for Background Apps (0 shows its empty state)
 //! - `update=pending|restart|current|unknown|none`: the Windows Update status (none = not
 //!   checked yet)
@@ -105,7 +106,11 @@ Call the dentist".into();
                 thumbnail_png: None,
             }),
         };
-        let cfg = crate::config::Config::default();
+        let mut cfg = crate::config::Config::default();
+        if state == 1 {
+            cfg.weather_city.clear();
+        }
+        let cfg = cfg;
         let pinned = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(), "e".to_string()];
         let names: HashMap<String, String> =
             if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Calendar", "Photos", "Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
@@ -122,7 +127,7 @@ Call the dentist".into();
         let ctx = Ctx {
             hub: &hub,
             cfg: &cfg,
-            weather: if empty { None } else { Some(&weather) },
+            weather: if empty || state == 1 { None } else { Some(&weather) },
             stats: Some(&stats),
             control: &control,
             pinned: &pinned,
