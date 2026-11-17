@@ -6795,6 +6795,15 @@ fn minutes_str(secs: u32) -> String {
     }
 }
 
+/// A stopwatch total: "0:42" under a minute, then "48 min", "1 h 5 min".
+fn span_str(secs: f32) -> String {
+    if secs < 60.0 {
+        hms(secs)
+    } else {
+        minutes_str(secs as u32)
+    }
+}
+
 /// Everything a timer face shows, worked out once for every size.
 struct TimerView {
     /// Mode colour: Focus/Break red, Timer blue, Stopwatch orange.
@@ -6809,8 +6818,6 @@ struct TimerView {
     dock_caption: String,
     /// Small caption: "Ends 3:42 PM", "Paused" or "Ready".
     caption: String,
-    /// Medium third line for the stopwatch ("Started 2:14 PM").
-    started: String,
     /// Large: up to two (label, value) facts.
     facts: Vec<(String, String)>,
     /// What the primary button shows.
@@ -6829,13 +6836,16 @@ fn timer_view(c: &Canvas, k: TimerKind, x: &Ctx) -> TimerView {
             let used = e >= 0.5;
             let since = clock_at(n, -e);
             let state = if running { "Running" } else if used { "Paused" } else { "Ready" };
+            let today = sw.today_total(n).as_secs_f32();
             let facts = if running {
-                vec![("Started".to_string(), since.clone()), ("Status".to_string(), state.to_string())]
+                vec![("Started".to_string(), since.clone()), ("Today".to_string(), span_str(today + e))]
             } else if used {
                 vec![("Elapsed".to_string(), hms(e)), ("Status".to_string(), state.to_string())]
+            } else if let Some(last) = sw.last {
+                vec![("Last run".to_string(), hms(last.as_secs_f32())), ("Today".to_string(), span_str(today))]
             } else {
-                // A fact with no value is drawn as a footnote hint.
-                vec![("Status".to_string(), state.to_string()), ("Click play to start".to_string(), String::new())]
+                // Nothing to report yet: one hint (a fact with no value is a footnote).
+                vec![("Click play to start".to_string(), String::new())]
             };
             TimerView {
                 col: ORANGE,
@@ -6844,7 +6854,6 @@ fn timer_view(c: &Canvas, k: TimerKind, x: &Ctx) -> TimerView {
                 frac: used.then(|| (e % 60.0) / 60.0),
                 dock_caption: if running { format!("Started {since}") } else if used { "Paused".into() } else { "Stopwatch".into() },
                 caption: if running { format!("Started {since}") } else { state.into() },
-                started: if running { format!("Started {since}") } else { state.into() },
                 facts,
                 glyph: if running { G_PAUSE_FILL } else { G_PLAY_FILL },
                 fill: if c.light { hex(0xF28A00) } else { ORANGE },
@@ -6869,8 +6878,11 @@ fn timer_view(c: &Canvas, k: TimerKind, x: &Ctx) -> TimerView {
                 vec![if running { ("Ends".to_string(), ends.clone()) } else { ("Length".to_string(), length) }, ("Next".to_string(), next.to_string())]
             } else if running {
                 vec![("Ends".to_string(), ends.clone()), ("Length".to_string(), length)]
-            } else {
+            } else if t.done || paused {
                 vec![("Length".to_string(), length), ("Status".to_string(), state.to_string())]
+            } else {
+                // Ready: when it would end if started now.
+                vec![("Length".to_string(), length), ("Ends".to_string(), ends.clone())]
             };
             TimerView {
                 col: if pomodoro { RED } else { BLUE },
@@ -6885,7 +6897,6 @@ fn timer_view(c: &Canvas, k: TimerKind, x: &Ctx) -> TimerView {
                     mode.into()
                 },
                 caption: if running { format!("Ends {ends}") } else { state.into() },
-                started: String::new(),
                 facts,
                 glyph: if t.done {
                     G_RESET
@@ -7010,13 +7021,12 @@ fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
             c.text_cap(&v.label, m, m, style::MICRO.size, style::MICRO.weight, v.col, Align::Left, 140.0);
             let role = Type { weight: style::time_weight(style::HERO.size), ..style::HERO };
             let (t, fs) = fit_value(c, &v.time, role, 160.0);
-            c.text_base(&t, m, 58.0, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
-            match (k, v.frac) {
-                (TimerKind::Stopwatch, _) => {
-                    c.text_base(&v.started, m, 76.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, 140.0);
-                }
-                (_, Some(f)) => c.bar(m, 70.0, 124.0, style::METER_H, f, v.col),
-                _ => {}
+            // The Small's stack (label, hero, status caption) for all three; the countdowns
+            // add their meter under the caption, on the bottom margin.
+            c.text_base(&t, m, 52.0, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(&v.caption, m, 68.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, 140.0);
+            if let (false, Some(f)) = (k == TimerKind::Stopwatch, v.frac) {
+                c.bar(m, c.h - m - style::METER_H, 124.0, style::METER_H, f, v.col);
             }
             timer_buttons(c, out, k, &v, c.w - m, c.h / 2.0, style::BTN_PRIMARY, style::BTN_SECONDARY, style::SP[3]);
         }
@@ -7655,12 +7665,14 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     art_or_idle(c, x, wic, &t, m, m, s, r);
                     let tx = m + s + style::SP[5];
                     let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
-                    large_track_text(c, &t2, tx, c.w - m - tx, 20.0, if t.idle { "" } else { &t.album }, 3);
+                    // Two title lines, as on now-playing Large, so the status line has room
+                    // on the art's bottom edge: one status position across the media Larges.
+                    large_track_text(c, &t2, tx, c.w - m - tx, 20.0, if t.idle { "" } else { &t.album }, 2);
+                    if !t.idle {
+                        c.text_base(&t.status_line(), tx, m + s, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - tx);
+                    }
                     let pd = style::BTN_PRIMARY;
                     let (pcx, pcy) = (c.w - m - pd / 2.0, c.h - m - pd / 2.0);
-                    if !t.idle {
-                        c.text_base(&t.status_line(), m, c.h - m, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, pcx - pd / 2.0 - style::SP[3] - m);
-                    }
                     play_primary(c, out, pcx, pcy, pd, t.playing, if t.idle { 0.35 } else { 1.0 });
                 }
                 MediaKind::Disc => {
@@ -7692,13 +7704,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     out.hits.clear();
                     media_medium(c, out, k, x, wic, &t);
                     separator(c, style::SEP_Y_LARGE);
-                    if track_timeline(&t).is_none() {
-                        // The Medium already holds the transport: the detail is the volume.
-                        bar_volume(c, out, x);
-                        return;
-                    }
-                    // With a timeline the Medium shows progress, so the transport comes here,
-                    // over a footnote naming the album or where it plays.
+                    // A footnote naming the album or where it plays closes the region.
                     let foot = if t.idle {
                         String::new()
                     } else if !t.album.is_empty() {
@@ -7706,6 +7712,12 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     } else {
                         t.where_line()
                     };
+                    if track_timeline(&t).is_none() {
+                        // The Medium already holds the transport: the detail is the volume.
+                        bar_volume(c, out, x, &foot);
+                        return;
+                    }
+                    // With a timeline the Medium shows progress, so the transport comes here.
                     let (_, y0, _, h) = detail_region(c);
                     let cy = if foot.is_empty() { y0 + h / 2.0 } else { 140.0 };
                     transport(c, out, c.w / 2.0, cy, Align::Center, TSize::Card, TButtons::Full, &t);
@@ -7733,12 +7745,12 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
                 card_track_text(c, &idle_t(), tx, c.w - m - tx, 42.0, 60.0, style::CAPTION.size, None);
                 return;
             }
-            let mut right = c.w - m;
-            if !t.source.is_empty() {
-                let sw = c.measure(&t.source, style::FOOT.size, style::FOOT.weight, Font::Text).0.min(72.0);
-                c.text_base(&t.source, c.w - m, style::HEADER_BASE, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Right, 72.0);
-                right -= sw + style::SP[3];
-            }
+            // The source app on the title's baseline, else the playback state, so the
+            // right of the card is never bare.
+            let label = if t.source.is_empty() { t.verb().to_string() } else { t.source.clone() };
+            let sw = c.measure(&label, style::FOOT.size, style::FOOT.weight, Font::Text).0.min(72.0);
+            c.text_base(&label, c.w - m, style::HEADER_BASE, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Right, 72.0);
+            let right = c.w - m - sw - style::SP[3];
             let fs = fit_down(c, &t.title, style::TITLE.size, style::TITLE.min, style::TITLE.weight, right - tx);
             c.text_base(&t.title, tx, style::HEADER_BASE, fs, style::TITLE.weight, c.text1(), Align::Left, right - tx);
             c.text_base(&t.artist, tx, 47.0, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - m - tx);
@@ -7828,17 +7840,21 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
 }
 
 /// Now Playing Bar, Large: the output volume as a slider in the detail region, under the
-/// device name (or "Volume") and the level.
-fn bar_volume(c: &Canvas, out: &mut Painted, x: &Ctx) {
+/// device name (or "Volume") and the level, over a footnote (album or where it plays) on
+/// the bottom margin. Without a footnote the label and slider are centred in the region.
+fn bar_volume(c: &Canvas, out: &mut Painted, x: &Ctx, foot: &str) {
     let (x0, y0, w, h) = detail_region(c);
     let vol = x.control.volume.unwrap_or(0.0).clamp(0.0, 1.0);
     let muted = x.control.muted == Some(true);
     let name = x.hub.output_name.as_deref().map(short_device).filter(|d| !d.is_empty()).unwrap_or_else(|| "Volume".into());
     let level = if muted { "Muted".to_string() } else { format!("{:.0}%", vol * 100.0) };
-    // Label row and the shared slider, centred as one block in the region.
     let bh = style::BTN_SECONDARY;
     let block = c.cap_h(style::FOOT.size) + style::SP[5] + bh;
-    let top = y0 + (h - block) / 2.0;
+    // With a footnote, the slider sits 16 above it so the region is filled to the margin.
+    let top = if foot.is_empty() { y0 + (h - block) / 2.0 } else { y0 + h - c.cap_h(style::FOOT.size) - style::SP[6] - block };
+    if !foot.is_empty() {
+        c.text_base(foot, x0, y0 + h, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, w);
+    }
     let base = top + c.cap_h(style::FOOT.size);
     let lw = c.measure(&level, style::FOOT.size, 500, Font::Text).0;
     c.text_base(&name, x0, base, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, w - lw - style::SP[3]);
