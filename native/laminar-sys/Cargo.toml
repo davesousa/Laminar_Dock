@@ -25,6 +25,7 @@ features = [
     "Graphics_Imaging",
     "Devices",
     "Devices_Radios",
+    "Devices_Power",
     # Win32
     "Win32_Foundation",
     "Win32_Security",

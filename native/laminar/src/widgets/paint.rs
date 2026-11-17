@@ -328,7 +328,8 @@ fn stat_footer(c: &Canvas, items: [(&str, &str); 3], top: f32) {
     let m = style::M_CARD;
     let cw = (c.w - 2.0 * m) / 3.0;
     let base = top + c.cap_h(style::VALUE.size);
-    for (i, (v, label)) in items.iter().enumerate() {
+    // An empty value is a stat with no data: the others keep their columns.
+    for (i, (v, label)) in items.iter().enumerate().filter(|(_, (v, _))| !v.is_empty()) {
         let x = m + i as f32 * cw;
         let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
         c.text_base(&v, x, base, fs, style::VALUE.weight, c.text1(), Align::Left, c.w);
@@ -9000,6 +9001,11 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     e.insert("charging".into(), charging.to_string());
                     e.insert("plugged_in".into(), "true".into());
                     e.insert("time_left".into(), String::new());
+                    // A 52 Wh battery (56 Wh new) at the sample's 82%, charging at 15 W.
+                    e.insert("full_mwh".into(), "52000".into());
+                    e.insert("design_mwh".into(), "56000".into());
+                    e.insert("remaining_mwh".into(), "42640".into());
+                    e.insert("charge_rate_mw".into(), if charging { "15000" } else { "0" }.into());
                 }
                 3 => got_now = Got::Setup(String::new()),
                 _ => {}
@@ -9076,7 +9082,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     caption: cap,
                     hero_glyph: charging.then_some(G_BOLT),
                     acc: glance_meter(frac, col),
-                    detail: SysDetail::Meter(frac, col, ["0%".into(), "50%".into(), "100%".into()], sys_battery_stats(&x.now, pct, mins_left, charging, plugged)),
+                    detail: SysDetail::Meter(frac, col, ["0%".into(), "50%".into(), "100%".into()], sys_battery_stats(&x.now, pct, mins_left, charging, plugged, &f.extra)),
                 },
             );
         }
@@ -9236,49 +9242,63 @@ fn sys_parse_dur(s: &str) -> Option<i64> {
     (mins > 0).then_some(mins)
 }
 
-/// Battery Large's three stats, which add to the caption instead of repeating it. On
-/// battery with an estimate: when it runs out, when it reaches the 20% warning (where the
-/// ring turns yellow) and the drain rate. Otherwise: how much is left to fill, the power
-/// source and the state.
-fn sys_battery_stats(now: &super::Now, pct: f32, mins_left: Option<i64>, charging: bool, plugged: bool) -> [(String, String); 3] {
+/// Battery Large's stats, which add to the caption instead of repeating it. On battery with
+/// an estimate: when it reaches the 20% warning (where the ring turns yellow), when it runs
+/// out, and the drain rate, in time order. On AC, from the battery report: the time to full
+/// and charge rate while charging, the capacity when not, and the battery's health. A stat
+/// with no data is left out (an empty value), never replaced by a word.
+fn sys_battery_stats(now: &super::Now, pct: f32, mins_left: Option<i64>, charging: bool, plugged: bool, extra: &std::collections::BTreeMap<String, String>) -> [(String, String); 3] {
     let now_min = (now.hour * 60 + now.minute) as i64;
+    let num = |k: &str| extra.get(k).and_then(|v| v.parse::<f64>().ok());
+    let none = || (String::new(), String::new());
     match mins_left {
         Some(left) if !plugged => {
             let rate = pct as f64 / (left as f64 / 60.0);
             let low = if pct > 20.0 { sys_time((now_min + (left as f64 * (pct as f64 - 20.0) / pct as f64).round() as i64).rem_euclid(1440)) } else { "Now".into() };
             [
-                (sys_time((now_min + left).rem_euclid(1440)), "Empty at".into()),
                 (low, "Reaches 20%".into()),
+                (sys_time((now_min + left).rem_euclid(1440)), "Empty at".into()),
                 (format!("{rate:.0}%/h"), "Drain rate".into()),
             ]
         }
-        _ => [
-            (format!("{:.0}%", (100.0 - pct).max(0.0)), "To full".into()),
-            (if plugged || charging { "AC" } else { "Battery" }.into(), "Power source".into()),
-            (
-                if charging {
-                    "Charging"
-                } else if plugged && pct >= 99.0 {
-                    "Full"
-                } else if plugged {
-                    "Not charging"
-                } else {
-                    "Estimating"
+        _ => {
+            let full = num("full_mwh").filter(|v| *v > 0.0);
+            let design = num("design_mwh").filter(|v| *v > 0.0);
+            let health = full.zip(design).map(|(f, d)| (format!("{:.0}%", (f / d * 100.0).min(100.0)), "Battery health".to_string()));
+            let rate = num("charge_rate_mw").filter(|v| *v > 0.0);
+            let left_mwh = full.zip(num("remaining_mwh")).map(|(f, r)| (f - r).max(0.0));
+            let mut out: Vec<(String, String)> = Vec::new();
+            match (charging, full, left_mwh, rate) {
+                (true, Some(f), Some(l), Some(r)) if pct < 100.0 => {
+                    let mins = (l / r * 60.0).round().max(1.0) as i64;
+                    let (h, m) = (mins / 60, mins % 60);
+                    out.push((if h > 0 { format!("{h}h {m:02}m") } else { format!("{m}m") }, "To full".into()));
+                    out.push((format!("{:.0}%/h", r / f * 100.0), "Charge rate".into()));
                 }
-                .into(),
-                "Status".into(),
-            ),
-        ],
+                (true, ..) => out.push((format!("{:.0}%", (100.0 - pct).max(0.0)), "Left to charge".into())),
+                (false, Some(f), ..) => {
+                    out.push((format!("{:.0} Wh", f / 1000.0), "Full capacity".into()));
+                    if let Some(d) = design {
+                        out.push((format!("{:.0} Wh", d / 1000.0), "When new".into()));
+                    }
+                }
+                _ => {}
+            }
+            out.extend(health);
+            let mut it = out.into_iter();
+            [it.next().unwrap_or_else(none), it.next().unwrap_or_else(none), it.next().unwrap_or_else(none)]
+        }
     }
 }
 
-/// Storage Large with more than one drive: one row per drive at the 24 pitch (label, a
-/// 60 px meter, free space), then a summary when there's room.
+/// Storage Large with more than one drive: one row per drive at a 22 pitch from just under
+/// the separator (label, a 60 px meter, free space), then a summary footnote on the bottom
+/// margin, a full band below the last row.
 fn sys_drive_rows(c: &Canvas, drives: &[(String, f64, f64, f32)], head: &str, head_free: f64) {
     let m = style::M_CARD;
-    let pitch = style::ROW_L;
+    let pitch = style::ROW_L - style::SP[0];
     let ls = style::BODY.size;
-    let top = style::DETAIL_TOP - style::SP[1];
+    let top = style::SEP_Y_LARGE + style::SP[1];
     let base = |i: usize| top + i as f32 * pitch + (pitch + c.cap_h(ls)) / 2.0;
     // Up to 3 rows fit above the summary footnote, which sits on the bottom margin.
     let n = drives.len();
@@ -9298,7 +9318,7 @@ fn sys_drive_rows(c: &Canvas, drives: &[(String, f64, f64, f32)], head: &str, he
     }
     let total_free: f64 = drives.iter().map(free_of).sum();
     let s = format!("{n} drives · {} free", sys_fmt_gb(total_free));
-    c.text_base(&s, m, base(shown).min(c.h - m), style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
+    c.text_base(&s, m, c.h - m, style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
 }
 
 /// Uptime Large: the last seven days (today at the right), filled from boot to now, and when it started.
