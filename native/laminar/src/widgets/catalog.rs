@@ -210,7 +210,7 @@ impl Face {
         match self {
             Face::AiAll => &["claude_code", "codex", "anthropic", "openai", "openrouter", "cursor"],
             Face::Goal => &["stripe", "lemonsqueezy", "paddle", "shopify", "gumroad", "polar"],
-            Face::Clock(ClockKind::Today) => &["calendar"],
+            Face::Clock(ClockKind::Today | ClockKind::Digital | ClockKind::WeekStrip) => &["calendar"],
             _ => &[],
         }
     }

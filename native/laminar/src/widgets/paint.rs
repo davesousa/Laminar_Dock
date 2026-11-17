@@ -101,7 +101,16 @@ enum Got<'a> {
     Error(String),
 }
 
+/// Widget sheet only (`state=setup|error`): force every connector face into its §7 setup
+/// (1) or error (2) state so those layouts can be reviewed. 0 = off (always in the app).
+pub(super) static SHEET_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 fn got<'a>(x: &'a Ctx, conn: &str) -> Got<'a> {
+    match SHEET_STATE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return Got::Setup("Add your API key in Settings.".into()),
+        2 => return Got::Error("Couldn't reach the service.".into()),
+        _ => {}
+    }
     match (x.hub.feed(conn), x.hub.err(conn)) {
         (Some(f), None) => Got::Feed(Cow::Borrowed(f)),
         _ if x.sample => Got::Feed(Cow::Owned(super::hub::sample(conn))),
@@ -166,12 +175,17 @@ fn compact_tight(v: f64) -> String {
 }
 
 /// The compact form of a formatted value ("$5,336" → "$5.3K", "$83.46" → "$83"), keeping
-/// its prefix and suffix. None when there is no shorter form.
+/// its prefix and suffix. None when there is no shorter form. Only money may lose its
+/// decimals under 1,000: "+0.6%" or "8.4" has no compact form (rounding would change it).
 fn compact_str(s: &str) -> Option<String> {
     let start = s.find(|ch: char| ch.is_ascii_digit())?;
     let end = s[start..].find(|ch: char| !(ch.is_ascii_digit() || ch == ',' || ch == '.')).map(|e| start + e).unwrap_or(s.len());
     let num = &s[start..end];
     let v: f64 = num.replace(',', "").parse().ok()?;
+    let is_money = s[..start].contains(['$', '\u{20AC}', '\u{00A3}', '\u{00A5}']);
+    if v.abs() < 1000.0 && num.contains('.') && !is_money {
+        return None;
+    }
     let short = compact_tight(v);
     (short.len() < num.len()).then(|| format!("{}{short}{}", &s[..start], &s[end..]))
 }
@@ -796,14 +810,17 @@ fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, con
                 let slot_w = (c.w * 0.34).round();
                 let ph = style::BTN_SECONDARY * k;
                 let tw = c.w - m - slot_w - style::SP[4] * k - x0;
-                c.text_base(name, x0, 30.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, tw);
+                let ns = fit(c, name, style::TITLE.size * k, style::TITLE.min * k, 600, Font::Text, tw);
+                c.text_base(name, x0, 30.0 * k, ns, 600, c.text1(), Align::Left, tw);
                 reason_line(c, &reason, x0, 44.0 * k, style::FOOT.size * k, false, Align::Left, tw);
                 let (px, py) = (c.w - m - slot_w, (c.h - ph) / 2.0);
                 c.rr(px, py, slot_w, ph, ph / 2.0, c.blue());
                 let fs = style::FOOT.size * k;
                 c.text_cap("Connect", px + slot_w / 2.0, py + (ph - c.cap_h(fs)) / 2.0, fs, 600, WHITE, Align::Center, slot_w);
             } else {
-                c.text_base(name, x0, 30.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, tw);
+                // The name fits 13 → 11 before it ellipsizes ("Revenue Goal", not "Revenue G…").
+                let ns = fit(c, name, style::TITLE.size * k, style::TITLE.min * k, 600, Font::Text, tw);
+                c.text_base(name, x0, 30.0 * k, ns, 600, c.text1(), Align::Left, tw);
                 if connect {
                     c.text_base("Connect", x0, 44.0 * k, style::FOOT.size * k, 600, BLUE, Align::Left, tw);
                 } else {
@@ -6177,20 +6194,13 @@ fn detail_grid(c: &Canvas, w: &laminar_sys::weather::Weather, days: &[WDay]) {
 /// An original sunrise/sunset mark: a half sun resting on a horizon, a chevron above it
 /// (up for sunrise, down for sunset). `size` is the mark's box, `top` its top.
 fn sun_mark(c: &Canvas, cx: f32, top: f32, size: f32, rising: bool) {
-    use windows::Win32::Graphics::Direct2D::{Common::D2D_RECT_F, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE};
     let k = size / 20.0;
     let hy = top + size * 0.82;
     let r = if size >= 26.0 { 8.0 * size / 30.0 } else { 6.0 * k };
     c.line(cx - size / 2.0 + 0.75, hy, cx + size / 2.0 - 0.75, hy, 1.5 * k.min(1.2), c.text2());
     // The sun: a disc cut off just above the horizon line.
     let cut = hy - 1.75 * k.min(1.2);
-    unsafe {
-        c.dc.PushAxisAlignedClip(&D2D_RECT_F { left: cx - r - 1.0, top: cut - r - 1.0, right: cx + r + 1.0, bottom: cut }, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    }
-    c.circle(cx, hy, r, YELLOW);
-    unsafe {
-        c.dc.PopAxisAlignedClip();
-    }
+    c.clip(cx - r - 1.0, cut - r - 1.0, 2.0 * r + 2.0, r + 1.0, || c.circle(cx, hy, r, YELLOW));
     let (cw, ch) = (6.0 * k.min(1.33), 3.0 * k.min(1.33));
     let cyy = top + (hy - r - top) / 2.0 - 0.5;
     let (tip, ends) = if rising { (cyy - ch / 2.0, cyy + ch / 2.0) } else { (cyy + ch / 2.0, cyy - ch / 2.0) };
@@ -8317,28 +8327,10 @@ fn sys_time_labels(c: &Canvas) {
     c.text_base("Now", c.w - style::M_CARD, base, r.size, r.weight, c.text3(), Align::Right, c.w / 2.0);
 }
 
-/// The padded data range `Canvas::chart` uses (§2.5 headroom).
-fn sys_chart_range(vals: &[f64]) -> Option<(f64, f64)> {
-    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
-    for v in vals.iter().filter(|v| v.is_finite()) {
-        lo = lo.min(*v);
-        hi = hi.max(*v);
-    }
-    if lo > hi {
-        return None;
-    }
-    if (hi - lo).abs() < 1e-9 {
-        hi = lo + 1.0;
-        lo -= 1.0;
-    }
-    let r = hi - lo;
-    Some((lo - r * style::CHART_PAD_LO, hi + r * style::CHART_PAD_HI))
-}
-
 /// Download (blue area) and upload (green line) on one scale from zero, so their heights
-/// compare. Each series is drawn into the part of the box its range covers. The zero line
-/// sits a little above the box bottom (§2.5 floor), so a quiet upload line never lies on
-/// the edge; the baseline hairline shows only while there's nothing to draw.
+/// compare and the download fill reaches the zero line. The zero line sits a little above
+/// the box bottom (§2.5 floor), so a quiet upload line never lies on the edge; the
+/// baseline hairline shows only while there's nothing to draw.
 #[allow(clippy::too_many_arguments)]
 fn sys_net_chart(c: &Canvas, x: f32, y: f32, w: f32, h: f32, down: &[f64], up: &[f64], stroke: f32, dot: bool) -> bool {
     let peak = down.iter().chain(up.iter()).copied().filter(|v| v.is_finite()).fold(0.0f64, f64::max);
@@ -8356,17 +8348,12 @@ fn sys_net_chart(c: &Canvas, x: f32, y: f32, w: f32, h: f32, down: &[f64], up: &
         return false;
     }
     let top_v = peak * (1.0 + style::CHART_PAD_HI);
-    let t_in = (stroke / 2.0).max(if dot { style::CHART_DOT + 1.5 } else { 0.0 });
     let floor = (h * style::CHART_PAD_LO as f32).max(style::SP[0]);
-    let (t, b) = (y + t_in, y + h - floor - stroke / 2.0);
-    let map = |v: f64| b - (v / top_v) as f32 * (b - t);
     for (vals, col, fill, st) in [(down, BLUE, true, stroke), (up, GREEN, false, style::STROKE_SPARK)] {
         if vals.len() < 2 {
             continue;
         }
-        let Some((lo, hi)) = sys_chart_range(vals) else { continue };
-        let (ty, by) = (map(hi) - t_in, map(lo) + st / 2.0);
-        c.chart(x, ty, w, by - ty, vals, col, ChartOpts { fill, dot, stroke: st, smooth: vals.len() >= 8 });
+        c.chart_in(x, y, w, h - floor, vals, col, ChartOpts { fill, dot, stroke: st, smooth: vals.len() >= 8 }, Some((0.0, top_v)));
     }
     true
 }
@@ -8764,8 +8751,7 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             out.hits.push(((bx, by - style::SP[1], bw, bh + style::SP[3]), WAct::Brightness));
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
-                // Presets. They show the level they set; picking one needs an exact-value
-                // action (the slider sets by position), so for now the card opens Display settings.
+                // Presets: each pill sets its level; the chosen one is filled.
                 let gap = style::SP[3];
                 let pw = (c.w - 2.0 * m - 2.0 * gap) / 3.0;
                 for (i, p) in [0.3f32, 0.6, 1.0].iter().enumerate() {
@@ -8774,6 +8760,7 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     c.rr(px, 120.0, pw, bh, bh / 2.0, if on { fill } else { c.plate() });
                     let fs = style::CAPTION.size;
                     c.text_cap(&format!("{:.0}%", p * 100.0), px + pw / 2.0, 120.0 + (bh - c.cap_h(fs)) / 2.0, fs, 600, if on { c.halo() } else { c.text1() }, Align::Center, pw);
+                    out.hits.push(((px, 120.0, pw, bh), WAct::SetBrightness(*p)));
                 }
                 c.text_base("Main display · DDC/CI", m, c.h - m - 4.0, style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
@@ -9057,17 +9044,6 @@ fn sys_drive_rows(c: &Canvas, drives: &[(String, f64, f64, f32)], head: &str, he
     }
 }
 
-/// Run `draw` with everything outside the (logical) rectangle clipped away.
-fn sys_clipped(c: &Canvas, x: f32, y: f32, w: f32, h: f32, draw: impl FnOnce()) {
-    use windows::Win32::Graphics::Direct2D::{Common::D2D_RECT_F, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE};
-    if w <= 0.0 || h <= 0.0 {
-        return;
-    }
-    unsafe { c.dc.PushAxisAlignedClip(&D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-    draw();
-    unsafe { c.dc.PopAxisAlignedClip() };
-}
-
 /// Uptime Large: the last seven days (today at the right), filled from boot to now, and when it started.
 fn sys_uptime_strip(c: &Canvas, now: &super::Now, days_back: i64, boot_min: i64, boot_day: usize) {
     let m = style::M_CARD;
@@ -9090,7 +9066,7 @@ fn sys_uptime_strip(c: &Canvas, now: &super::Now, days_back: i64, boot_min: i64,
         // cell's and the cut edge is straight (a fill, not a separate pill).
         let from = if back == days_back { boot_min as f32 / 1440.0 } else { 0.0 };
         let to = if today { (now_min / 1440.0).max(from + 0.03) } else { 1.0 };
-        sys_clipped(c, x0 + cw * from, y, cw * (to - from).clamp(0.0, 1.0), h, || c.rr(x0, y, cw, h, r, alpha(BLUE, 0.9)));
+        c.clip(x0 + cw * from, y, cw * (to - from).clamp(0.0, 1.0), h, || c.rr(x0, y, cw, h, r, alpha(BLUE, 0.9)));
         if today {
             // Drawn after the fill, on the cell's own outline, so stroke and fill stay concentric.
             c.rr_stroke(x0, y, cw, h, r, c.text3(), 1.0);

@@ -198,6 +198,7 @@ impl Dock {
                 self.services.send(Req::SetVolume(frac));
             }
             WAct::Brightness => self.hub.set_brightness(frac),
+            WAct::SetBrightness(v) => self.hub.set_brightness(v),
             WAct::SetWallpaper => {
                 if let Some(p) = self.hub.feed("wallpaper").and_then(|f| f.extra.get("image_path").cloned()) {
                     self.hub.apply_wallpaper(p);

@@ -189,6 +189,8 @@ pub enum WAct {
     /// Set from the click position inside the hit rectangle (0..1 across it).
     Volume,
     Brightness,
+    /// Set the display brightness to this level (0..1): the brightness presets.
+    SetBrightness(f32),
     SetWallpaper,
     App(String),
     File(String),

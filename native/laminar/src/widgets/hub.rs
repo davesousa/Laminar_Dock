@@ -185,6 +185,12 @@ pub struct Hub {
 
 impl Hub {
     pub fn new(notify: HWND) -> Self {
+        Self::with_screen(notify, ScreenTime::load())
+    }
+
+    /// A hub that starts from the given screen time instead of the saved file. The widget
+    /// sheet uses this so previews never read the user's real usage.
+    pub fn with_screen(notify: HWND, screen: ScreenTime) -> Self {
         let mut timers = HashMap::new();
         timers.insert(TimerKind::Pomodoro, Countdown::new(25 * 60));
         timers.insert(TimerKind::Countdown, Countdown::new(5 * 60));
@@ -196,7 +202,7 @@ impl Hub {
             mic_muted: None,
             brightness: None,
             output_name: None,
-            screen: ScreenTime::load(),
+            screen,
             screen_dirty: 0,
             cpu_hist: VecDeque::new(),
             net_hist: VecDeque::new(),
@@ -398,12 +404,14 @@ impl Hub {
     }
 
     pub fn push_stats(&mut self, st: &laminar_sys::stats::Stats) {
+        // 60 samples: the history charts (paint.rs SYS_HIST, docs/widget-design.md §5).
+        const KEEP: usize = 60;
         self.cpu_hist.push_back(st.cpu_percent);
         self.net_hist.push_back((st.net_down_bps, st.net_up_bps));
-        while self.cpu_hist.len() > 40 {
+        while self.cpu_hist.len() > KEEP {
             self.cpu_hist.pop_front();
         }
-        while self.net_hist.len() > 40 {
+        while self.net_hist.len() > KEEP {
             self.net_hist.pop_front();
         }
     }

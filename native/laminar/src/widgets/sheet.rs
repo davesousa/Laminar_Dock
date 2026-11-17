@@ -7,6 +7,13 @@
 //! - `empty`: no sample data, so connector widgets show their waiting state
 //! - `filter`: a widget id fragment or category name ("clocks"), or a comma-separated
 //!   list of exact ids ("stripe,stripe-chart")
+//! - `state=setup|error`: force every connector face into its setup or error state
+//! - `tray=N`: N sample tray apps for Background Apps (0 shows its empty state)
+//! - `update=pending|restart|current|unknown|none`: the Windows Update status (none = not
+//!   checked yet)
+//!
+//! The sheet never reads the user's settings or saved widget data: screen time, notes and
+//! app names are made up (or empty with `empty`).
 
 use std::collections::HashMap;
 
@@ -24,7 +31,14 @@ use super::canvas::Canvas;
 use super::catalog::{self, Size};
 use super::{card_size, dock_width, Ctx, Hub, Now};
 
-pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool) -> Result<()> {
+pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool, opts: &[String]) -> Result<()> {
+    let opt = |k: &str| opts.iter().find_map(|a| a.strip_prefix(k)?.strip_prefix('=').map(str::to_string));
+    let state = match opt("state").as_deref() {
+        Some("setup") => 1,
+        Some("error") => 2,
+        _ => 0,
+    };
+    super::paint::SHEET_STATE.store(state, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -62,26 +76,53 @@ pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool
         let rt = base.CreateWicBitmapRenderTarget(&bmp, &props)?;
         let dc: ID2D1DeviceContext = rt.cast()?;
 
-        let hub = Hub::new(HWND::default());
+        let mut hub = Hub::with_screen(HWND::default(), if empty { Default::default() } else { sample_screen(&Now::get()) });
+        if empty {
+            // Set the fields directly: Hub::set_mic would really mute the microphone.
+            hub.mic_muted = Some(true);
+        } else {
+            hub.output_name = Some("Speakers (Realtek(R) Audio)".into());
+            hub.notes = "Groceries
+Oat milk
+Coffee beans
+Call the dentist".into();
+        }
+        let hub = hub;
         let weather = sample_weather();
         let stats = laminar_sys::stats::Stats { cpu_percent: 23.0, mem_used_gb: 21.3, mem_total_gb: 32.0, disk_c_used_percent: 74.0, net_down_bps: 2_400_000.0, net_up_bps: 310_000.0 };
         let control = crate::services::ControlState {
             volume: Some(0.42),
-            muted: Some(false),
+            muted: Some(empty),
             wifi: Some(true),
             bluetooth: Some(true),
-            dark: true,
-            media: Some(laminar_sys::media::NowPlaying { title: "Midnight Drive".into(), artist: "The Long Roads".into(), album: String::new(), playing: true, app_id: String::new(), thumbnail_png: None }),
+            dark: !light,
+            media: (!empty).then(|| laminar_sys::media::NowPlaying {
+                title: "Midnight Drive".into(),
+                artist: "The Long Roads".into(),
+                album: "Night Lines".into(),
+                playing: true,
+                app_id: "Spotify.exe".into(),
+                thumbnail_png: None,
+            }),
         };
         let cfg = crate::config::Config::default();
-        let names: HashMap<String, String> = HashMap::new();
         let pinned = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(), "e".to_string()];
-        let tray: Vec<(u64, String)> = (1..=14).map(|k| (k, format!("App {k}"))).collect();
-        let update = laminar_sys::update::UpdateStatus::Pending(3);
+        let names: HashMap<String, String> =
+            if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Calendar", "Photos", "Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
+        let n_tray = opt("tray").and_then(|v| v.parse::<u64>().ok()).unwrap_or(14);
+        let tray: Vec<(u64, String)> = (1..=n_tray).map(|k| (k, format!("App {k}"))).collect();
+        use laminar_sys::update::UpdateStatus;
+        let update = match opt("update").as_deref() {
+            Some("restart") => Some(UpdateStatus::RestartRequired),
+            Some("current") => Some(UpdateStatus::UpToDate),
+            Some("unknown") => Some(UpdateStatus::Unknown),
+            Some("none") => None,
+            _ => Some(UpdateStatus::Pending(3)),
+        };
         let ctx = Ctx {
             hub: &hub,
             cfg: &cfg,
-            weather: Some(&weather),
+            weather: if empty { None } else { Some(&weather) },
             stats: Some(&stats),
             control: &control,
             pinned: &pinned,
@@ -89,7 +130,7 @@ pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool
             whatsapp: Some(true),
             tray: &tray,
             hover_tray: None,
-            update: Some(&update),
+            update: update.as_ref(),
             sample: !empty,
             now: Now::get(),
         };
@@ -145,6 +186,18 @@ pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool
         println!("{} widgets -> {out} ({w}x{h})", defs.len());
         Ok(())
     }
+}
+
+/// Made-up screen time for today: a few apps and a working-day hour profile.
+fn sample_screen(now: &Now) -> super::hub::ScreenTime {
+    let apps = [("Visual Studio Code", 9_840u64), ("Google Chrome", 6_120), ("Slack", 2_460), ("Spotify", 1_380), ("File Explorer", 1_860)];
+    let mut hours = vec![0u32; 24];
+    for (h, m) in [(8, 22), (9, 51), (10, 56), (11, 48), (12, 18), (13, 44), (14, 55), (15, 38), (16, 29)] {
+        if h <= now.hour as usize {
+            hours[h] = m * 60;
+        }
+    }
+    super::hub::ScreenTime { day: now.ymd(), apps: apps.iter().map(|(a, s)| (a.to_string(), *s)).collect(), hours }
 }
 
 fn sample_weather() -> laminar_sys::weather::Weather {

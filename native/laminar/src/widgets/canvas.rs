@@ -347,6 +347,14 @@ impl<'a> Canvas<'a> {
     /// inside the box. `vals` oldest first.
     #[allow(clippy::too_many_arguments)]
     pub fn chart(&self, x: f32, y: f32, w: f32, h: f32, vals: &[f64], c: Col, o: ChartOpts) {
+        self.chart_in(x, y, w, h, vals, c, o, None);
+    }
+
+    /// `chart` on an explicit y-range `(lo, hi)` (no headroom added): for series that share
+    /// a scale, a zero-based count, or a range that must include a reference level. `lo`
+    /// maps to the line's lowest position, so the fill reaches it at full depth.
+    #[allow(clippy::too_many_arguments)]
+    pub fn chart_in(&self, x: f32, y: f32, w: f32, h: f32, vals: &[f64], c: Col, o: ChartOpts, range: Option<(f64, f64)>) {
         use super::style::{CHART_DOT, CHART_PAD_HI, CHART_PAD_LO, FILL_DARK, FILL_LIGHT};
         let n = vals.len();
         if n < 2 || w <= 0.0 || h <= 0.0 {
@@ -361,12 +369,17 @@ impl<'a> Canvas<'a> {
             return;
         }
         let first = lo;
-        if (hi - lo).abs() < 1e-9 {
-            hi = lo + 1.0;
-            lo -= 1.0;
-        }
-        let range = hi - lo;
-        let (lo, hi) = (lo - range * CHART_PAD_LO, hi + range * CHART_PAD_HI);
+        let (lo, hi) = match range {
+            Some((a, b)) if b > a => (a, b),
+            _ => {
+                if (hi - lo).abs() < 1e-9 {
+                    hi = lo + 1.0;
+                    lo -= 1.0;
+                }
+                let span = hi - lo;
+                (lo - span * CHART_PAD_LO, hi + span * CHART_PAD_HI)
+            }
+        };
         // Keep the line's caps (and the dot) inside the box.
         let inset = o.stroke / 2.0;
         let right = if o.dot { CHART_DOT + 1.5 } else { inset };
@@ -567,8 +580,8 @@ impl<'a> Canvas<'a> {
             // Light cards: white emoji (clouds, snow, moons) vanish. The glyph drawn without
             // colour is its silhouette; a faint one just below gives them an edge.
             if self.light && has_emoji(s) {
-                if let Some(sh) = self.brush((0.0, 0.0, 0.0, 0.16)) {
-                    self.dc.DrawTextLayout(pt(left, y + (size * 0.035).max(0.75)), &l, &sh, D2D1_DRAW_TEXT_OPTIONS_NONE);
+                if let Some(sh) = self.brush((0.0, 0.0, 0.0, 0.20)) {
+                    self.dc.DrawTextLayout(pt(left, y + (size * 0.035).max(1.0)), &l, &sh, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
             }
             if let Some(b) = self.brush_raw(self.tone(c, true)) {
@@ -591,21 +604,37 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Run `draw` with everything outside the rectangle clipped away.
+    pub fn clip(&self, x: f32, y: f32, w: f32, h: f32, draw: impl FnOnce()) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        unsafe { self.dc.PushAxisAlignedClip(&rc(x, y, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        draw();
+        unsafe { self.dc.PopAxisAlignedClip() };
+    }
+
     /// A service badge: rounded tile with a glyph or one or two letters. Brand colours are
-    /// the same in both themes; near-black tiles get a faint edge in the dark theme.
+    /// the same in both themes. Dark tiles get a faint white edge in the dark theme and very
+    /// bright ones (yellow, pink) a faint dark edge in the light theme, so neither sinks
+    /// into the card.
     pub fn badge(&self, b: &Badge, x: f32, y: f32, size: f32) {
         let r = size * super::style::BADGE_R;
         if let Some(br) = self.brush_raw(b.bg) {
             unsafe { self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rc(x, y, size, size), radiusX: r, radiusY: r }, &br) };
         }
         let lum = 0.2126 * b.bg.0 + 0.7152 * b.bg.1 + 0.0722 * b.bg.2;
-        if !self.light && lum < 0.16 {
+        if !self.light && lum < 0.22 {
             self.rr_stroke(x, y, size, size, r, (1.0, 1.0, 1.0, 0.14), 1.0);
+        } else if self.light && lum > 0.6 {
+            self.rr_stroke(x, y, size, size, r, (0.0, 0.0, 0.0, 0.08), 1.0);
         }
         if b.glyph {
-            self.glyph(b.mark, x + size / 2.0, y + size / 2.0, size * 0.5, b.fg);
+            // Small tiles (Mini, inline headers) need a larger glyph to stay legible.
+            let k = if size < 24.0 { 0.6 } else { 0.5 };
+            self.glyph(b.mark, x + size / 2.0, y + size / 2.0, size * k, b.fg);
         } else {
-            let fs = if b.mark.chars().count() > 1 { size * 0.38 } else { size * 0.52 };
+            let fs = if b.mark.chars().count() > 1 { size * 0.42 } else { size * 0.52 };
             // Centre the capitals optically, not the text box.
             let top = y + size / 2.0 - self.cap_top(fs) - self.cap_h(fs) / 2.0;
             self.text(b.mark, x + size / 2.0, top, fs, 700, b.fg, Align::Center, size, Font::Display);
