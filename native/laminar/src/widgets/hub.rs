@@ -641,12 +641,26 @@ pub fn sample(conn: &str) -> Feed {
             extra: ex(&[("symbol", "BTC"), ("name", "Bitcoin")]),
             ..Default::default()
         },
-        "calendar" => Feed {
-            value: Some(3.0),
-            rows: vec![row("Design review", "Today 2:00 PM", 0.0), row("1:1 with Sam", "Today 4:30 PM", 0.0), row("Dentist", "Tue 9:00 AM", 0.0), row("Sprint planning", "Tue 11:00 AM", 0.0)],
-            extra: [("next_title".to_string(), "Design review".to_string()), ("next_time".to_string(), "Today 2:00 PM".to_string()), ("next_minutes".to_string(), "42".to_string())].into(),
-            ..Default::default()
-        },
+        "calendar" => {
+            // Event times follow the real clock (in 42 minutes, then about three hours on),
+            // so previews agree with the clocks beside them.
+            let now = super::Now::get();
+            let tomorrow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][now.weekday as usize];
+            let at = |mins: u32| {
+                let t = now.hour * 60 + now.minute + mins;
+                let (day, t) = if t >= 24 * 60 { (tomorrow, t - 24 * 60) } else { ("Today", t) };
+                let (h, m) = (t / 60, t % 60);
+                format!("{day} {}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+            };
+            let first = at(42);
+            let second = at(180 + (30 - (now.minute + 180) % 30) % 30);
+            Feed {
+                value: Some(3.0),
+                rows: vec![row("Design review", &first, 0.0), row("1:1 with Sam", &second, 0.0), row("Dentist", &format!("{tomorrow} 9:00 AM"), 0.0), row("Sprint planning", &format!("{tomorrow} 11:00 AM"), 0.0)],
+                extra: [("next_title".to_string(), "Design review".to_string()), ("next_time".to_string(), first.clone()), ("next_minutes".to_string(), "42".to_string())].into(),
+                ..Default::default()
+            }
+        }
         "top_cpu" => Feed { value: Some(23.0), unit: "%".into(), rows: vec![row("Microsoft Edge", "8.4%", 0.36), row("Visual Studio Code", "5.1%", 0.22), row("Slack", "2.2%", 0.1), row("Windows Explorer", "0.9%", 0.04), row("Laminar Dock", "0.3%", 0.02)], ..Default::default() },
         "top_memory" => Feed {
             value: Some(14.2),

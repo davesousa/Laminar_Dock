@@ -88,7 +88,7 @@ Coffee beans
 Call the dentist".into();
         }
         let hub = hub;
-        let weather = sample_weather();
+        let weather = sample_weather(&Now::get());
         let stats = laminar_sys::stats::Stats { cpu_percent: 23.0, mem_used_gb: 21.3, mem_total_gb: 32.0, disk_c_used_percent: 74.0, net_down_bps: 2_400_000.0, net_up_bps: 310_000.0 };
         let control = crate::services::ControlState {
             volume: Some(0.42),
@@ -200,28 +200,48 @@ fn sample_screen(now: &Now) -> super::hub::ScreenTime {
     super::hub::ScreenTime { day: now.ymd(), apps: apps.iter().map(|(a, s)| (a.to_string(), *s)).collect(), hours }
 }
 
-fn sample_weather() -> laminar_sys::weather::Weather {
+/// Made-up weather that follows the real clock: the hourly forecast starts at the next full
+/// hour and the daily forecast at today, so previews agree with the clocks beside them.
+fn sample_weather(now: &Now) -> laminar_sys::weather::Weather {
+    // A day that warms to 21° at 3 PM and cools to 11° before dawn; clear after dark.
+    let temp_at = |h: u32| (16.0 + 5.0 * ((h as f32 - 15.0) * std::f32::consts::PI / 12.0).cos()).round();
+    let code_at = |h: u32| if (7..17).contains(&h) { if h < 15 { 2 } else { 1 } } else { 0 };
+    let hourly = (1..=8u32).map(|i| (now.hour + i) % 24).map(|h| (h as u8, temp_at(h), code_at(h))).collect();
+    // Today and the next six dates.
+    let mut dates = Vec::new();
+    let (mut y, mut m, mut d) = (now.year, now.month, now.day);
+    for _ in 0..7 {
+        dates.push(format!("{y:04}-{m:02}-{d:02}"));
+        d += 1;
+        if d > super::days_in_month(y, m) {
+            d = 1;
+            m += 1;
+            if m > 12 {
+                m = 1;
+                y += 1;
+            }
+        }
+    }
     laminar_sys::weather::Weather {
         temp_c: 17.0,
         code: 2,
         description: "Partly cloudy".into(),
         high_c: 21.0,
         low_c: 11.0,
-        // The next full hours after 13:20: warming to mid-afternoon, then clear and cooling.
-        hourly: [(14, 18.0, 2), (15, 18.0, 2), (16, 17.0, 1), (17, 15.0, 1), (18, 14.0, 0), (19, 13.0, 0), (20, 12.0, 0), (21, 12.0, 0)].to_vec(),
+        hourly,
         feels_c: 16.0,
         humidity: 62.0,
         wind_kmh: 14.0,
         uv: 4.0,
-        is_day: true,
+        is_day: (7..17).contains(&now.hour),
         sunrise: "07:02".into(),
         sunset: "16:58".into(),
         // Today, then a rainy midweek dip and a clear weekend.
         daily: [(21.0, 11.0, 2), (19.0, 10.0, 3), (16.0, 9.0, 61), (13.0, 6.0, 63), (12.0, 4.0, 3), (15.0, 7.0, 1), (17.0, 9.0, 0)]
             .iter()
-            .enumerate()
-            .map(|(i, (hi, lo, code))| (format!("2026-11-{:02}", 15 + i), *hi, *lo, *code))
+            .zip(dates)
+            .map(|((hi, lo, code), date)| (date, *hi, *lo, *code))
             .collect(),
-        now: "2026-11-15T13:20".into(),
+        now: format!("{}T{:02}:{:02}", now.ymd(), now.hour, now.minute),
     }
 }
