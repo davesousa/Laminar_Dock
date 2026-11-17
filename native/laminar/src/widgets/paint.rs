@@ -6588,106 +6588,313 @@ fn weather_waiting(c: &Canvas, out: &mut Painted, k: WeatherKind, x: &Ctx, sh: S
     }
 }
 
-/// For faces without data yet: the compact layout in the dock, a line of text in cards.
-fn compact_or_text(c: &Canvas, sh: Shape, vis: Vis, value: &str, caption: &str, text: &str) {
-    match sh {
-        Shape::Mini | Shape::Dock => compact_sum(c, &Sum::new(vis, value, caption), sh),
-        _ => {
-            c.tw(caption, 16.0, 16.0, 13.0, 600, c.text1(), c.w - 32.0);
-            c.text(text, 16.0, 40.0, 12.0, 400, c.text2(), Align::Left, c.w - 32.0, Font::Text);
-        }
+// ------------------------------------------------------------------ timers
+
+// Filled (solid) Segoe Fluent transport glyphs: the outline ones read as hollow boxes next
+// to album art and coloured buttons.
+const G_PLAY_FILL: &str = "\u{F5B0}";
+const G_PAUSE_FILL: &str = "\u{F8AE}";
+const G_PREV_FILL: &str = "\u{F8AC}";
+const G_NEXT_FILL: &str = "\u{F8AD}";
+const G_MIC_OFF: &str = "\u{F781}";
+const G_SPEAKERS: &str = "\u{E7F5}";
+const G_HEADPHONES: &str = "\u{E7F6}";
+
+/// A transport glyph centred on its ink. Outline transport glyphs are always drawn as
+/// their filled forms. A play triangle's mass sits left of its box centre, so it is nudged
+/// right to look centred in a circle.
+fn transport_glyph(c: &Canvas, g: &str, cx: f32, cy: f32, size: f32, ink: Col) {
+    let g = match g {
+        G_PLAY => G_PLAY_FILL,
+        G_PAUSE => G_PAUSE_FILL,
+        G_PREV => G_PREV_FILL,
+        G_NEXT => G_NEXT_FILL,
+        _ => g,
+    };
+    let dx = if g == G_PLAY_FILL { size * 0.08 } else { 0.0 };
+    c.glyph(g, cx + dx, cy, size, ink);
+}
+
+/// A round button: `fill`, a glyph at `GLYPH_IN` of its diameter, and a hit area of at
+/// least `HIT_MIN` centred on it.
+#[allow(clippy::too_many_arguments)]
+fn round_button(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, d: f32, fill: Col, g: &str, ink: Col, act: WAct) {
+    c.circle(cx, cy, d / 2.0, fill);
+    transport_glyph(c, g, cx, cy, d * style::GLYPH_IN, ink);
+    let hd = d.max(style::HIT_MIN);
+    out.hits.push(((cx - hd / 2.0, cy - hd / 2.0, hd, hd), act));
+}
+
+/// A clock time `offset` seconds from now: "3:42 PM".
+fn clock_at(n: &super::Now, offset: f32) -> String {
+    let t = (n.hour * 3600 + n.minute * 60 + n.second) as i64 + offset.round() as i64;
+    let t = t.rem_euclid(86_400);
+    let (h, m) = (t / 3600, t / 60 % 60);
+    format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+}
+
+/// "25 min", "1 h 30 min".
+fn minutes_str(secs: u32) -> String {
+    let m = (secs + 30) / 60;
+    if m >= 60 && m % 60 == 0 {
+        format!("{} h", m / 60)
+    } else if m >= 60 {
+        format!("{} h {} min", m / 60, m % 60)
+    } else {
+        format!("{m} min")
     }
 }
 
-// ------------------------------------------------------------------ timers
+/// Everything a timer face shows, worked out once for every size.
+struct TimerView {
+    /// Mode colour: Focus/Break red, Timer blue, Stopwatch orange.
+    col: Col,
+    /// The mode label ("Focus", "Break", "Timer", "Stopwatch", or "Done").
+    label: String,
+    time: String,
+    /// Ring/meter fill: time remaining (countdowns) or the current minute (stopwatch).
+    /// None for an idle stopwatch, which shows a dot at 12 o'clock instead.
+    frac: Option<f32>,
+    /// Dock caption: the mode when idle, "Ends 3:42 PM" / "Started 2:14 PM" while running.
+    dock_caption: String,
+    /// Small caption: "Ends 3:42 PM", "Paused" or "Ready".
+    caption: String,
+    /// Medium third line for the stopwatch ("Started 2:14 PM").
+    started: String,
+    /// Large: up to two (label, value) facts.
+    facts: Vec<(String, String)>,
+    /// What the primary button shows.
+    glyph: &'static str,
+    /// Light theme: the stopwatch's orange fill is too pale under a white glyph.
+    fill: Col,
+}
 
-fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
-    let (col, label, text, running, frac, done) = match k {
+fn timer_view(c: &Canvas, k: TimerKind, x: &Ctx) -> TimerView {
+    let n = &x.now;
+    match k {
         TimerKind::Stopwatch => {
-            let e = x.hub.stopwatch.elapsed().as_secs_f32();
-            (ORANGE, "Stopwatch".to_string(), hms(e), x.hub.stopwatch.start.is_some(), None, false)
+            let sw = &x.hub.stopwatch;
+            let e = sw.elapsed().as_secs_f32();
+            let running = sw.start.is_some();
+            let used = e >= 0.5;
+            let since = clock_at(n, -e);
+            let state = if running { "Running" } else if used { "Paused" } else { "Ready" };
+            let facts = if running {
+                vec![("Started".to_string(), since.clone()), ("Status".to_string(), state.to_string())]
+            } else if used {
+                vec![("Elapsed".to_string(), hms(e)), ("Status".to_string(), state.to_string())]
+            } else {
+                // A fact with no value is drawn as a footnote hint.
+                vec![("Status".to_string(), state.to_string()), ("Click play to start".to_string(), String::new())]
+            };
+            TimerView {
+                col: ORANGE,
+                label: "Stopwatch".into(),
+                time: hms(e),
+                frac: used.then(|| (e % 60.0) / 60.0),
+                dock_caption: if running { format!("Started {since}") } else if used { "Paused".into() } else { "Stopwatch".into() },
+                caption: if running { format!("Started {since}") } else { state.into() },
+                started: if running { format!("Started {since}") } else { state.into() },
+                facts,
+                glyph: if running { G_PAUSE_FILL } else { G_PLAY_FILL },
+                fill: if c.light { hex(0xF28A00) } else { ORANGE },
+            }
         }
         _ => {
             let t = &x.hub.timers[&k];
             let left = t.left();
-            let label = match (k, t.phase, t.done) {
-                (_, _, true) => "Done!".to_string(),
-                (TimerKind::Pomodoro, 0, _) => "Focus".to_string(),
-                (TimerKind::Pomodoro, _, _) => "Break".to_string(),
-                _ => "Timer".to_string(),
+            let running = t.running();
+            let paused = !running && !t.done && left < t.total as f32 - 0.5;
+            let pomodoro = k == TimerKind::Pomodoro;
+            let mode = match (pomodoro, t.phase) {
+                (true, 0) => "Focus",
+                (true, _) => "Break",
+                _ => "Timer",
             };
-            (if k == TimerKind::Pomodoro { RED } else { BLUE }, label, hms(left), t.running(), Some(1.0 - left / t.total.max(1) as f32), t.done)
+            let ends = clock_at(n, left);
+            let state = if t.done { "Done" } else if paused { "Paused" } else { "Ready" };
+            let length = minutes_str(t.total);
+            let facts = if pomodoro {
+                let next = if t.phase == 0 { "Break · 5 min" } else { "Focus · 25 min" };
+                vec![if running { ("Ends".to_string(), ends.clone()) } else { ("Length".to_string(), length) }, ("Next".to_string(), next.to_string())]
+            } else if running {
+                vec![("Ends".to_string(), ends.clone()), ("Length".to_string(), length)]
+            } else {
+                vec![("Length".to_string(), length), ("Status".to_string(), state.to_string())]
+            };
+            TimerView {
+                col: if pomodoro { RED } else { BLUE },
+                label: if t.done { "Done".into() } else { mode.into() },
+                time: hms(left),
+                frac: Some(if t.done { 1.0 } else { left / t.total.max(1) as f32 }),
+                dock_caption: if running {
+                    format!("Ends {ends}")
+                } else if t.done || paused {
+                    state.into()
+                } else {
+                    mode.into()
+                },
+                caption: if running { format!("Ends {ends}") } else { state.into() },
+                started: String::new(),
+                facts,
+                glyph: if t.done {
+                    G_RESET
+                } else if running {
+                    G_PAUSE_FILL
+                } else {
+                    G_PLAY_FILL
+                },
+                fill: if pomodoro { RED } else { BLUE },
+            }
         }
-    };
-    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Timer(k)));
-    let dense = matches!(sh, Shape::Mini | Shape::Dock);
-    if running || done {
-        c.rr_stroke(0.0, 0.0, c.w, c.h, if dense { 12.0 } else { 18.0 }, alpha(col, 0.9), 1.6);
     }
-    let play = if running { G_PAUSE } else { G_PLAY };
+}
+
+/// The timer ring: remaining time in the mode colour over the track; an idle stopwatch
+/// shows the track and a dot at 12 o'clock.
+fn timer_ring(c: &Canvas, v: &TimerView, cx: f32, cy: f32, d: f32, t: f32) {
+    let r = d / 2.0 - t / 2.0;
+    match v.frac {
+        Some(f) => c.ring(cx, cy, r, t, f, v.col),
+        None => {
+            c.circle_stroke(cx, cy, r, c.track(), t);
+            c.circle(cx, cy - r, t / 2.0, v.col);
+        }
+    }
+}
+
+/// The time as short as the inside of a Mini ring allows: "4:59" under ten minutes, whole
+/// minutes from ten ("25m": a countdown rounds up, so 24:10 left still reads "25m"), then
+/// hours ("1h05", or "2h" when that is too wide).
+fn mini_time(c: &Canvas, v: &TimerView, secs: f32, countdown: bool, size: f32, max_w: f32) -> String {
+    let s = secs.max(0.0);
+    if s < 600.0 {
+        return v.time.clone();
+    }
+    let mins = if countdown { (s / 60.0).ceil() as u32 } else { (s / 60.0).floor() as u32 };
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hm = format!("{}h{:02}", mins / 60, mins % 60);
+    if mins % 60 != 0 && c.measure(&hm, size, 600, Font::Text).0 <= max_w {
+        hm
+    } else {
+        format!("{}h", mins / 60)
+    }
+}
+
+/// The mode mark inside a dock ring when play lives in the accessory slot.
+const G_STOPWATCH: &str = "\u{E916}";
+
+/// Reset (secondary) and play (primary) buttons, right-aligned at `right`, 8 apart.
+#[allow(clippy::too_many_arguments)]
+fn timer_buttons(c: &Canvas, out: &mut Painted, k: TimerKind, v: &TimerView, right: f32, cy: f32, primary: f32, secondary: f32, gap: f32) {
+    let pcx = right - primary / 2.0;
+    let rcx = pcx - primary / 2.0 - gap - secondary / 2.0;
+    // Done: the primary button restarts, so a second reset button would only repeat it.
+    if v.glyph != G_RESET {
+        round_button(c, out, rcx, cy, secondary, c.plate(), G_RESET, c.text1(), WAct::TimerReset(k));
+    }
+    round_button(c, out, pcx, cy, primary, v.fill, v.glyph, WHITE, WAct::Timer(k));
+}
+
+fn timer(c: &Canvas, out: &mut Painted, k: TimerKind, x: &Ctx, sh: Shape) {
+    let v = timer_view(c, k, x);
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Timer(k)));
+    let secs = match k {
+        TimerKind::Stopwatch => x.hub.stopwatch.elapsed().as_secs_f32(),
+        _ => x.hub.timers[&k].left(),
+    };
     match sh {
         Shape::Mini => {
-            // A ring around the time.
-            let r = c.h * 0.42;
-            c.ring(c.w / 2.0, c.h / 2.0, r, 3.0, frac.unwrap_or(if running { 1.0 } else { 0.0 }), col);
-            let fs = fit(c, &text, c.h * 0.24, 7.0, 600, Font::Display, r * 1.6);
-            c.text(&text, c.w / 2.0, c.h / 2.0 - fs * 0.68, fs, 600, c.text1(), Align::Center, r * 2.0, Font::Display);
+            // A ring the size of an app icon, the time inside: identifiable by colour alone.
+            let kk = c.h / 54.0;
+            let d = 40.0 * kk;
+            let t = style::METER_H_COMPACT * kk;
+            let (cx, cy) = (c.w / 2.0, c.h / 2.0);
+            timer_ring(c, &v, cx, cy, d, t);
+            // At least 4 px of clear glass between the digits and the ring's inner edge.
+            let inner = d - 2.0 * t - 8.0 * kk;
+            let s = mini_time(c, &v, secs, k != TimerKind::Stopwatch, 11.0 * kk, inner);
+            let fs = fit_down(c, &s, 12.0 * kk, 11.0 * kk, 600, inner);
+            c.text_cap(&s, cx, cy - c.cap_h(fs) / 2.0, fs, 600, c.text1(), Align::Center, c.w * 2.0);
         }
         Shape::Dock => {
-            let r = c.h * 0.3;
-            let (cx, cy) = (c.h / 2.0, c.h / 2.0);
-            match frac {
-                Some(f) => c.ring(cx, cy, r, 3.5, f, col),
-                None => c.circle(cx, cy, r, alpha(col, 0.9)),
+            let kk = c.h / 54.0;
+            let m = style::M_DOCK * kk;
+            let d = style::BADGE_DOCK * kk;
+            let (cx, cy) = (m + d / 2.0, c.h / 2.0);
+            timer_ring(c, &v, cx, cy, d, 3.5 * kk);
+            // Dock L puts play in the accessory slot; Dock M plays from the ring.
+            let wide = c.w >= c.h * 3.4;
+            if wide {
+                // Play is in the slot; the ring keeps a mode mark so it reads as an icon.
+                c.glyph(G_STOPWATCH, cx, cy, 12.0 * kk, v.col);
+            } else {
+                transport_glyph(c, v.glyph, cx, cy, 12.0 * kk, v.col);
             }
-            c.glyph(play, cx, cy, r * 0.8, if frac.is_some() { col } else { WHITE });
-            let x0 = c.h * 0.96;
-            let vs = (c.h * 0.34).max(13.0);
-            let cs = (c.h * 0.19).max(9.5);
-            let top = (c.h - vs * 1.25 - cs * 1.3) / 2.0 - 1.0;
-            c.text(&text, x0, top, vs, 600, c.text1(), Align::Left, c.w - x0 - 6.0, Font::Display);
-            c.tw(&label, x0, top + vs * 1.25, cs, 400, c.text2(), c.w - x0 - 6.0);
+            let x0 = 52.0 * kk;
+            let slot_w = (c.w * 0.34).round();
+            let right = if wide { c.w - m - slot_w - style::SP[3] * kk } else { c.w - m };
+            let role = Type { size: style::VALUE.size * kk, min: style::VALUE.min * kk, ..style::VALUE };
+            let (val, fs) = fit_value(c, &v.time, role, right - x0);
+            c.text_base(&val, x0, 30.0 * kk, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            let cs = fit_down(c, &v.dock_caption, style::FOOT.size * kk, style::FOOT.min * kk, style::FOOT.weight, right - x0);
+            c.text_base(&v.dock_caption, x0, 44.0 * kk, cs, style::FOOT.weight, c.text2(), Align::Left, right - x0);
+            if wide {
+                timer_buttons(c, out, k, &v, c.w - m, cy, style::BTN_PRIMARY_DOCK * kk, style::BTN_SECONDARY_DOCK * kk, style::SP[3] * kk);
+            }
         }
         Shape::Small => {
-            c.tw(&label, 14.0, 12.0, 11.5, 600, col, c.w - 28.0);
-            let fs = fit(c, &text, 30.0, 16.0, 400, Font::Display, c.w - 28.0);
-            c.text(&text, 14.0, 28.0, fs, 400, c.text1(), Align::Left, c.w - 28.0, Font::Display);
-            let r = 16.0;
-            let (bx, by) = (c.w - 12.0 - r, c.h - 10.0 - r);
-            c.circle(bx, by, r, col);
-            c.glyph(play, bx, by, 13.0, WHITE);
-            let rx = bx - r - 20.0;
-            c.circle(rx, by, 13.0, c.ink(0.12));
-            c.glyph(G_RESET, rx, by, 10.0, c.text1());
-            out.hits.push(((rx - 14.0, by - 14.0, 28.0, 28.0), WAct::TimerReset(k)));
+            let m = style::M_SMALL;
+            c.text_cap(&v.label, m, 16.0, style::MICRO.size, style::MICRO.weight, v.col, Align::Left, c.w - 2.0 * m);
+            let role = Type { weight: style::time_weight(style::HERO_S.size), ..style::HERO_S };
+            let (t, fs) = fit_value(c, &v.time, role, c.w - 2.0 * m);
+            c.text_base(&t, m, 52.0, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(&v.caption, m, 70.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+            let p = style::BTN_PRIMARY_SMALL;
+            timer_buttons(c, out, k, &v, c.w - m, c.h - m - p / 2.0, p, style::BTN_SECONDARY_SMALL, style::SP[3]);
         }
         Shape::Medium => {
-            c.tw(&label, 18.0, 16.0, 12.0, 600, col, 140.0);
-            c.text(&text, 18.0, 34.0, 38.0, 400, c.text1(), Align::Left, c.w * 0.6, Font::Display);
-            let r = 22.0;
-            let (bx, by) = (c.w - 18.0 - r, c.h / 2.0);
-            c.circle(bx, by, r, col);
-            c.glyph(play, bx, by, 16.0, WHITE);
-            let (rx, ry) = (bx - r - 26.0, by);
-            c.circle(rx, ry, 15.0, c.ink(0.12));
-            c.glyph(G_RESET, rx, ry, 12.0, c.text1());
-            out.hits.push(((rx - 16.0, ry - 16.0, 32.0, 32.0), WAct::TimerReset(k)));
+            let m = style::M_CARD;
+            c.text_cap(&v.label, m, m, style::MICRO.size, style::MICRO.weight, v.col, Align::Left, 140.0);
+            let role = Type { weight: style::time_weight(style::HERO.size), ..style::HERO };
+            let (t, fs) = fit_value(c, &v.time, role, 160.0);
+            c.text_base(&t, m, 58.0, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            match (k, v.frac) {
+                (TimerKind::Stopwatch, _) => {
+                    c.text_base(&v.started, m, 76.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, 140.0);
+                }
+                (_, Some(f)) => c.bar(m, 70.0, 124.0, style::METER_H, f, v.col),
+                _ => {}
+            }
+            timer_buttons(c, out, k, &v, c.w - m, c.h / 2.0, style::BTN_PRIMARY, style::BTN_SECONDARY, style::SP[3]);
         }
         Shape::Large => {
-            // A big ring with the time inside, buttons under it.
-            // Card padding (16) above the ring and below the buttons, like the other cards.
-            let r = ((c.h - 92.0) / 2.0).min(c.w / 2.0 - 30.0);
-            let (cx, cy) = (c.w / 2.0, 20.0 + r);
-            c.ring(cx, cy, r, 7.0, frac.unwrap_or(0.0), col);
-            c.tc(&label, cx, cy - 34.0, 12.0, 600, col, 2.0 * r);
-            let fs = fit(c, &text, 34.0, 16.0, 400, Font::Display, 2.0 * r - 24.0);
-            c.text(&text, cx, cy - fs * 0.62, fs, 400, c.text1(), Align::Center, 2.0 * r, Font::Display);
-            let by = c.h - 34.0;
-            c.circle(cx + 26.0, by, 18.0, col);
-            c.glyph(play, cx + 26.0, by, 14.0, WHITE);
-            c.circle(cx - 26.0, by, 18.0, c.ink(0.12));
-            c.glyph(G_RESET, cx - 26.0, by, 12.0, c.text1());
-            out.hits.push(((cx - 46.0, by - 20.0, 40.0, 40.0), WAct::TimerReset(k)));
+            // A ring with the time inside on the left, facts and controls on the right.
+            let m = style::M_CARD;
+            let d = 120.0;
+            let t = (d * style::RING_T).max(3.0);
+            let (cx, cy) = (m + d / 2.0, c.h / 2.0);
+            timer_ring(c, &v, cx, cy, d, t);
+            let role = Type { weight: style::time_weight(style::HERO.size), ..style::HERO };
+            let (tm, fs) = fit_value(c, &v.time, role, d - 2.0 * t - style::SP[5]);
+            let (lc, hc) = (c.cap_h(style::MICRO.size), c.cap_h(fs));
+            let top = cy - (lc + style::SP[3] + hc) / 2.0;
+            c.text_cap(&v.label, cx, top, style::MICRO.size, style::MICRO.weight, v.col, Align::Center, d);
+            c.text_cap(&tm, cx, top + lc + style::SP[3], fs, role.weight, c.text1(), Align::Center, c.w * 2.0);
+            let (fx, fw) = (152.0, c.w - m - 152.0);
+            for (i, (label, value)) in v.facts.iter().take(2).enumerate() {
+                let lb = 52.0 + i as f32 * 48.0;
+                if value.is_empty() {
+                    c.text_base(label, fx, lb, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, fw);
+                    continue;
+                }
+                c.text_base(label, fx, lb, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, fw);
+                let (val, vs) = fit_value(c, value, style::VALUE, fw);
+                c.text_base(&val, fx, lb + 22.0, vs, style::VALUE.weight, c.text1(), Align::Left, c.w * 2.0);
+            }
+            timer_buttons(c, out, k, &v, c.w - m, c.h - m - style::BTN_PRIMARY / 2.0, style::BTN_PRIMARY, style::BTN_SECONDARY, style::SP[3]);
         }
     }
 }
@@ -6700,178 +6907,939 @@ fn art_src(x: &Ctx, wic: &IWICImagingFactory) -> Option<IWICBitmapSource> {
 }
 
 fn art(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, ax: f32, ay: f32, s: f32, r: f32) {
+    art_note(c, x, wic, ax, ay, s, r, true);
+}
+
+/// The art; without a cover, a gradient tile with a music note (left off under the
+/// paused overlay, where the two glyphs would collide).
+#[allow(clippy::too_many_arguments)]
+fn art_note(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, ax: f32, ay: f32, s: f32, r: f32, note: bool) {
     match art_src(x, wic) {
-        Some(img) => c.image(&img, ax, ay, s, s, r),
+        Some(img) => {
+            c.image(&img, ax, ay, s, s, r);
+            // Pale covers need an edge on light glass.
+            if c.light {
+                c.rr_stroke(ax, ay, s, s, r, c.card_edge(), 1.0);
+            }
+        }
         None => {
             c.rr_grad(ax, ay, s, s, r, hex(0xFF5F6D), hex(0xC2185B));
-            c.glyph(G_MUSIC, ax + s / 2.0, ay + s / 2.0, s * 0.42, (1.0, 1.0, 1.0, 0.95));
+            if note {
+                c.glyph(G_MUSIC, ax + s / 2.0, ay + s / 2.0, s * 0.42, (1.0, 1.0, 1.0, 0.95));
+            }
         }
     }
 }
 
-fn controls(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, gap: f32, playing: bool) {
-    for (i, (g, a)) in [(G_PREV, WAct::MediaPrev), (if playing { G_PAUSE } else { G_PLAY }, WAct::MediaPlay), (G_NEXT, WAct::MediaNext)].into_iter().enumerate() {
-        let x = cx + (i as f32 - 1.0) * gap;
-        c.glyph(g, x, cy, if i == 1 { 18.0 } else { 14.0 }, c.text1());
-        out.hits.push(((x - 16.0, cy - 16.0, 32.0, 32.0), a));
+/// The transport row as bare glyphs (prev, play/pause, next) at the given centres. `dim`
+/// draws it at 0.35 and inert, for when nothing is playing.
+#[allow(clippy::too_many_arguments)]
+fn controls(c: &Canvas, out: &mut Painted, xs: [f32; 3], cy: f32, sizes: [f32; 3], playing: bool, dim: bool) {
+    let play = if playing { G_PAUSE_FILL } else { G_PLAY_FILL };
+    let ink = if dim { alpha(c.text1(), 0.35) } else { c.text1() };
+    for (i, (g, a)) in [(G_PREV_FILL, WAct::MediaPrev), (play, WAct::MediaPlay), (G_NEXT_FILL, WAct::MediaNext)].into_iter().enumerate() {
+        transport_glyph(c, g, xs[i], cy, sizes[i], ink);
+        if !dim {
+            let hd = style::HIT_MIN;
+            out.hits.push(((xs[i] - hd / 2.0, cy - hd / 2.0, hd, hd), a));
+        }
+    }
+}
+
+/// A plate button drawn at 0.35 with no hit of its own: the idle stand-in for a control.
+fn dim_plate(c: &Canvas, cx: f32, cy: f32, d: f32, g: &str) {
+    c.circle(cx, cy, d / 2.0, alpha(c.plate(), 0.35));
+    transport_glyph(c, g, cx, cy, d * style::GLYPH_IN, alpha(c.text1(), 0.35));
+}
+
+/// The muted red. Light theme takes the deeper red so white text on it reaches 4.5:1.
+fn mute_red(c: &Canvas) -> Col {
+    if c.light {
+        hex(0xD70015)
+    } else {
+        RED
+    }
+}
+
+/// What the media faces show, worked out once for every size.
+#[derive(Clone)]
+struct Track {
+    title: String,
+    artist: String,
+    album: String,
+    /// The source app's display name ("Spotify"), or empty.
+    source: String,
+    playing: bool,
+    /// Nothing is playing: the faces show a calm "Not playing" state.
+    idle: bool,
+}
+
+impl Track {
+    /// The supporting line under the artist: the album, else the source app, else the
+    /// playback state, so a Medium always has its third layer.
+    fn third(&self) -> String {
+        if !self.album.is_empty() {
+            self.album.clone()
+        } else if !self.source.is_empty() {
+            self.source.clone()
+        } else {
+            self.verb().into()
+        }
+    }
+    fn verb(&self) -> &'static str {
+        if self.playing {
+            "Playing"
+        } else {
+            "Paused"
+        }
+    }
+    /// "Playing in Spotify" / "Paused in Spotify"; without a source, "Paused" or nothing.
+    fn where_line(&self) -> String {
+        if self.source.is_empty() {
+            if self.playing {
+                String::new()
+            } else {
+                "Paused".into()
+            }
+        } else {
+            format!("{} in {}", self.verb(), self.source)
+        }
+    }
+    /// Like `where_line`, but never empty: "Playing" / "Paused" without a source.
+    fn status_line(&self) -> String {
+        if self.source.is_empty() {
+            self.verb().into()
+        } else {
+            self.where_line()
+        }
+    }
+}
+
+/// The source app's display name from its AppUserModelID or exe name.
+fn source_app(id: &str) -> String {
+    let s = id.rsplit('!').next().unwrap_or(id);
+    let s = s.rsplit(['\\', '/']).next().unwrap_or(s);
+    let s = s.strip_suffix(".exe").or_else(|| s.strip_suffix(".EXE")).unwrap_or(s);
+    let s = s.split('_').next().unwrap_or(s);
+    let s = s.rsplit('.').next().unwrap_or(s).trim();
+    // Some apps register a hash as their id; it means nothing to people.
+    if s.is_empty() || (s.len() >= 12 && s.chars().all(|ch| ch.is_ascii_hexdigit())) {
+        return String::new();
+    }
+    match s.to_ascii_lowercase().as_str() {
+        "msedge" => "Edge".into(),
+        "chrome" => "Chrome".into(),
+        "firefox" => "Firefox".into(),
+        "zunemusic" | "mediaplayer" => "Media Player".into(),
+        "spotify" | "spotifymusic" => "Spotify".into(),
+        "vlc" => "VLC".into(),
+        _ => {
+            let mut ch = s.chars();
+            ch.next().map(|f| f.to_uppercase().collect::<String>() + ch.as_str()).unwrap_or_default()
+        }
+    }
+}
+
+/// The progress of the current track (elapsed, length) in seconds, when the source app
+/// reports a timeline. `NowPlaying` doesn't carry one yet, so the Bar face falls back to a
+/// level glyph; this is the one place to wire it up.
+fn timeline(_m: &Track) -> Option<(f32, f32)> {
+    None
+}
+
+/// "1:23".
+fn mmss(secs: f32) -> String {
+    let s = secs.max(0.0).round() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// The art, or (nothing playing) a plate-coloured tile with a music note.
+#[allow(clippy::too_many_arguments)]
+fn art_or_idle(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, t: &Track, ax: f32, ay: f32, s: f32, r: f32) {
+    if t.idle {
+        c.rr(ax, ay, s, s, r, c.plate());
+        c.glyph(G_MUSIC, ax + s / 2.0, ay + s / 2.0, (s * style::GLYPH_IN).min(24.0), c.text3());
+    } else {
+        art(c, x, wic, ax, ay, s, r);
+    }
+}
+
+/// A record: black vinyl with grooves, a coloured label (grey when nothing plays) and a
+/// spindle. With album art, the art is the record's face.
+#[allow(clippy::too_many_arguments)]
+fn record(c: &Canvas, x: &Ctx, wic: &IWICImagingFactory, t: &Track, cx: f32, cy: f32, d: f32, cover: bool) {
+    let r = d / 2.0;
+    if cover && !t.idle && art_src(x, wic).is_some() {
+        art(c, x, wic, cx - r, cy - r, d, r);
+    } else {
+        c.circle(cx, cy, r, (0.07, 0.07, 0.08, 1.0));
+        let gt = if d >= 80.0 { 1.0 } else { 0.75 };
+        for k in 1..5 {
+            c.circle_stroke(cx, cy, r * (0.48 + k as f32 * 0.11), (1.0, 1.0, 1.0, 0.07), gt);
+        }
+        let l = d * 0.38;
+        if t.idle {
+            c.circle(cx, cy, l / 2.0, hex(0x8E8E93));
+        } else {
+            c.rr_grad(cx - l / 2.0, cy - l / 2.0, l, l, l / 2.0, hex(0xFF5F6D), hex(0xC2185B));
+        }
+    }
+    c.circle_stroke(cx, cy, r - 0.5, (1.0, 1.0, 1.0, 0.18), 1.0);
+    c.circle(cx, cy, (d * 0.04).max(1.5), (0.1, 0.1, 0.12, 1.0));
+}
+
+/// Paused, on a face without its own play button: a filled play glyph on a dark scrim.
+fn paused_overlay(c: &Canvas, cx: f32, cy: f32, d: f32) {
+    c.circle(cx, cy, d / 2.0, (0.0, 0.0, 0.0, 0.35));
+    transport_glyph(c, G_PLAY_FILL, cx, cy, d * 0.5, WHITE);
+}
+
+/// A secondary (plate) play/pause button.
+fn play_plate(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, d: f32, playing: bool) {
+    round_button(c, out, cx, cy, d, c.plate(), if playing { G_PAUSE_FILL } else { G_PLAY_FILL }, c.text1(), WAct::MediaPlay);
+}
+
+/// The primary play/pause button: a text1 disc with a card-coloured glyph.
+fn play_primary(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, d: f32, playing: bool, a: f32) {
+    let g = if playing { G_PAUSE_FILL } else { G_PLAY_FILL };
+    c.circle(cx, cy, d / 2.0, alpha(c.text1(), a));
+    transport_glyph(c, g, cx, cy, d * style::GLYPH_IN, c.halo());
+    if a >= 1.0 {
+        let hd = d.max(style::HIT_MIN);
+        out.hits.push(((cx - hd / 2.0, cy - hd / 2.0, hd, hd), WAct::MediaPlay));
+    }
+}
+
+/// The Large transport row: prev and next plates (28) either side of the primary play (36),
+/// centres `gap` apart. Dimmed and inert when nothing is playing.
+fn transport_row(c: &Canvas, out: &mut Painted, cx: f32, cy: f32, gap: f32, t: &Track) {
+    let a = if t.idle { 0.35 } else { 1.0 };
+    let s = style::BTN_SECONDARY;
+    for (dx, g, act) in [(-gap, G_PREV_FILL, WAct::MediaPrev), (gap, G_NEXT_FILL, WAct::MediaNext)] {
+        c.circle(cx + dx, cy, s / 2.0, alpha(c.plate(), a));
+        transport_glyph(c, g, cx + dx, cy, s * style::GLYPH_IN, alpha(c.text1(), a));
+        if !t.idle {
+            out.hits.push(((cx + dx - s / 2.0, cy - s / 2.0, s, s), act));
+        }
+    }
+    play_primary(c, out, cx, cy, style::BTN_PRIMARY, t.playing, a);
+}
+
+/// A calm three-bar level mark (text2) with its bottom on `base`, while playing.
+fn level_glyph(c: &Canvas, x0: f32, base: f32, playing: bool, kk: f32) {
+    // Paused, three flat bars would read as an ellipsis: show nothing.
+    if !playing {
+        return;
+    }
+    let hs = [6.0, 10.0, 7.5];
+    for (i, h) in hs.iter().enumerate() {
+        c.rr(x0 + i as f32 * 4.0 * kk, base - h * kk, 2.5 * kk, h * kk, 1.25 * kk, c.text2());
+    }
+}
+const LEVEL_W: f32 = 10.5;
+
+/// A title that must not be cut: up to `lines` lines at the role's size, shrinking toward
+/// its minimum before anything is ellipsized. Returns the lines and the size.
+fn wrap_title(c: &Canvas, s: &str, role: Type, max_w: f32, lines: usize) -> (Vec<String>, f32) {
+    let greedy = |size: f32| {
+        let mut out: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for word in s.split_whitespace() {
+            let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
+            if cur.is_empty() || c.measure(&cand, size, role.weight, Font::Text).0 <= max_w {
+                cur = cand;
+            } else {
+                out.push(std::mem::replace(&mut cur, word.to_string()));
+            }
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
+    };
+    let mut size = role.size;
+    loop {
+        let ls = greedy(size);
+        let fits = ls.len() <= lines && ls.iter().all(|l| c.measure(l, size, role.weight, Font::Text).0 <= max_w);
+        if fits || size <= role.min {
+            let mut ls = ls;
+            if ls.len() > lines {
+                let rest = ls.split_off(lines - 1).join(" ");
+                ls.push(rest);
+            }
+            return (ls, size);
+        }
+        size = (size - 0.5).max(role.min);
+    }
+}
+
+/// The largest size from `start` down to `min` at which `s` fits `max_w`, measured at each
+/// step: below 12 px the text switches to the wider Small optical size, so a linear guess
+/// overshoots.
+fn fit_down(c: &Canvas, s: &str, start: f32, min: f32, weight: u32, max_w: f32) -> f32 {
+    let mut size = fit(c, s, start, min, weight, Font::Text, max_w);
+    while size > min && c.measure(s, size, weight, Font::Text).0 > max_w {
+        size = (size - 0.25).max(min);
+    }
+    size
+}
+
+/// `s` cut at a word boundary to fit `max_w`, with an ellipsis; a single over-long word is
+/// left to the layout's own trimming.
+fn word_cut(c: &Canvas, s: &str, size: f32, weight: u32, max_w: f32) -> String {
+    let words: Vec<&str> = s.split_whitespace().collect();
+    for n in (1..words.len()).rev() {
+        let cand = format!("{}\u{2026}", words[..n].join(" "));
+        if c.measure(&cand, size, weight, Font::Text).0 <= max_w {
+            return cand;
+        }
+    }
+    s.to_string()
+}
+
+/// Title and artist for the dock pills. The title fits from 13 down to 11 on one line, with
+/// the artist under it. When that is still too wide (the 76 px column of Dock M), the title
+/// takes both lines at 13 → 11 and the artist gives way: the art already carries the track.
+/// A title too long even for two lines keeps its whole first line and is cut on the second
+/// (at a word boundary when one fits), so it never shrinks to a stub like "The Long…".
+fn dock_track_text(c: &Canvas, t: &Track, x0: f32, right: f32, kk: f32) {
+    let w = right - x0;
+    let (top, min) = (style::TITLE.size * kk, style::TITLE.min * kk);
+    let fs = fit_down(c, &t.title, top, min, style::TITLE.weight, w);
+    if c.measure(&t.title, fs, style::TITLE.weight, Font::Text).0 <= w {
+        c.text_base(&t.title, x0, 25.0 * kk, fs, style::TITLE.weight, c.text1(), Align::Left, w);
+        c.text_base(&t.artist, x0, 39.0 * kk, style::FOOT.size * kk, style::FOOT.weight, c.text2(), Align::Left, w);
+        return;
+    }
+    let role = Type { size: top, min, ..style::TITLE };
+    let (mut lines, fs) = wrap_title(c, &t.title, role, w, 2);
+    if lines.len() == 2 && c.measure(&lines[1], fs, style::TITLE.weight, Font::Text).0 > w {
+        lines[1] = word_cut(c, &lines[1], fs, style::TITLE.weight, w);
+    }
+    let pitch = (fs * 1.25).round();
+    let n = lines.len() as f32;
+    let b0 = (c.h + c.cap_h(fs) - pitch * (n - 1.0)) / 2.0;
+    for (i, l) in lines.iter().enumerate() {
+        // The layout trims a single over-long word itself, with an ellipsis.
+        c.text_base(l, x0, b0 + i as f32 * pitch, fs, style::TITLE.weight, c.text1(), Align::Left, w);
+    }
+}
+
+/// Title (fitted), artist and an optional third line from `base`, for card layouts.
+#[allow(clippy::too_many_arguments)]
+fn card_track_text(c: &Canvas, t: &Track, x0: f32, w: f32, title_base: f32, artist_base: f32, artist_size: f32, third: Option<(f32, String)>) {
+    let fs = fit_down(c, &t.title, style::TITLE.size, style::TITLE.min, style::TITLE.weight, w);
+    c.text_base(&t.title, x0, title_base, fs, style::TITLE.weight, c.text1(), Align::Left, w);
+    c.text_base(&t.artist, x0, artist_base, artist_size, 400, c.text2(), Align::Left, w);
+    if let Some((b, s)) = third {
+        c.text_base(&s, x0, b, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, w);
+    }
+}
+
+/// Large: title 17/600 (up to two lines), artist 13 text2 and album 12 text3 in a column
+/// whose first capitals sit at `cap_top`.
+#[allow(clippy::too_many_arguments)]
+fn large_track_text(c: &Canvas, t: &Track, x0: f32, w: f32, cap_top: f32, third: &str, max_lines: usize) {
+    let (lines, fs) = wrap_title(c, &t.title, style::VALUE, w, max_lines);
+    let mut base = cap_top + c.cap_h(fs);
+    for (i, l) in lines.iter().enumerate() {
+        if i > 0 {
+            base += (fs * 1.2).round();
+        }
+        c.text_base(l, x0, base, fs, style::VALUE.weight, c.text1(), Align::Left, w);
+    }
+    base += style::SP[7];
+    c.text_base(&t.artist, x0, base, style::BODY.size, 400, c.text2(), Align::Left, w);
+    if !third.is_empty() {
+        base += 17.0;
+        c.text_base(third, x0, base, style::CAPTION.size, 400, c.text3(), Align::Left, w);
     }
 }
 
 fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImagingFactory, sh: Shape) {
-    let m = x.control.media.as_ref();
-    let (title, artist, playing) = match m {
-        Some(m) => (m.title.clone(), m.artist.clone(), m.playing),
-        None => ("Nothing playing".to_string(), String::new(), false),
-    };
-    let dense = matches!(sh, Shape::Mini | Shape::Dock);
     match k {
-        MediaKind::Output => {
-            let vol = x.control.volume.unwrap_or(0.0);
-            let muted = x.control.muted == Some(true);
-            let g = if muted { G_MUTE } else { G_VOL };
-            let pct = format!("{:.0}%", vol * 100.0);
-            let dev = x.hub.output_name.clone().unwrap_or_else(|| "Sound".into());
-            if dense {
-                let mut s = Sum::new(Vis::Glyph(g, c.text1()), pct, dev);
-                s.meter = Some((vol, BLUE));
-                compact_sum(c, &s, sh);
-                out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mute));
-                return;
-            }
-            let small = sh == Shape::Small;
-            c.glyph(g, 26.0, 26.0, 16.0, c.text1());
-            out.hits.push(((10.0, 10.0, 32.0, 32.0), WAct::Mute));
-            c.tw(if small { "Sound" } else { &dev }, 46.0, 17.0, 12.5, 600, c.text1(), c.w - 100.0);
-            c.tr(&pct, c.w - 16.0, 17.0, 12.0, 500, c.text2());
-            let (bx, bw, bh) = (16.0, c.w - 32.0, 24.0);
-            let by = if sh == Shape::Large { c.h / 2.0 - bh / 2.0 } else { c.h - bh - 16.0 };
-            c.rr(bx, by, bw, bh, bh / 2.0, c.ink(0.12));
-            c.rr(bx, by, (bw * vol).max(bh), bh, bh / 2.0, if muted { c.ink(0.3) } else { BLUE });
-            out.hits.push(((bx, by - 4.0, bw, bh + 8.0), WAct::Volume));
-            if small {
-                c.tw(&dev, 16.0, 48.0, 10.5, 400, c.text3(), c.w - 32.0);
-            }
-            return;
-        }
-        MediaKind::Mic => {
-            let muted = x.hub.mic_muted == Some(true);
-            tile_sub(c, out, G_MIC, "Microphone", if muted { "Muted" } else { "On" }, muted, RED, WAct::Mic, dense);
-            if muted {
-                // A slash across the plate's microphone.
-                let (cx, cy, s) = plate_center(c, dense);
-                c.line(cx - s * 0.2, cy - s * 0.2, cx + s * 0.2, cy + s * 0.2, 2.0, WHITE);
-            }
-            return;
-        }
+        MediaKind::Output => return output_face(c, out, x, sh),
+        MediaKind::Mic => return mic_face(c, out, x, sh),
         _ => {}
     }
+    let t = match x.control.media.as_ref() {
+        Some(m) => Track { title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), source: source_app(&m.app_id), playing: m.playing, idle: false },
+        None => Track { title: "Not playing".into(), artist: String::new(), album: String::new(), source: String::new(), playing: false, idle: true },
+    };
+    // The Disc draws its own card on the Launchpad (the dock pill's comes from paint()).
+    if k == MediaKind::Disc && !matches!(sh, Shape::Mini | Shape::Dock) {
+        bg(c, false);
+    }
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::MediaPlay));
-    if m.is_none() {
-        if !dense && k == MediaKind::Disc {
-            bg(c, false);
-        }
-        compact_or_text(c, sh, Vis::Glyph(G_MUSIC, c.text3()), if sh == Shape::Mini { "" } else { "Not playing" }, "Nothing playing", "Play something in any app to control it here.");
-        return;
-    }
-    if k == MediaKind::Disc {
-        if !dense {
-            bg(c, false);
-        }
-        let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
-        let (ax, ay) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
-        let (cx, cy) = (c.w / 2.0, c.h / 2.0);
-        if art_src(x, wic).is_some() {
-            art(c, x, wic, ax, ay, s, s / 2.0);
-        } else {
-            // No cover: a record, with grooves and a coloured label.
-            c.circle(cx, cy, s / 2.0, (0.07, 0.07, 0.08, 1.0));
-            for k in 1..5 {
-                c.circle_stroke(cx, cy, s / 2.0 * (0.48 + k as f32 * 0.11), (1.0, 1.0, 1.0, 0.06), 1.0);
-            }
-            c.rr_grad(cx - s * 0.19, cy - s * 0.19, s * 0.38, s * 0.38, s * 0.19, hex(0xFF5F6D), hex(0xC2185B));
-        }
-        c.circle_stroke(cx, cy, s / 2.0 - 0.5, (1.0, 1.0, 1.0, 0.2), 1.0);
-        if playing {
-            c.circle(cx, cy, (s * 0.05).max(2.0), (0.1, 0.1, 0.12, 1.0));
-        } else {
-            // Paused: a clear play button where the spindle would be.
-            c.circle(cx, cy, s * 0.17, (0.0, 0.0, 0.0, 0.55));
-            c.glyph(G_PLAY, cx + s * 0.01, cy, s * 0.15, WHITE);
-        }
-        return;
-    }
     match sh {
         Shape::Mini => {
-            let s = c.h - 8.0;
-            art(c, x, wic, (c.w - s) / 2.0, 4.0, s, 9.0);
-            if !playing {
-                c.glyph(G_PLAY, c.w / 2.0, c.h / 2.0, s * 0.3, WHITE);
+            let kk = c.h / 54.0;
+            let s = 40.0 * kk;
+            let (cx, cy) = (c.w / 2.0, c.h / 2.0);
+            if k == MediaKind::Disc {
+                record(c, x, wic, &t, cx, cy, s, true);
+            } else if t.idle {
+                c.rr(cx - s / 2.0, cy - s / 2.0, s, s, style::concentric(style::DOCK_R, style::M_MINI) * kk, c.plate());
+                c.glyph(G_MUSIC, cx, cy, 18.0 * kk, c.text3());
+            } else {
+                art_note(c, x, wic, cx - s / 2.0, cy - s / 2.0, s, style::concentric(style::DOCK_R, style::M_MINI) * kk, t.playing);
+            }
+            if !t.idle && !t.playing {
+                paused_overlay(c, cx, cy, 22.0 * kk);
             }
         }
         Shape::Dock => {
-            let s = c.h - 10.0;
-            art(c, x, wic, 5.0, 5.0, s, 8.0);
-            let tx = s + 12.0;
-            let room = if c.w > c.h * 3.2 { c.w - tx - 34.0 } else { c.w - tx - 6.0 };
-            c.tw(&title, tx, c.h * 0.16, (c.h * 0.24).max(10.5), 600, c.text1(), room);
-            c.tw(&artist, tx, c.h * 0.52, (c.h * 0.2).max(9.5), 400, c.text2(), room);
-            if c.w > c.h * 3.2 {
-                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 18.0, c.h / 2.0, 13.0, c.text1());
+            let kk = c.h / 54.0;
+            let m = style::M_DOCK * kk;
+            let wide = c.w >= c.h * 3.4;
+            let slot_w = (c.w * 0.34).round();
+            let slot_x = c.w - m - slot_w;
+            let s = 42.0 * kk;
+            let a0 = 6.0 * kk;
+            let pd = style::BTN_SECONDARY_DOCK * kk;
+            if t.idle {
+                // The Disc keeps its grey-label record, as on the Mini; the others a plate.
+                let x0 = if k == MediaKind::Disc {
+                    record(c, x, wic, &t, a0 + s / 2.0, c.h / 2.0, s, true);
+                    56.0 * kk
+                } else {
+                    let p = style::BADGE_DOCK * kk;
+                    c.rr(m, (c.h - p) / 2.0, p, p, p * style::BADGE_R, c.plate());
+                    c.glyph(G_MUSIC, m + p / 2.0, c.h / 2.0, p * style::GLYPH_IN, c.text3());
+                    52.0 * kk
+                };
+                // Dock L keeps its slot: the control it will hold, dimmed.
+                let cy = c.h / 2.0;
+                let mut right = c.w - m;
+                if wide {
+                    let pcx = if k == MediaKind::Full {
+                        let ns = 14.0 * kk;
+                        let ncx = c.w - m - ns / 2.0;
+                        transport_glyph(c, G_NEXT_FILL, ncx, cy, ns, alpha(c.text1(), 0.35));
+                        ncx - ns / 2.0 - style::SP[3] * kk - pd / 2.0
+                    } else {
+                        c.w - m - pd / 2.0
+                    };
+                    dim_plate(c, pcx, cy, pd, G_PLAY_FILL);
+                    right = pcx - pd / 2.0 - style::SP[3] * kk;
+                }
+                c.text_base("Not playing", x0, 30.0 * kk, style::TITLE.size * kk, style::TITLE.weight, c.text1(), Align::Left, right - x0);
+                let hint = "Play in any app";
+                let fs = fit_down(c, hint, style::FOOT.size * kk, style::FOOT.min * kk, style::FOOT.weight, right - x0);
+                c.text_base(hint, x0, 44.0 * kk, fs, style::FOOT.weight, c.text2(), Align::Left, right - x0);
+                return;
+            }
+            if k == MediaKind::Disc {
+                record(c, x, wic, &t, a0 + s / 2.0, c.h / 2.0, s, true);
+            } else {
+                art_note(c, x, wic, a0, a0, s, style::R_MIN * kk, t.playing || wide);
+            }
+            let x0 = 56.0 * kk;
+            // The slot is only as wide as what it holds, so the title keeps its room.
+            let used = match (k, timeline(&t)) {
+                (MediaKind::Full, _) => pd + style::SP[3] * kk + 14.0 * kk,
+                (MediaKind::Bar, Some(_)) => slot_w,
+                (MediaKind::Bar, None) => pd + style::SP[3] * kk + LEVEL_W * kk,
+                _ => pd,
+            };
+            let right = if wide { c.w - m - used - style::SP[3] * kk } else { c.w - 8.0 * kk };
+            dock_track_text(c, &t, x0, right, kk);
+            if !wide {
+                if !t.playing {
+                    paused_overlay(c, a0 + s / 2.0, c.h / 2.0, 22.0 * kk);
+                }
+                return;
+            }
+            let cy = c.h / 2.0;
+            match k {
+                MediaKind::Full => {
+                    let ns = 14.0 * kk;
+                    let ncx = c.w - m - ns / 2.0;
+                    transport_glyph(c, G_NEXT_FILL, ncx, cy, ns, c.text1());
+                    out.hits.push(((ncx - 14.0 * kk, cy - 14.0 * kk, 28.0 * kk, 28.0 * kk), WAct::MediaNext));
+                    play_plate(c, out, ncx - ns / 2.0 - style::SP[3] * kk - pd / 2.0, cy, pd, t.playing);
+                }
+                MediaKind::Bar => match timeline(&t) {
+                    Some((pos, len)) => {
+                        let f = (pos / len.max(1.0)).clamp(0.0, 1.0);
+                        c.text_base(&mmss(pos), c.w - m, 26.0 * kk, style::FOOT.size * kk, 500, c.text2(), Align::Right, slot_w);
+                        c.bar(slot_x, 33.0 * kk, slot_w, style::METER_H_COMPACT * kk, f, c.text1());
+                    }
+                    None => {
+                        let pcx = c.w - m - pd / 2.0;
+                        play_plate(c, out, pcx, cy, pd, t.playing);
+                        level_glyph(c, pcx - pd / 2.0 - style::SP[3] * kk - LEVEL_W * kk, cy + 5.0 * kk, t.playing, kk);
+                    }
+                },
+                _ => play_plate(c, out, c.w - m - pd / 2.0, cy, pd, t.playing),
             }
         }
         Shape::Small => {
-            art(c, x, wic, 14.0, 14.0, 44.0, 9.0);
-            c.tw(&title, 14.0, 64.0, 12.5, 600, c.text1(), c.w - 28.0);
-            c.tw(&artist, 14.0, 80.0, 10.5, 400, c.text2(), c.w - 28.0);
-            if k == MediaKind::Full {
-                out.hits.clear();
-                // The tile itself plays/pauses; the buttons along the bottom do the rest.
-                out.hits.push(((0.0, 0.0, c.w, c.h - 26.0), WAct::MediaPlay));
-                controls(c, out, c.w / 2.0, c.h - 12.0, 34.0, playing);
-            } else {
-                c.circle(c.w - 30.0, 36.0, 15.0, c.ink(0.12));
-                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 30.0, 36.0, 12.0, c.text1());
-            }
-        }
-        Shape::Large => {
-            let s = (c.h - 74.0).min(c.w * 0.5);
-            art(c, x, wic, 16.0, 16.0, s, 14.0);
-            let tx = 16.0 + s + 14.0;
-            c.text(&title, tx, 20.0, 15.0, 600, c.text1(), Align::Left, c.w - tx - 14.0, Font::Text);
-            c.tw(&artist, tx, 44.0, 12.0, 400, c.text2(), c.w - tx - 14.0);
-            out.hits.clear();
-            controls(c, out, c.w / 2.0, c.h - 28.0, 54.0, playing);
-        }
-        Shape::Medium => match k {
-            MediaKind::Full => {
-                art(c, x, wic, 14.0, 14.0, 68.0, 12.0);
-                c.tw(&title, 94.0, 16.0, 13.5, 600, c.text1(), c.w - 108.0);
-                c.tw(&artist, 94.0, 36.0, 11.5, 400, c.text2(), c.w - 108.0);
-                out.hits.clear();
-                controls(c, out, 140.0, 70.0, 36.0, playing);
-            }
-            MediaKind::Compact => {
-                art(c, x, wic, 16.0, (c.h - 48.0) / 2.0, 48.0, 10.0);
-                c.tw(&title, 76.0, c.h / 2.0 - 18.0, 13.0, 600, c.text1(), c.w - 140.0);
-                c.tw(&artist, 76.0, c.h / 2.0 + 2.0, 11.5, 400, c.text2(), c.w - 140.0);
-                c.circle(c.w - 36.0, c.h / 2.0, 18.0, c.ink(0.12));
-                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 36.0, c.h / 2.0, 14.0, c.text1());
-            }
-            _ => {
-                art(c, x, wic, 16.0, 14.0, 40.0, 8.0);
-                c.tw(&title, 66.0, 15.0, 13.0, 600, c.text1(), c.w - 120.0);
-                c.tw(&artist, 66.0, 34.0, 11.5, 400, c.text2(), c.w - 120.0);
-                c.glyph(if playing { G_PAUSE } else { G_PLAY }, c.w - 30.0, 34.0, 16.0, c.text1());
-                // A level meter that sways while playing.
-                let n = 28;
-                let bw = (c.w - 32.0) / n as f32;
-                for i in 0..n {
-                    let ph = (x.now.second * 7 + i * 13) % 17;
-                    let hgt = if playing { 3.0 + ph as f32 * 0.9 } else { 3.0 };
-                    c.rr(16.0 + i as f32 * bw, c.h - 12.0 - hgt, bw * 0.6, hgt, 1.5, if playing { alpha(PURPLE, 0.85) } else { c.ink(0.2) });
+            let m = style::M_SMALL;
+            let inner = c.w - 2.0 * m;
+            let r = style::concentric(style::CARD_R, 8.0);
+            match k {
+                MediaKind::Disc => {
+                    // The record top-left, the track bottom-anchored under it (the Small
+                    // template), so the Small says at least what the Dock M says.
+                    let d = 60.0;
+                    let (cx, cy) = (m + d / 2.0, m + d / 2.0);
+                    record(c, x, wic, &t, cx, cy, d, true);
+                    if !t.idle && !t.playing {
+                        paused_overlay(c, cx, cy, 26.0);
+                    }
+                    let artist = if t.idle { "Play in any app".to_string() } else { t.artist.clone() };
+                    card_track_text(c, &Track { artist, ..t.clone() }, m, inner, 90.0, 106.0, style::CAPTION.size, None);
+                }
+                MediaKind::Full => {
+                    art_or_idle(c, x, wic, &t, m, m, 40.0, r);
+                    let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
+                    card_track_text(c, &t2, m, inner, 70.0, 84.0, style::FOOT.size, None);
+                    // Prev's left ink edge on the margin, next's right ink edge on the other.
+                    // Idle, the row stays (dimmed) so the layout doesn't collapse.
+                    controls(c, out, [m + 7.0, c.w / 2.0, c.w - m - 7.0], 98.0, [14.0, 18.0, 14.0], t.playing, t.idle);
+                }
+                MediaKind::Compact => {
+                    art_or_idle(c, x, wic, &t, m, m, 52.0, r);
+                    let p = style::BTN_SECONDARY;
+                    if !t.idle {
+                        play_plate(c, out, c.w - m - p / 2.0, m + p / 2.0, p, t.playing);
+                    }
+                    let artist = if t.idle { "Play in any app".to_string() } else { t.artist.clone() };
+                    card_track_text(c, &Track { artist, ..t.clone() }, m, inner, 86.0, 106.0, style::CAPTION.size, None);
+                }
+                _ => {
+                    // Bar: the player bar in miniature. Art with the live level beside it,
+                    // the track, then the transport capsule on the bottom margin (dimmed
+                    // when nothing plays), in the same language as the Bar Medium.
+                    let s = 36.0;
+                    art_or_idle(c, x, wic, &t, m, m, s, r);
+                    let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
+                    card_track_text(c, &t2, m, inner, 66.0, 80.0, style::FOOT.size, None);
+                    if let Some((pos, len)) = timeline(&t) {
+                        // With a timeline, the capsule's place holds the track's progress.
+                        let p = style::BTN_SECONDARY;
+                        play_plate(c, out, c.w - m - p / 2.0, m + s / 2.0, p, t.playing);
+                        c.bar(m, 96.0, inner, style::METER_H_COMPACT, (pos / len.max(1.0)).clamp(0.0, 1.0), c.text1());
+                        return;
+                    }
+                    let acy = m + s / 2.0;
+                    if t.playing {
+                        let kk = 1.2;
+                        level_glyph(c, c.w - m - LEVEL_W * kk, acy + 6.0, true, kk);
+                    } else if !t.idle {
+                        c.text_base("Paused", c.w - m, acy + 4.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Right, inner - s);
+                    }
+                    let (by, bh) = (86.0, 20.0);
+                    c.rr(m, by, inner, bh, bh / 2.0, alpha(c.plate(), if t.idle { 0.35 } else { 1.0 }));
+                    let mid = c.w / 2.0;
+                    controls(c, out, [mid - 32.0, mid, mid + 32.0], by + bh / 2.0, [10.0, 12.0, 10.0], t.playing, t.idle);
                 }
             }
-        },
+        }
+        Shape::Medium => media_medium(c, out, k, x, wic, &t),
+        Shape::Large => {
+            let m = style::M_CARD;
+            let r = style::concentric(style::CARD_R, 8.0);
+            match k {
+                MediaKind::Full => {
+                    out.hits.clear();
+                    let s = 96.0;
+                    art_or_idle(c, x, wic, &t, m, m, s, r);
+                    let tx = m + s + style::SP[5];
+                    let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
+                    large_track_text(c, &t2, tx, c.w - m - tx, 20.0, if t.idle { "" } else { &t.album }, 2);
+                    // Where it plays, on the art's bottom edge: the column is anchored top
+                    // and bottom, and the Large keeps the source the Medium shows.
+                    if !t.idle {
+                        c.text_base(&t.status_line(), tx, m + s, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - tx);
+                    }
+                    separator(c, 128.0);
+                    transport_row(c, out, c.w / 2.0, 166.0, 56.0, &t);
+                }
+                MediaKind::Compact => {
+                    // An art-led listening card: big cover, the track beside it, one button.
+                    // 104 leaves a 120 px text column, wide enough for most two-word titles
+                    // on one line.
+                    let s = 104.0;
+                    art_or_idle(c, x, wic, &t, m, m, s, r);
+                    let tx = m + s + style::SP[5];
+                    let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
+                    large_track_text(c, &t2, tx, c.w - m - tx, 20.0, if t.idle { "" } else { &t.album }, 3);
+                    let pd = style::BTN_PRIMARY;
+                    let (pcx, pcy) = (c.w - m - pd / 2.0, c.h - m - pd / 2.0);
+                    if !t.idle {
+                        c.text_base(&t.status_line(), m, c.h - m, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, pcx - pd / 2.0 - style::SP[3] - m);
+                    }
+                    play_primary(c, out, pcx, pcy, pd, t.playing, if t.idle { 0.35 } else { 1.0 });
+                }
+                MediaKind::Disc => {
+                    // Sleeve and record: the cover, with the record drawn out far enough that
+                    // its whole label clears the sleeve (a part-hidden label read as a
+                    // half-moon glitch at the sleeve edge). Its edge stays inside the margin.
+                    let s = 120.0;
+                    let d = 116.0;
+                    let peek = 84.0;
+                    if t.idle {
+                        // No sleeve: the plate tile is translucent and the record would show
+                        // through it. The bare record sits where the sleeve would.
+                        record(c, x, wic, &t, m + s / 2.0, m + s / 2.0, s, false);
+                    } else {
+                        record(c, x, wic, &t, m + s + peek - d / 2.0, m + s / 2.0, d, false);
+                        art(c, x, wic, m, m, s, r);
+                    }
+                    let pd = style::BTN_PRIMARY;
+                    let (pcx, pcy) = (c.w - m - pd / 2.0, c.h - m - pd / 2.0);
+                    let w = pcx - pd / 2.0 - style::SP[3] - m;
+                    let (v, fs) = fit_value(c, &t.title, style::VALUE, w);
+                    c.text_base(&v, m, 164.0, fs, style::VALUE.weight, c.text1(), Align::Left, w);
+                    let artist = if t.idle { "Play something in any app" } else { &t.artist };
+                    c.text_base(artist, m, 182.0, style::BODY.size, 400, c.text2(), Align::Left, w);
+                    play_primary(c, out, pcx, pcy, pd, t.playing, if t.idle { 0.35 } else { 1.0 });
+                }
+                _ => {
+                    // Bar: the Medium layout, then one more layer below the separator.
+                    out.hits.clear();
+                    media_medium(c, out, k, x, wic, &t);
+                    separator(c, style::SEP_Y_LARGE);
+                    if timeline(&t).is_none() {
+                        // The Medium already holds the transport: the detail is the volume.
+                        bar_volume(c, out, x);
+                        return;
+                    }
+                    // With a timeline the Medium shows progress, so the transport comes here,
+                    // over a footnote naming the album or where it plays.
+                    let foot = if t.idle {
+                        String::new()
+                    } else if !t.album.is_empty() {
+                        t.album.clone()
+                    } else {
+                        t.where_line()
+                    };
+                    let (_, y0, _, h) = detail_region(c);
+                    let cy = if foot.is_empty() { y0 + h / 2.0 } else { 140.0 };
+                    transport_row(c, out, c.w / 2.0, cy, 56.0, &t);
+                    if !foot.is_empty() {
+                        c.text_base(&foot, c.w / 2.0, 184.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Center, c.w - 2.0 * m);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The Medium media layouts (the Bar's is also the top of its Large).
+fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImagingFactory, t: &Track) {
+    let m = style::M_CARD;
+    let r = style::concentric(style::CARD_R, 8.0);
+    let idle_t = || Track { artist: "Play something in any app".into(), ..t.clone() };
+    match k {
+        MediaKind::Full => {
+            out.hits.clear();
+            art_or_idle(c, x, wic, t, m, m, 64.0, r);
+            let tx = 92.0;
+            if t.idle {
+                out.hits.push(((0.0, 0.0, c.w, c.h), WAct::MediaPlay));
+                card_track_text(c, &idle_t(), tx, c.w - m - tx, 42.0, 60.0, style::CAPTION.size, None);
+                return;
+            }
+            let mut right = c.w - m;
+            if !t.source.is_empty() {
+                let sw = c.measure(&t.source, style::FOOT.size, style::FOOT.weight, Font::Text).0.min(72.0);
+                c.text_base(&t.source, c.w - m, style::HEADER_BASE, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Right, 72.0);
+                right -= sw + style::SP[3];
+            }
+            let fs = fit_down(c, &t.title, style::TITLE.size, style::TITLE.min, style::TITLE.weight, right - tx);
+            c.text_base(&t.title, tx, style::HEADER_BASE, fs, style::TITLE.weight, c.text1(), Align::Left, right - tx);
+            c.text_base(&t.artist, tx, 47.0, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - m - tx);
+            controls(c, out, [104.0, 144.0, 184.0], 66.0, [16.0, 20.0, 16.0], t.playing, false);
+        }
+        MediaKind::Compact => {
+            let s = 56.0;
+            art_or_idle(c, x, wic, t, m, (c.h - s) / 2.0, s, r);
+            let tx = m + s + style::SP[5];
+            let pd = style::BTN_PRIMARY;
+            let w = c.w - m - pd - style::SP[5] - tx;
+            if t.idle {
+                card_track_text(c, &idle_t(), tx, c.w - m - tx, 44.0, 60.0, style::CAPTION.size, None);
+                return;
+            }
+            // Title, artist and a third line (album, app, or "Playing" / "Paused"), so the
+            // Medium always adds a layer over the Small.
+            card_track_text(c, t, tx, w, 36.0, 52.0, style::CAPTION.size, Some((68.0, t.third())));
+            play_plate(c, out, c.w - m - pd / 2.0, c.h / 2.0, pd, t.playing);
+        }
+        MediaKind::Disc => {
+            // The record at inset 12, so its curve keeps clear of the card's corner.
+            let (d, i) = (72.0, 12.0);
+            record(c, x, wic, t, i + d / 2.0, i + d / 2.0, d, true);
+            let tx = i + d + style::SP[6];
+            if t.idle {
+                card_track_text(c, &idle_t(), tx, c.w - m - tx, 42.0, 60.0, style::CAPTION.size, None);
+                return;
+            }
+            card_track_text(c, t, tx, c.w - m - tx, 30.0, 45.0, style::CAPTION.size, None);
+            // Plates, like every other media Medium: play/pause, then next.
+            let (p, cy) = (style::BTN_SECONDARY, 66.0);
+            play_plate(c, out, tx + p / 2.0, cy, p, t.playing);
+            let ncx = tx + p * 1.5 + style::SP[3];
+            round_button(c, out, ncx, cy, p, c.plate(), G_NEXT_FILL, c.text1(), WAct::MediaNext);
+        }
+        _ => {
+            let s = if timeline(t).is_some() { 40.0 } else { 32.0 };
+            art_or_idle(c, x, wic, t, m, m, s, style::R_MIN + 2.0);
+            let tx = m + s + style::SP[5];
+            let pd = style::BTN_SECONDARY;
+            let right = c.w - m - pd - style::SP[5];
+            if t.idle {
+                card_track_text(c, &idle_t(), tx, c.w - m - tx, style::HEADER_BASE, 47.0, style::CAPTION.size, None);
+                if timeline(t).is_none() {
+                    // The transport capsule stays, dimmed, so the bar keeps its shape.
+                    let (by, bh) = (56.0, 24.0);
+                    c.rr(m, by, c.w - 2.0 * m, bh, bh / 2.0, alpha(c.plate(), 0.35));
+                    let mid = c.w / 2.0;
+                    controls(c, out, [mid - 64.0, mid, mid + 64.0], by + bh / 2.0, [12.0, 14.0, 12.0], false, true);
+                }
+                return;
+            }
+            match timeline(t) {
+                Some((pos, len)) => {
+                    // A header row (art, title, artist, play), then the track's progress.
+                    play_plate(c, out, c.w - m - pd / 2.0, 36.0, pd, t.playing);
+                    card_track_text(c, t, tx, right - tx, style::HEADER_BASE, 47.0, style::CAPTION.size, None);
+                    c.bar(m, 70.0, c.w - 2.0 * m, style::METER_H_COMPACT, (pos / len.max(1.0)).clamp(0.0, 1.0), c.text1());
+                    c.text_base(&mmss(pos), m, 86.0, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, 80.0);
+                    c.text_base(&format!("\u{2212}{}", mmss(len - pos)), c.w - m, 86.0, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Right, 80.0);
+                }
+                None => {
+                    // A player bar: the track (with its live level) over a transport
+                    // capsule. The app's name, when known, sits at the header's right.
+                    let mut right = c.w - m;
+                    let src = t.source.clone();
+                    if !src.is_empty() {
+                        let sw = c.measure(&src, style::FOOT.size, style::FOOT.weight, Font::Text).0.min(72.0);
+                        c.text_base(&src, c.w - m, 30.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Right, 72.0);
+                        right -= sw + style::SP[3];
+                    }
+                    let tw = right - tx - LEVEL_W - style::SP[2];
+                    let fs = fit_down(c, &t.title, style::TITLE.size, style::TITLE.min, style::TITLE.weight, tw);
+                    let w = c.text_base(&t.title, tx, 30.0, fs, style::TITLE.weight, c.text1(), Align::Left, tw);
+                    level_glyph(c, tx + w + style::SP[2], 30.0, t.playing, 1.0);
+                    c.text_base(&t.artist, tx, 45.0, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - m - tx);
+                    let (by, bh) = (56.0, 24.0);
+                    c.rr(m, by, c.w - 2.0 * m, bh, bh / 2.0, c.plate());
+                    let cy = by + bh / 2.0;
+                    let mid = c.w / 2.0;
+                    controls(c, out, [mid - 64.0, mid, mid + 64.0], cy, [12.0, 14.0, 12.0], t.playing, false);
+                }
+            }
+        }
+    }
+}
+
+/// Now Playing Bar, Large: the output volume as a slider in the detail region, under the
+/// device name (or "Volume") and the level.
+fn bar_volume(c: &Canvas, out: &mut Painted, x: &Ctx) {
+    let (x0, y0, w, h) = detail_region(c);
+    let vol = x.control.volume.unwrap_or(0.0).clamp(0.0, 1.0);
+    let muted = x.control.muted == Some(true);
+    let name = x.hub.output_name.as_deref().map(short_device).filter(|d| !d.is_empty()).unwrap_or_else(|| "Volume".into());
+    let level = if muted { "Muted".to_string() } else { format!("{:.0}%", vol * 100.0) };
+    // Label row and a 28 px capsule, centred as one block in the region.
+    let bh = 28.0;
+    let block = c.cap_h(style::FOOT.size) + style::SP[5] + bh;
+    let top = y0 + (h - block) / 2.0;
+    let base = top + c.cap_h(style::FOOT.size);
+    let lw = c.measure(&level, style::FOOT.size, 500, Font::Text).0;
+    c.text_base(&name, x0, base, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, w - lw - style::SP[3]);
+    c.text_base(&level, x0 + w, base, style::FOOT.size, 500, if muted { RED } else { c.text2() }, Align::Right, w);
+    let by = base + style::SP[5];
+    c.rr(x0, by, w, bh, bh / 2.0, c.track());
+    c.rr(x0, by, (w * if muted { 0.0 } else { vol }).max(bh), bh, bh / 2.0, if muted { c.text3() } else { BLUE });
+    // The speaker glyph rides at the capsule's start, on the fill.
+    let gcx = x0 + bh / 2.0;
+    c.glyph(if muted { G_MUTE } else { G_VOL }, gcx, by + bh / 2.0, bh * style::GLYPH_IN, WHITE);
+    out.hits.push(((x0, by - 4.0, w, bh + 8.0), WAct::Volume));
+}
+
+/// "Speakers (Realtek(R) Audio)" → "Speakers".
+fn short_device(s: &str) -> String {
+    s.split(" (").next().unwrap_or(s).trim().to_string()
+}
+
+fn output_face(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    let vol = x.control.volume.unwrap_or(0.0).clamp(0.0, 1.0);
+    let muted = x.control.muted == Some(true);
+    let g = if muted { G_MUTE } else { G_VOL };
+    let pct = format!("{:.0}%", vol * 100.0);
+    let dev = x.hub.output_name.as_deref().map(short_device).filter(|d| !d.is_empty());
+    let fill_col = if muted { c.text3() } else { BLUE };
+    match sh {
+        Shape::Mini => {
+            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mute));
+            let kk = c.h / 54.0;
+            let d = 40.0 * kk;
+            let t = style::METER_H_COMPACT * kk;
+            c.ring(c.w / 2.0, c.h / 2.0, d / 2.0 - t / 2.0, t, if muted { 0.0 } else { vol }, BLUE);
+            c.glyph(g, c.w / 2.0, c.h / 2.0, 16.0 * kk, c.text1());
+        }
+        Shape::Dock => {
+            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mute));
+            let kk = c.h / 54.0;
+            let m = style::M_DOCK * kk;
+            let p = style::BADGE_DOCK * kk;
+            c.rr(m, (c.h - p) / 2.0, p, p, p * style::BADGE_R, if muted { mute_red(c) } else { c.plate() });
+            c.glyph(g, m + p / 2.0, c.h / 2.0, p * style::GLYPH_IN, if muted { WHITE } else { c.text1() });
+            let x0 = 52.0 * kk;
+            let wide = c.w >= c.h * 3.4;
+            let slot_w = (c.w * 0.34).round();
+            let slot_x = c.w - m - slot_w;
+            let right = if wide { slot_x - style::SP[3] * kk } else { c.w - m };
+            let role = Type { size: style::VALUE.size * kk, min: style::VALUE.min * kk, ..style::VALUE };
+            let (v, fs) = fit_value(c, &pct, role, right - x0);
+            c.text_base(&v, x0, 30.0 * kk, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            let (cap, ccol) = if muted { ("Muted", RED) } else { ("Volume", c.text2()) };
+            c.text_base(cap, x0, 44.0 * kk, style::FOOT.size * kk, style::FOOT.weight, ccol, Align::Left, right - x0);
+            if wide {
+                let by = if dev.is_some() { 33.0 * kk } else { (c.h - style::METER_H_COMPACT * kk) / 2.0 };
+                if let Some(d) = &dev {
+                    c.text_base(d, c.w - m, 26.0 * kk, style::FOOT.size * kk, 500, c.text2(), Align::Right, slot_w);
+                }
+                c.bar(slot_x, by, slot_w, style::METER_H_COMPACT * kk, vol, fill_col);
+                out.hits.push(((slot_x, by - 12.0 * kk, slot_w, 28.0 * kk), WAct::Volume));
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let p = style::BADGE_SMALL;
+            c.rr(m, m, p, p, p * style::BADGE_R, if muted { mute_red(c) } else { c.plate() });
+            c.glyph(g, m + p / 2.0, m + p / 2.0, p * style::GLYPH_IN, if muted { WHITE } else { c.text1() });
+            out.hits.push(((m, m, p, p), WAct::Mute));
+            let (v, fs) = fit_value(c, &pct, style::HERO_S, c.w - 2.0 * m);
+            c.text_base(&v, m, 74.0, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
+            let (cap, ccol) = if muted { ("Muted".to_string(), RED) } else { (dev.clone().unwrap_or_else(|| "Volume".into()), c.text2()) };
+            c.text_base(&cap, m, 90.0, style::CAPTION.size, style::CAPTION.weight, ccol, Align::Left, c.w - 2.0 * m);
+            let bw = c.w - 2.0 * m;
+            c.bar(m, 100.0, bw, style::METER_H, vol, fill_col);
+            out.hits.push(((m, 89.0, bw, 28.0), WAct::Volume));
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let p = style::BADGE_HEADER;
+            c.rr(m, m, p, p, p * style::BADGE_R, if muted { mute_red(c) } else { c.plate() });
+            c.glyph(g, m + p / 2.0, m + p / 2.0, p * style::GLYPH_IN, if muted { WHITE } else { c.text1() });
+            out.hits.push(((m - 4.0, m - 4.0, p + 8.0, p + 8.0), WAct::Mute));
+            let pw = c.measure(&pct, style::VALUE.size, style::VALUE.weight, Font::Text).0;
+            c.text_base(&pct, c.w - m, style::HEADER_BASE, style::VALUE.size, style::VALUE.weight, c.text1(), Align::Right, c.w);
+            let tx = m + p + style::SP[3];
+            let name = dev.clone().unwrap_or_else(|| "Volume".into());
+            c.text_base(&name, tx, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, c.w - m - pw - style::SP[3] - tx);
+            // The slider: a 24 px capsule, filled to the volume.
+            let (bx, by, bw, bh) = (m, 56.0, c.w - 2.0 * m, 24.0);
+            c.rr(bx, by, bw, bh, bh / 2.0, c.track());
+            c.rr(bx, by, (bw * vol).max(bh), bh, bh / 2.0, fill_col);
+            out.hits.push(((bx, by - 4.0, bw, bh + 8.0), WAct::Volume));
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let (x0, y0, w, h) = detail_region(c);
+                let tw = (w - style::SP[3]) / 2.0;
+                // Mute toggle.
+                let (tf, ink, sub) = if muted { (mute_red(c), WHITE, alpha(WHITE, 0.8)) } else { (c.plate(), c.text1(), c.text2()) };
+                c.rr(x0, y0, tw, h, style::concentric(style::CARD_R, 8.0), tf);
+                c.circle(x0 + 12.0 + 14.0, y0 + 12.0 + 14.0, 14.0, if muted { alpha(WHITE, 0.25) } else { c.plate() });
+                c.glyph(g, x0 + 26.0, y0 + 26.0, 28.0 * style::GLYPH_IN, ink);
+                c.text_base("Mute", x0 + 12.0, y0 + 54.0, style::TITLE.size, style::TITLE.weight, ink, Align::Left, tw - 24.0);
+                c.text_base(if muted { "On" } else { "Off" }, x0 + 12.0, y0 + 69.0, style::FOOT.size, style::FOOT.weight, sub, Align::Left, tw - 24.0);
+                out.hits.push(((x0, y0, tw, h), WAct::Mute));
+                // Output device, opening Sound settings.
+                let ox = x0 + tw + style::SP[3];
+                let og = if name.to_lowercase().contains("headphone") || name.to_lowercase().contains("headset") || name.contains("AirPods") { G_HEADPHONES } else { G_SPEAKERS };
+                c.rr(ox, y0, tw, h, style::concentric(style::CARD_R, 8.0), c.plate());
+                c.circle(ox + 26.0, y0 + 26.0, 14.0, c.plate());
+                c.glyph(og, ox + 26.0, y0 + 26.0, 28.0 * style::GLYPH_IN, c.text1());
+                c.glyph(G_CHEV, ox + tw - 12.0 - 5.0, y0 + 26.0, 10.0, c.text3());
+                c.text_base(&dev.clone().unwrap_or_else(|| "Output".into()), ox + 12.0, y0 + 54.0, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, tw - 24.0);
+                c.text_base("Sound settings", ox + 12.0, y0 + 69.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, tw - 24.0);
+                out.hits.push(((ox, y0, tw, h), WAct::Open("ms-settings:sound".into())));
+            }
+        }
+    }
+}
+
+fn mic_face(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Mic));
+    let muted = x.hub.mic_muted == Some(true);
+    let state = if muted { "Muted" } else { "On" };
+    let (fill, g, ink) = if muted { (mute_red(c), G_MIC_OFF, WHITE) } else { (c.plate(), G_MIC, c.text1()) };
+    let state_col = if muted { mute_red(c) } else { c.text2() };
+    match sh {
+        Shape::Mini => {
+            let kk = c.h / 54.0;
+            let p = 40.0 * kk;
+            c.rr((c.w - p) / 2.0, (c.h - p) / 2.0, p, p, style::concentric(style::DOCK_R, style::M_MINI) * kk, fill);
+            c.glyph(g, c.w / 2.0, c.h / 2.0, p * style::GLYPH_IN, ink);
+        }
+        Shape::Dock => {
+            let kk = c.h / 54.0;
+            let m = style::M_DOCK * kk;
+            let p = style::BADGE_DOCK * kk;
+            c.rr(m, (c.h - p) / 2.0, p, p, p * style::BADGE_R, fill);
+            c.glyph(g, m + p / 2.0, c.h / 2.0, p * style::GLYPH_IN, ink);
+            let x0 = 52.0 * kk;
+            let wide = c.w >= c.h * 3.4;
+            let label = if muted { "Unmute" } else { "Mute" };
+            let fs = style::FOOT.size * kk;
+            let pw = c.measure(label, fs, 600, Font::Text).0 + 2.0 * style::SP[5] * kk;
+            let right = if wide { c.w - m - pw - style::SP[3] * kk } else { c.w - m };
+            c.text_base(state, x0, 30.0 * kk, style::VALUE.size * kk, style::VALUE.weight, c.text1(), Align::Left, right - x0);
+            c.text_base("Microphone", x0, 44.0 * kk, fs, style::FOOT.weight, c.text2(), Align::Left, right - x0);
+            if wide {
+                let ph = style::BTN_SECONDARY_DOCK * kk;
+                let (px, py) = (c.w - m - pw, (c.h - ph) / 2.0);
+                c.rr(px, py, pw, ph, ph / 2.0, c.plate());
+                c.text_cap(label, px + pw / 2.0, py + (ph - c.cap_h(fs)) / 2.0, fs, 600, c.text1(), Align::Center, pw);
+                out.hits.push(((px, py.min((c.h - 28.0 * kk) / 2.0), pw, ph.max(28.0 * kk)), WAct::Mic));
+            }
+        }
+        Shape::Small => {
+            let p = 44.0;
+            c.rr((c.w - p) / 2.0, 22.0, p, p, p * style::BADGE_R, fill);
+            c.glyph(g, c.w / 2.0, 22.0 + p / 2.0, p * style::GLYPH_IN, ink);
+            c.text_base("Microphone", c.w / 2.0, 88.0, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Center, c.w - 2.0 * style::M_SMALL);
+            c.text_base(state, c.w / 2.0, 104.0, style::FOOT.size, style::FOOT.weight, state_col, Align::Center, c.w - 2.0 * style::M_SMALL);
+        }
+        Shape::Medium => {
+            let m = style::M_CARD;
+            let p = 44.0;
+            c.rr(m, 26.0, p, p, p * style::BADGE_R, fill);
+            c.glyph(g, m + p / 2.0, 26.0 + p / 2.0, p * style::GLYPH_IN, ink);
+            let tx = 76.0;
+            // Label, state and what that means for apps: three lines centred on the plate.
+            c.text_base("Microphone", tx, 40.0, style::VALUE.size, style::VALUE.weight, c.text1(), Align::Left, c.w - m - tx);
+            c.text_base(state, tx, 57.0, style::CAPTION.size, style::CAPTION.weight, state_col, Align::Left, c.w - m - tx);
+            let note = if muted { "Apps can't hear you" } else { "Apps can use it" };
+            c.text_base(note, tx, 73.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - tx);
+        }
+        Shape::Large => {
+            // A state tile, then two facts.
+            let m = style::M_CARD;
+            let i = 6.0;
+            let (tw, th) = (c.w - 2.0 * i, 112.0);
+            c.rr(i, i, tw, th, style::concentric(style::CARD_R, i), c.plate());
+            let d = 56.0;
+            let (cx, cy) = (i + style::SP[6] + d / 2.0, i + th / 2.0);
+            c.circle(cx, cy, d / 2.0, if muted { mute_red(c) } else { c.plate() });
+            c.glyph(g, cx, cy, d * style::GLYPH_IN, ink);
+            let tx = cx + d / 2.0 + style::SP[6];
+            c.text_base("Microphone", tx, cy - 4.0, style::VALUE.size, style::VALUE.weight, c.text1(), Align::Left, c.w - i - style::SP[6] - tx);
+            c.text_base(state, tx, cy + 16.0, style::BODY.size, 400, state_col, Align::Left, c.w - i - style::SP[6] - tx);
+            // Real facts: what muting does, and what a click will do now. (The device
+            // name would go here once the hub reports the default capture endpoint.)
+            let facts = if muted { ["Apps can't hear you", "Click to turn it back on"] } else { ["Apps can use your microphone", "Click to mute it in every app"] };
+            for (k, fact) in facts.iter().enumerate() {
+                c.text_base(fact, m, 146.0 + k as f32 * style::ROW_L, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+            }
+        }
     }
 }
 
