@@ -4131,6 +4131,9 @@ pub fn load_image_bytes(wic: &IWICImagingFactory, bytes: &[u8]) -> Option<IWICBi
 }
 
 // ------------------------------------------------------------------ clocks
+// Clocks and calendars (docs/widget-design.md §5). Shared rules: time heroes use the
+// clock weights (`style::time_weight`), "AM/PM" is Micro top-aligned to the digits' cap top
+// 3 px after them, seconds appear only on Large, dials have a rim, and red marks only today.
 
 fn h12(h: u32) -> u32 {
     if h % 12 == 0 {
@@ -4147,478 +4150,1504 @@ fn ampm(h: u32) -> &'static str {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dial(c: &Canvas, cx: f32, cy: f32, r: f32, h: u32, m: u32, s: Option<u32>, dark: bool) {
-    let (face, ink) = if dark { ((0.11, 0.11, 0.13, 1.0), (1.0, 1.0, 1.0, 0.95)) } else { ((0.97, 0.97, 0.98, 1.0), (0.08, 0.08, 0.1, 1.0)) };
-    c.circle(cx, cy, r, face);
-    for i in 0..12 {
-        let a = (i as f32 * 30.0).to_radians();
-        let (r0, r1) = if i % 3 == 0 { (r * 0.78, r * 0.9) } else { (r * 0.83, r * 0.9) };
-        c.line(cx + r0 * a.sin(), cy - r0 * a.cos(), cx + r1 * a.sin(), cy - r1 * a.cos(), if i % 3 == 0 { r * 0.06 } else { r * 0.035 }, alpha(ink, 0.7));
+/// Segoe Fluent Icons cloud: the weather icon while there is no weather.
+const G_CLOUD: &str = "\u{E753}";
+/// Night indigo (the moon on world clocks), and its darker tone for light cards.
+const NIGHT_INDIGO: Col = hex(0x8E8EFF);
+const INDIGO_LIGHT: Col = hex(0x5E5CE6);
+/// A calendar page is white in both themes, so its ink is always the light-theme ink.
+const PAGE: Col = (0.98, 0.98, 0.99, 1.0);
+const PAGE_INK: Col = hex(0x1C1C1E);
+const PAGE_INK2: Col = (0.235, 0.235, 0.263, 0.72);
+/// Analog faces: (face, ink) for a dark and a light face.
+const FACE_DARK: (Col, Col) = ((0.11, 0.11, 0.13, 1.0), (1.0, 1.0, 1.0, 0.95));
+const FACE_LIGHT: (Col, Col) = ((0.97, 0.97, 0.98, 1.0), hex(0x1C1C1E));
+
+/// Today's disc in calendars: red, and the darker text red on light cards so the white
+/// numeral keeps its contrast.
+fn today_fill(c: &Canvas) -> Col {
+    if c.light {
+        hex(0xD70015)
+    } else {
+        RED
     }
-    let hand = |deg: f32, len: f32, t: f32, col: Col| {
-        let a = deg.to_radians();
-        c.line(cx - len * 0.15 * a.sin(), cy + len * 0.15 * a.cos(), cx + len * a.sin(), cy - len * a.cos(), t, col);
-    };
-    hand((h % 12) as f32 * 30.0 + m as f32 * 0.5, r * 0.5, r * 0.09, ink);
-    hand(m as f32 * 6.0 + s.unwrap_or(0) as f32 * 0.1, r * 0.74, r * 0.065, ink);
-    if let Some(s) = s {
-        hand(s as f32 * 6.0, r * 0.8, r * 0.03, ORANGE);
-    }
-    c.circle(cx, cy, r * 0.06, ORANGE);
 }
 
-/// The analog face in a rounded square, with numerals at 12, 3, 6 and 9 when there's room.
+/// A filled polygon (Canvas has rounded rectangles and circles only).
+fn poly(c: &Canvas, pts: &[(f32, f32)], col: Col) {
+    use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED};
+    if pts.len() < 3 || col.3 <= 0.0 {
+        return;
+    }
+    let v = |p: (f32, f32)| windows_numerics::Vector2 { X: p.0, Y: p.1 };
+    unsafe {
+        let Ok(g) = c.factory.CreatePathGeometry() else { return };
+        let Ok(s) = g.Open() else { return };
+        s.BeginFigure(v(pts[0]), D2D1_FIGURE_BEGIN_FILLED);
+        for p in &pts[1..] {
+            s.AddLine(v(*p));
+        }
+        s.EndFigure(D2D1_FIGURE_END_CLOSED);
+        let _ = s.Close();
+        let t = c.tone(col, false);
+        if let Ok(b) = c.dc.CreateSolidColorBrush(&D2D1_COLOR_F { r: t.0, g: t.1, b: t.2, a: t.3 }, None) {
+            c.dc.FillGeometry(&g, &b, None);
+        }
+    }
+}
+
+/// A rectangle with rounded top corners and a square bottom edge, drawn as one shape (so a
+/// band over a page has no seam).
 #[allow(clippy::too_many_arguments)]
-fn square_dial(c: &Canvas, x0: f32, y0: f32, s: f32, h: u32, m: u32, sec: u32) {
-    let dark = !c.light;
-    let (face, ink) = if dark { ((0.11, 0.11, 0.13, 1.0), (1.0, 1.0, 1.0, 0.95)) } else { ((0.97, 0.97, 0.98, 1.0), (0.08, 0.08, 0.1, 1.0)) };
-    c.rr(x0, y0, s, s, s * 0.24, face);
-    let (cx, cy) = (x0 + s / 2.0, y0 + s / 2.0);
+fn rr_top(c: &Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, col: Col) {
+    let r = r.min(w / 2.0).min(h).max(0.0);
+    let steps = 10;
+    let mut pts = vec![(x, y + h)];
+    for (ox, a0) in [(x + r, 180.0f32), (x + w - r, 270.0)] {
+        for i in 0..=steps {
+            let a = (a0 + 90.0 * i as f32 / steps as f32).to_radians();
+            pts.push((ox + r * a.cos(), y + r + r * a.sin()));
+        }
+    }
+    pts.push((x + w, y + h));
+    poly(c, &pts, col);
+}
+
+/// A time drawn by its baseline, with "AM/PM" in Micro top-aligned to the digits' cap top,
+/// 3 px after them (k scales the dock sizes). Returns the right edge of the group.
+#[allow(clippy::too_many_arguments)]
+fn time_ap(c: &Canvas, t: &str, ap: &str, x: f32, base: f32, size: f32, weight: u32, col: Col, k: f32) -> f32 {
+    c.text_base(t, x, base, size, weight, col, Align::Left, c.w * 2.0);
+    let tw = c.measure(t, size, weight, Font::Text).0;
+    if ap.is_empty() {
+        return x + tw;
+    }
+    let ms = style::MICRO.size * k;
+    let ax = x + tw + 3.0 * k;
+    c.text_cap(ap, ax, base - c.cap_h(size), ms, style::MICRO.weight, c.text2(), Align::Left, 40.0 * k);
+    ax + c.measure(ap, ms, style::MICRO.weight, Font::Text).0
+}
+
+/// The width `time_ap` draws.
+fn time_ap_w(c: &Canvas, t: &str, ap: &str, size: f32, weight: u32, k: f32) -> f32 {
+    let tw = c.measure(t, size, weight, Font::Text).0;
+    if ap.is_empty() {
+        tw
+    } else {
+        tw + 3.0 * k + c.measure(ap, style::MICRO.size * k, style::MICRO.weight, Font::Text).0
+    }
+}
+
+/// The first label that fits `max_w` (else the last one, which may then truncate).
+fn fit_label(c: &Canvas, cands: &[String], size: f32, weight: u32, max_w: f32) -> String {
+    cands.iter().find(|s| c.measure(s, size, weight, Font::Text).0 <= max_w).or(cands.last()).cloned().unwrap_or_default()
+}
+
+/// ISO week number (weeks start on Monday; week 1 holds the first Thursday).
+fn iso_week(n: &super::Now) -> u32 {
+    let doy = n.day_of_year() as i32;
+    let wd = ((n.weekday + 6) % 7 + 1) as i32;
+    let jan1 = (n.weekday as i32 - (doy - 1)).rem_euclid(7);
+    // A year has 53 ISO weeks when it starts on a Thursday, or a Wednesday in a leap year.
+    let weeks = |jan1: i32, leap: bool| if jan1 == 4 || (leap && jan1 == 3) { 53 } else { 52 };
+    let leap = |y: u32| super::days_in_month(y, 2) == 29;
+    let w = (doy - wd + 10) / 7;
+    if w < 1 {
+        let py = n.year - 1;
+        let pdays = if leap(py) { 366 } else { 365 };
+        weeks((jan1 - pdays).rem_euclid(7), leap(py)) as u32
+    } else if w > weeks(jan1, leap(n.year)) {
+        1
+    } else {
+        w as u32
+    }
+}
+
+fn days_left(n: &super::Now) -> u32 {
+    n.days_in_year() - n.day_of_year()
+}
+
+/// The (month, day) `off` days from today.
+fn shift_day(n: &super::Now, off: i64) -> (u32, u32) {
+    let dim = n.days_in_month() as i64;
+    let pm = if n.month == 1 { 12 } else { n.month - 1 };
+    let nm = if n.month == 12 { 1 } else { n.month + 1 };
+    let d = n.day as i64 + off;
+    if d < 1 {
+        (pm, (d + super::days_in_month(n.year, pm) as i64) as u32)
+    } else if d > dim {
+        (nm, (d - dim) as u32)
+    } else {
+        (n.month, d as u32)
+    }
+}
+
+/// "Nov 15 – 21", or "Nov 29 – Dec 5" across months: this week, Sunday to Saturday.
+fn week_range(n: &super::Now) -> String {
+    let (m0, d0) = shift_day(n, -(n.weekday as i64));
+    let (m1, d1) = shift_day(n, 6 - n.weekday as i64);
+    let short = |m: u32| &MONTHS[m as usize - 1][..3];
+    if m0 == m1 {
+        format!("{} {d0} \u{2013} {d1}", short(m0))
+    } else {
+        format!("{} {d0} \u{2013} {} {d1}", short(m0), short(m1))
+    }
+}
+
+/// An upcoming event from the calendar feed: title, day word ("Today", "Tue") and time.
+struct Ev {
+    title: String,
+    day: String,
+    time: String,
+}
+
+/// The calendar's upcoming events (sample events in previews); None without a calendar.
+fn events(x: &Ctx) -> Option<Vec<Ev>> {
+    let Got::Feed(f) = got(x, "calendar") else { return None };
+    Some(
+        f.rows
+            .iter()
+            .map(|r| {
+                let (day, time) = match r.value.split_once(' ') {
+                    Some((d, t)) if t.contains(':') && !d.contains(':') => (d.to_string(), t.to_string()),
+                    _ => (String::new(), r.value.clone()),
+                };
+                Ev { title: r.label.clone(), day, time }
+            })
+            .collect(),
+    )
+}
+
+/// An event's time with its day unless it is today: "2:00 PM", "Tue 9:00 AM".
+fn ev_when(e: &Ev) -> String {
+    if e.day.is_empty() || e.day.eq_ignore_ascii_case("today") {
+        e.time.clone()
+    } else {
+        format!("{} {}", e.day, e.time)
+    }
+}
+
+/// Hours between local time and a zone's (h, m, weekday), and that zone's day word.
+fn zone_diff(n: &super::Now, h: u32, m: u32, wd: u32) -> (f32, &'static str) {
+    let mut d = (h as i32 * 60 + m as i32) - (n.hour as i32 * 60 + n.minute as i32);
+    let name = if wd == n.weekday {
+        "Today"
+    } else if wd == (n.weekday + 1) % 7 {
+        d += 24 * 60;
+        "Tomorrow"
+    } else {
+        d -= 24 * 60;
+        "Yesterday"
+    };
+    (d as f32 / 60.0, name)
+}
+
+/// "+14h", "−3h" (U+2212), "+5.5h", "0h".
+fn fmt_hours(d: f32) -> String {
+    if d.abs() < 0.01 {
+        return "0h".into();
+    }
+    let a = d.abs();
+    let v = if (a - a.round()).abs() < 0.01 { format!("{a:.0}") } else { format!("{a:.1}") };
+    format!("{}{v}h", if d > 0.0 { "+" } else { "\u{2212}" })
+}
+
+/// Short city names for labels and two- or three-letter codes for inside a dial.
+const CITIES: [(&str, &str, &str); 18] = [
+    ("San Francisco", "SF", "SF"),
+    ("New York", "NYC", "NYC"),
+    ("New York City", "NYC", "NYC"),
+    ("Los Angeles", "LA", "LA"),
+    ("Washington", "DC", "DC"),
+    ("London", "London", "LON"),
+    ("Tokyo", "Tokyo", "TYO"),
+    ("Paris", "Paris", "PAR"),
+    ("Sydney", "Sydney", "SYD"),
+    ("Berlin", "Berlin", "BER"),
+    ("Singapore", "Singapore", "SIN"),
+    ("Hong Kong", "Hong Kong", "HK"),
+    ("Dubai", "Dubai", "DXB"),
+    ("Chicago", "Chicago", "CHI"),
+    ("Toronto", "Toronto", "TOR"),
+    ("Vancouver", "Vancouver", "VAN"),
+    ("Mexico City", "Mexico City", "MEX"),
+    ("Rio de Janeiro", "Rio", "RIO"),
+];
+
+/// A city's short label: the curated short form, else the full name if it fits, else its
+/// first word. Never cut mid-word.
+fn city_short(c: &Canvas, label: &str, size: f32, weight: u32, max_w: f32) -> String {
+    if let Some((_, s, _)) = CITIES.iter().find(|(full, _, _)| full.eq_ignore_ascii_case(label.trim())) {
+        return s.to_string();
+    }
+    if c.measure(label, size, weight, Font::Text).0 <= max_w {
+        return label.to_string();
+    }
+    label.split_whitespace().next().unwrap_or(label).to_string()
+}
+
+/// A city's code for inside a small dial: curated, else initials, else its first letters.
+fn city_code(label: &str) -> String {
+    if let Some((_, _, code)) = CITIES.iter().find(|(full, _, _)| full.eq_ignore_ascii_case(label.trim())) {
+        return code.to_string();
+    }
+    let words: Vec<&str> = label.split_whitespace().collect();
+    if words.len() > 1 {
+        words.iter().take(3).filter_map(|w| w.chars().next()).collect::<String>().to_uppercase()
+    } else {
+        label.chars().take(3).collect::<String>().to_uppercase()
+    }
+}
+
+/// The time in a world-clock city: (h, m, s, weekday), local time if the zone is unknown.
+fn city_time(n: &super::Now, key: &str) -> (u32, u32, u32, u32) {
+    super::tz_now(key).unwrap_or((n.hour, n.minute, n.second, n.weekday))
+}
+
+/// This PC's Windows time zone ("Pacific Standard Time").
+fn local_zone() -> Option<String> {
+    use windows::Win32::System::Time::{GetDynamicTimeZoneInformation, DYNAMIC_TIME_ZONE_INFORMATION};
+    let mut z = DYNAMIC_TIME_ZONE_INFORMATION::default();
+    unsafe { GetDynamicTimeZoneInformation(&mut z) };
+    let k = &z.TimeZoneKeyName;
+    let name = String::from_utf16_lossy(&k[..k.iter().position(|&ch| ch == 0).unwrap_or(k.len())]);
+    (!name.is_empty()).then_some(name)
+}
+
+/// An analog dial: face with a rim, ticks (a minute track from 90 px), hands from the centre
+/// (only the seconds hand has a counterweight) and a machined hub. `code` is a city code
+/// printed inside the face; `k` scales it on the dock.
+#[allow(clippy::too_many_arguments)]
+fn dial(c: &Canvas, cx: f32, cy: f32, r: f32, h: u32, m: u32, s: Option<u32>, dark: bool, code: Option<&str>, k: f32) {
+    let (face, ink) = if dark { FACE_DARK } else { FACE_LIGHT };
+    c.circle(cx, cy, r, face);
+    // A 1 px rim so the face keeps its edge on the glass in both themes.
+    let rim = match (c.light, dark) {
+        (true, false) => Some(c.sep()),
+        (true, true) => Some((0.0, 0.0, 0.0, 0.12)),
+        (false, true) => Some(c.sep()),
+        (false, false) => None,
+    };
+    if let Some(col) = rim {
+        c.circle_stroke(cx, cy, r - 0.5, col, 1.0);
+    }
+    let tick = |i: u32, n: u32, r0: f32, r1: f32, t: f32, col: Col| {
+        let a = (i as f32 * 360.0 / n as f32).to_radians();
+        c.line(cx + r0 * a.sin(), cy - r0 * a.cos(), cx + r1 * a.sin(), cy - r1 * a.cos(), t, col);
+    };
+    if r * 2.0 >= 90.0 {
+        // Minute track, then hour ticks; round caps kept inside the rim.
+        for i in (0..60).filter(|i| i % 5 != 0) {
+            tick(i, 60, r * 0.92 + 0.5, r * 0.97 - 0.5, 1.0, alpha(ink, 0.30));
+        }
+        let t = (r * 0.029).max(1.5);
+        for i in 0..12 {
+            tick(i, 12, r * 0.84 + t / 2.0, r * 0.97 - t / 2.0, t, alpha(ink, 0.85));
+        }
+    } else {
+        for i in 0..12 {
+            if i % 3 == 0 {
+                let t = (r * 0.07).max(1.5);
+                tick(i, 12, r * 0.72 + t / 2.0, r * 0.92 - t / 2.0, t, alpha(ink, 0.8));
+            } else {
+                let t = (r * 0.04).max(1.0);
+                tick(i, 12, r * 0.8 + t / 2.0, r * 0.92 - t / 2.0, t, alpha(ink, 0.55));
+            }
+        }
+    }
+    if let Some(code) = code {
+        let fs = style::MICRO.size * k;
+        c.text_cap(code, cx, cy + r * 0.42 - c.cap_h(fs) / 2.0, fs, style::MICRO.weight, alpha(ink, 0.55), Align::Center, r * 2.0);
+    }
+    let hand = |deg: f32, len: f32, tail: f32, t: f32, col: Col| {
+        let a = deg.to_radians();
+        c.line(cx - tail * a.sin(), cy + tail * a.cos(), cx + len * a.sin(), cy - len * a.cos(), t, col);
+    };
+    hand((h % 12) as f32 * 30.0 + m as f32 * 0.5, r * 0.5, 0.0, (r * 0.085).max(1.5), ink);
+    hand(m as f32 * 6.0 + s.unwrap_or(0) as f32 * 0.1, r * 0.78, 0.0, (r * 0.06).max(1.2), ink);
+    if let Some(s) = s {
+        hand(s as f32 * 6.0, r * 0.86, r * 0.18, (r * 0.022).max(1.0), ORANGE);
+    }
+    c.circle(cx, cy, (r * 0.075).max(2.0), ink);
+    c.circle(cx, cy, (r * 0.045).max(1.2), ORANGE);
+    if r >= 40.0 {
+        c.circle(cx, cy, r * 0.018, c.halo());
+    }
+}
+
+/// The analog face on a rounded panel (w × h, corner `rad`), with numerals at 12, 3, 6 and 9
+/// on the panel's inner ellipse when there's room.
+#[allow(clippy::too_many_arguments)]
+fn square_dial(c: &Canvas, x0: f32, y0: f32, w: f32, h: f32, rad: f32, hh: u32, mm: u32, sec: u32) {
+    let (face, ink) = if c.light { FACE_LIGHT } else { FACE_DARK };
+    c.rr(x0, y0, w, h, rad, face);
+    c.rr_stroke(x0, y0, w, h, rad, if c.light { c.sep() } else { (1.0, 1.0, 1.0, 0.08) }, 1.0);
+    let s = w.min(h);
+    let (cx, cy) = (x0 + w / 2.0, y0 + h / 2.0);
     if s >= 60.0 {
         let fs = s * 0.13;
         for (num, dx, dy) in [("12", 0.0, -1.0), ("3", 1.0, 0.0), ("6", 0.0, 1.0), ("9", -1.0, 0.0)] {
-            let r = s * 0.37;
-            c.text(num, cx + dx * r, cy + dy * r - fs * 0.66, fs, 600, alpha(ink, 0.8), Align::Center, fs * 2.0, Font::Display);
+            let (px, py) = (cx + dx * w * 0.37, cy + dy * h * 0.37);
+            c.text_cap(num, px, py - c.cap_h(fs) / 2.0, fs, 500, alpha(ink, 0.85), Align::Center, fs * 3.0);
         }
     } else {
         for i in 0..4 {
             let a = (i as f32 * 90.0).to_radians();
-            let r = s * 0.4;
-            c.circle(cx + r * a.sin(), cy - r * a.cos(), s * 0.025, alpha(ink, 0.7));
+            c.circle(cx + w * 0.4 * a.sin(), cy - h * 0.4 * a.cos(), (s * 0.03).max(1.0), alpha(ink, 0.7));
         }
     }
-    let hand = |deg: f32, len: f32, t: f32, col: Col| {
+    let hand = |deg: f32, len: f32, tail: f32, t: f32, col: Col| {
         let a = deg.to_radians();
-        c.line(cx - len * 0.12 * a.sin(), cy + len * 0.12 * a.cos(), cx + len * a.sin(), cy - len * a.cos(), t, col);
+        c.line(cx - tail * a.sin(), cy + tail * a.cos(), cx + len * a.sin(), cy - len * a.cos(), t, col);
     };
-    hand((h % 12) as f32 * 30.0 + m as f32 * 0.5, s * 0.22, s * 0.045, ink);
-    hand(m as f32 * 6.0 + sec as f32 * 0.1, s * 0.33, s * 0.032, ink);
-    hand(sec as f32 * 6.0, s * 0.36, s * 0.015, ORANGE);
-    c.circle(cx, cy, s * 0.03, ORANGE);
+    hand((hh % 12) as f32 * 30.0 + mm as f32 * 0.5, s * 0.20, 0.0, (s * 0.045).max(1.5), ink);
+    hand(mm as f32 * 6.0 + sec as f32 * 0.1, s * 0.30, 0.0, (s * 0.032).max(1.2), ink);
+    hand(sec as f32 * 6.0, s * 0.30, s * 0.06, (s * 0.015).max(1.0), ORANGE);
+    c.circle(cx, cy, (s * 0.034).max(2.0), ink);
+    c.circle(cx, cy, (s * 0.02).max(1.2), ORANGE);
+    if s >= 80.0 {
+        c.circle(cx, cy, s * 0.008, c.halo());
+    }
 }
 
+/// One seven-segment digit: chamfered segments with a hairline gap at the joins.
 #[allow(clippy::too_many_arguments)]
 fn seg_digit(c: &Canvas, x: f32, y: f32, w: f32, h: f32, d: u32, on: Col, off: Col) {
     // a b c d e f g
     const SEGS: [u8; 10] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
     let m = SEGS[d as usize % 10];
-    let t = w * 0.16;
-    let hh = h / 2.0;
-    let rects = [
-        (x + t * 0.6, y, w - t * 1.2, t),
-        (x + w - t, y + t * 0.6, t, hh - t * 0.9),
-        (x + w - t, y + hh + t * 0.3, t, hh - t * 0.9),
-        (x + t * 0.6, y + h - t, w - t * 1.2, t),
-        (x, y + hh + t * 0.3, t, hh - t * 0.9),
-        (x, y + t * 0.6, t, hh - t * 0.9),
-        (x + t * 0.6, y + hh - t / 2.0, w - t * 1.2, t),
-    ];
-    for (i, r) in rects.iter().enumerate() {
-        c.rr(r.0, r.1, r.2, r.3, t / 2.0, if m & (1 << i) != 0 { on } else { off });
+    let ht = w * 0.09;
+    let gp = (ht * 0.25).clamp(0.4, 1.2);
+    let (xl, xr) = (x + ht, x + w - ht);
+    let (yt, ym, yb) = (y + ht, y + h / 2.0, y + h - ht);
+    let hseg = |yc: f32| vec![(xl + gp, yc), (xl + gp + ht, yc - ht), (xr - gp - ht, yc - ht), (xr - gp, yc), (xr - gp - ht, yc + ht), (xl + gp + ht, yc + ht)];
+    let vseg = |xc: f32, ya: f32, yz: f32| vec![(xc, ya + gp), (xc + ht, ya + gp + ht), (xc + ht, yz - gp - ht), (xc, yz - gp), (xc - ht, yz - gp - ht), (xc - ht, ya + gp + ht)];
+    let segs = [hseg(yt), vseg(xr, yt, ym), vseg(xr, ym, yb), hseg(yb), vseg(xl, ym, yb), vseg(xl, yt, ym), hseg(ym)];
+    for (i, p) in segs.iter().enumerate() {
+        poly(c, p, if m & (1 << i) != 0 { on } else { off });
     }
 }
 
-fn month_grid(c: &Canvas, n: &super::Now, x0: f32, y0: f32, w: f32, h: f32) {
-    let colw = w / 7.0;
-    let first = n.first_weekday();
-    let rows = (first + n.days_in_month()).div_ceil(7) as f32;
-    let head = (h * 0.12).clamp(10.0, 20.0);
-    let rh = (h - head) / rows;
-    let fs = (rh * 0.55).min(colw * 0.5).clamp(7.0, 12.5);
-    for (i, d) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
-        c.tc(d, x0 + colw * (i as f32 + 0.5), y0, fs * 0.85, 600, c.text3(), colw);
-    }
-    for day in 1..=n.days_in_month() {
-        let idx = first + day - 1;
-        let cx = x0 + colw * ((idx % 7) as f32 + 0.5);
-        let cy = y0 + head + rh * (idx / 7) as f32 + rh / 2.0;
-        let today = day == n.day;
-        if today {
-            c.circle(cx, cy, (rh * 0.46).min(colw * 0.46), RED);
+/// The leading hour digit of an LCD time: lit, a ghost "8", or left out.
+#[derive(Clone, Copy, PartialEq)]
+enum LcdLead {
+    Digit,
+    Ghost,
+    None,
+}
+
+/// Width of an LCD time `dh` tall with `nd` digits (a colon after the hours).
+fn seg_w(dh: f32, nd: usize) -> f32 {
+    let dw = dh * 0.55;
+    nd as f32 * dw + (nd as f32 - 2.0) * dw * 0.25 + dw * 0.75
+}
+
+/// An LCD time from (x0, y0), `dh` tall. The colon sits centred in its gutter.
+#[allow(clippy::too_many_arguments)]
+fn seg_time(c: &Canvas, x0: f32, y0: f32, dh: f32, d: [u32; 4], lead: LcdLead, on: Col, off: Col, colon: Col) {
+    let dw = dh * 0.55;
+    let mut sx = x0;
+    for (i, v) in d.iter().enumerate() {
+        if i == 0 && lead == LcdLead::None {
+            continue;
         }
-        c.tc(&day.to_string(), cx, cy - fs * 0.68, fs, if today { 700 } else { 400 }, if today { WHITE } else { c.text1() }, colw);
+        if i == 2 {
+            let cx = sx - dw * 0.25 + dw * 0.75 / 2.0;
+            let r = (dw * 0.1).max(1.0);
+            c.circle(cx, y0 + dh * 0.3, r, colon);
+            c.circle(cx, y0 + dh * 0.7, r, colon);
+            sx += dw * 0.75 - dw * 0.25;
+        }
+        if i == 0 && lead == LcdLead::Ghost {
+            seg_digit(c, sx, y0, dw, dh, 8, off, off);
+        } else {
+            seg_digit(c, sx, y0, dw, dh, *v, on, off);
+        }
+        sx += dw * 1.25;
     }
 }
 
-/// This week as a row: day letters and dates, today marked.
-fn week_row(c: &Canvas, n: &super::Now, x0: f32, y0: f32, w: f32, h: f32) {
+/// This week as a strip: weekday letters over dates, today's letter red and its date on a
+/// red disc. `month_scope` greys the days outside this month.
+#[allow(clippy::too_many_arguments)]
+fn week_row(c: &Canvas, n: &super::Now, x0: f32, w: f32, letter_base: f32, date_base: f32, ls: f32, fs: f32, weight: u32, disc: f32, month_scope: bool) {
     let colw = w / 7.0;
-    let r = (h * 0.28).min(colw * 0.42).min(16.0);
-    let fs = (r * 0.95).max(8.0);
-    let ls = (h * 0.2).clamp(8.0, 11.0);
     for i in 0..7u32 {
         let off = i as i64 - n.weekday as i64;
-        let d = n.day as i64 + off;
-        let dim = super::days_in_month(n.year, n.month) as i64;
-        let prev = super::days_in_month(n.year, if n.month == 1 { 12 } else { n.month - 1 }) as i64;
-        let shown = if d < 1 { d + prev } else if d > dim { d - dim } else { d };
+        let (m, d) = shift_day(n, off);
         let cx = x0 + colw * (i as f32 + 0.5);
         let today = off == 0;
-        // Today in red, as in every calendar face (month grid, date tile, day page).
-        c.tc(&DAYS[i as usize][..1], cx, y0, ls, 600, if today { RED } else { c.text3() }, colw);
-        let cy = y0 + ls * 1.5 + (h - ls * 1.5) / 2.0;
+        c.text_base(&DAYS[i as usize][..1], cx, letter_base, ls, style::MICRO.weight, if today { RED } else { c.text3() }, Align::Center, colw);
         if today {
-            c.circle(cx, cy, r, RED);
+            c.circle(cx, date_base - c.cap_h(fs) / 2.0, disc / 2.0, today_fill(c));
         }
-        c.tc(&shown.to_string(), cx, cy - fs * 0.68, fs, if today { 700 } else { 500 }, if today { WHITE } else { c.text1() }, colw);
+        let col = if today {
+            WHITE
+        } else if month_scope && m != n.month {
+            c.text3()
+        } else {
+            c.text1()
+        };
+        c.text_base(&d.to_string(), cx, date_base, fs, if today { 700 } else { weight }, col, Align::Center, colw.max(disc));
     }
 }
 
-/// A tear-off calendar page for today.
-fn day_tile(c: &Canvas, n: &super::Now, sh: Shape) {
-    let dense = matches!(sh, Shape::Mini | Shape::Dock);
-    let s = c.h.min(c.w) - if dense { 6.0 } else { 16.0 };
-    let (x0, y0) = ((c.w - s) / 2.0, (c.h - s) / 2.0);
-    if !dense && c.w > c.h * 1.3 {
-        bg(c, false);
+/// This month as a grid: weekday letters, then a row per week; weekends in text2, today on
+/// a red disc.
+#[allow(clippy::too_many_arguments)]
+fn month_grid(c: &Canvas, n: &super::Now, x0: f32, w: f32, letter_base: f32, first_base: f32, pitch: f32, fs: f32, weight: u32, disc: f32) {
+    let colw = w / 7.0;
+    for (i, d) in ["S", "M", "T", "W", "T", "F", "S"].iter().enumerate() {
+        let today = i as u32 == n.weekday;
+        c.text_base(d, x0 + colw * (i as f32 + 0.5), letter_base, style::MICRO.size, style::MICRO.weight, if today { RED } else { c.text3() }, Align::Center, colw);
     }
-    c.rr(x0, y0, s, s, s * 0.2, (0.98, 0.98, 0.99, 1.0));
-    let hh = s * 0.28;
-    c.rr(x0, y0, s, hh + s * 0.2, s * 0.2, RED);
-    c.rr(x0, y0 + hh, s, s * 0.2, 0.0, (0.98, 0.98, 0.99, 1.0));
-    c.tc(&MONTHS[n.month as usize - 1][..3].to_uppercase(), x0 + s / 2.0, y0 + hh * 0.18, hh * 0.62, 700, WHITE, s);
-    c.text(&n.day.to_string(), x0 + s / 2.0, y0 + hh + s * 0.02, s * 0.5, 600, (0.1, 0.1, 0.12, 1.0), Align::Center, s, Font::Display);
+    let first = n.first_weekday();
+    for day in 1..=n.days_in_month() {
+        let idx = first + day - 1;
+        let col = idx % 7;
+        let cx = x0 + colw * (col as f32 + 0.5);
+        let base = first_base + pitch * (idx / 7) as f32;
+        let today = day == n.day;
+        if today {
+            c.circle(cx, base - c.cap_h(fs) / 2.0, disc / 2.0, today_fill(c));
+        }
+        let ink = if today {
+            WHITE
+        } else if col == 0 || col == 6 {
+            c.text2()
+        } else {
+            c.text1()
+        };
+        c.text_base(&day.to_string(), cx, base, fs, if today { 700 } else { weight }, ink, Align::Center, colw.max(disc));
+    }
 }
 
-fn clock(c: &Canvas, out: &mut Painted, k: ClockKind, x: &Ctx, sh: Shape) {
+/// Rows in this month's grid.
+fn month_rows(n: &super::Now) -> u32 {
+    (n.first_weekday() + n.days_in_month()).div_ceil(7)
+}
+
+/// A tear-off calendar page `s` square: a white tile with a red band (one shape, no seam),
+/// the month in the band and the day under it. Light cards give it a hairline.
+#[allow(clippy::too_many_arguments)]
+fn day_tile(c: &Canvas, n: &super::Now, x: f32, y: f32, s: f32, r: f32, band: f32, mfs: f32, nfs: f32) {
+    c.rr(x, y, s, s, r, PAGE);
+    rr_top(c, x, y, s, band, r, RED);
+    let mon = MONTHS[n.month as usize - 1][..3].to_uppercase();
+    c.text_cap(&mon, x + s / 2.0, y + (band - c.cap_h(mfs)) / 2.0, mfs, 700, WHITE, Align::Center, s);
+    // Optical centre: a pixel above the middle of the white.
+    let mid = y + band + (s - band) / 2.0 - 1.0;
+    c.text_cap(&n.day.to_string(), x + s / 2.0, mid - c.cap_h(nfs) / 2.0, nfs, 600, PAGE_INK, Align::Center, s);
+    if c.light {
+        c.rr_stroke(x, y, s, s, r, c.sep(), 1.0);
+    }
+}
+
+/// The Mini day tile shared by the calendar faces: 44, centred, concentric with the pill.
+fn mini_tile(c: &Canvas, n: &super::Now, k: f32) {
+    let s = 44.0 * k;
+    day_tile(c, n, (c.w - s) / 2.0, (c.h - s) / 2.0, s, style::concentric(style::DOCK_R, 5.0) * k, 14.0 * k, style::MICRO.size * k, 22.0 * k);
+}
+
+/// Everything the clock faces share for one paint.
+struct Cl {
+    n: super::Now,
+    time: String,
+    ap: &'static str,
+    mon: &'static str,
+    day: &'static str,
+    /// Dock scale (the spec is drawn at a 54 px dock).
+    k: f32,
+    /// Dock L: the wide pill with an accessory slot.
+    wide: bool,
+}
+
+impl Cl {
+    /// "Mon Nov 16"
+    fn date_short(&self) -> String {
+        format!("{} {} {}", &self.day[..3], &self.mon[..3], self.n.day)
+    }
+    /// "Monday, November 16"
+    fn date_long(&self) -> String {
+        format!("{}, {} {}", self.day, self.mon, self.n.day)
+    }
+    /// The Dock L accessory slot: (x, width).
+    fn slot(&self, c: &Canvas) -> (f32, f32) {
+        let w = (c.w * 0.34).round();
+        (c.w - style::M_DOCK * self.k - w, w)
+    }
+}
+
+fn clock(c: &Canvas, out: &mut Painted, kind: ClockKind, x: &Ctx, sh: Shape) {
     let n = x.now;
-    let time = format!("{}:{:02}", h12(n.hour), n.minute);
-    let mon = MONTHS[n.month as usize - 1];
-    let day = DAYS[n.weekday as usize];
-    let date_long = format!("{day}, {mon} {}", n.day);
-    let date_short = format!("{} {} {}", &day[..3], &mon[..3], n.day);
+    let dense = matches!(sh, Shape::Mini | Shape::Dock);
+    let t = Cl {
+        n,
+        time: format!("{}:{:02}", h12(n.hour), n.minute),
+        ap: ampm(n.hour),
+        mon: MONTHS[n.month as usize - 1],
+        day: DAYS[n.weekday as usize],
+        k: if dense { c.h / 54.0 } else { 1.0 },
+        wide: sh == Shape::Dock && c.w >= c.h * 3.4,
+    };
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open("ms-settings:dateandtime".into())));
-    match k {
-        ClockKind::Digital | ClockKind::ClockWeather => {
-            let weather = if k == ClockKind::ClockWeather { x.weather.map(|w| (weather_emoji(w.code, w.is_day), format!("{:.0}°", d0(w.temp_c)))) } else { None };
-            match sh {
-                Shape::Mini => {
-                    let fs = fit(c, &time, c.h * 0.36, 9.0, 600, Font::Display, c.w - 6.0);
-                    c.text(&time, c.w / 2.0, c.h * 0.2, fs, 600, c.text1(), Align::Center, c.w, Font::Display);
-                    let sub = weather.as_ref().map(|w| w.1.clone()).unwrap_or_else(|| ampm(n.hour).to_string());
-                    c.tc(&sub, c.w / 2.0, c.h * 0.2 + fs * 1.22, c.h * 0.18, 600, c.text2(), c.w);
-                }
-                Shape::Dock => {
-                    // Time on the left; the date (or weather) beside it when there's room, else under it.
-                    let ts = (c.h * 0.42).max(15.0);
-                    let tw = c.measure(&time, ts, 600, Font::Display).0;
-                    let aw = c.measure(ampm(n.hour), ts * 0.4, 600, Font::Text).0;
-                    let beside = c.w > 12.0 + tw + aw + 10.0 + c.h * 1.2;
-                    let x0 = 12.0;
-                    if beside {
-                        let ty = (c.h - ts * 1.3) / 2.0;
-                        c.text(&time, x0, ty, ts, 600, c.text1(), Align::Left, c.w, Font::Display);
-                        c.tw(ampm(n.hour), x0 + tw + 3.0, ty + ts * 0.66, ts * 0.38, 600, c.text2(), 30.0);
-                        let rx = x0 + tw + aw + 16.0;
-                        c.line(rx - 7.0, c.h * 0.28, rx - 7.0, c.h * 0.72, 1.0, c.ink(0.15));
-                        let cs = (c.h * 0.2).max(9.5);
-                        match &weather {
-                            Some((e, t)) => {
-                                c.text(e, rx, c.h / 2.0 - cs * 1.05, cs * 1.4, 400, c.text1(), Align::Left, 40.0, Font::Text);
-                                c.tw(t, rx + cs * 1.9, c.h / 2.0 - cs * 0.85, cs * 1.25, 600, c.text1(), c.w - rx - cs * 1.9 - 6.0);
-                            }
-                            None => {
-                                c.tw(&day[..3].to_uppercase(), rx, c.h / 2.0 - cs * 1.3, cs, 700, RED, c.w - rx - 6.0);
-                                c.tw(&format!("{} {}", &mon[..3], n.day), rx, c.h / 2.0 - 1.0, cs * 1.15, 600, c.text1(), c.w - rx - 6.0);
-                            }
-                        }
-                    } else {
-                        let ty = c.h * 0.12;
-                        c.text(&time, x0, ty, ts, 600, c.text1(), Align::Left, c.w, Font::Display);
-                        c.tw(ampm(n.hour), x0 + tw + 3.0, ty + ts * 0.42, ts * 0.42, 500, c.text2(), 30.0);
-                        let cap = weather.map(|(e, t)| format!("{e} {t}")).unwrap_or(date_short);
-                        c.tw(&cap, x0, ty + ts * 1.24, (c.h * 0.19).max(9.5), 400, c.text2(), c.w - x0 - 4.0);
-                    }
-                }
-                Shape::Small => {
-                    // AM/PM beside the minutes, not on a line of its own.
-                    let aw = c.measure(ampm(n.hour), 11.0, 600, Font::Text).0;
-                    let fs = fit(c, &time, 40.0, 20.0, 300, Font::Display, c.w - 28.0 - aw - 3.0);
-                    let tw = c.num(&time, 14.0, 16.0, fs, 300, c.text1());
-                    c.tw(ampm(n.hour), 14.0 + tw + 3.0, 16.0 + fs * 0.62, 11.0, 600, c.text2(), 40.0);
-                    match weather {
-                        Some((e, t)) => {
-                            c.text(e, 14.0, c.h - 36.0, 18.0, 400, c.text1(), Align::Left, 30.0, Font::Text);
-                            c.tw(&t, 40.0, c.h - 32.0, 14.0, 600, c.text1(), c.w - 54.0);
-                        }
-                        None => {
-                            c.tw(&date_short, 14.0, c.h - 28.0, 11.5, 400, c.text2(), c.w - 28.0);
-                        }
-                    }
-                }
-                Shape::Medium if k == ClockKind::Digital => {
-                    let tw = c.num(&time, 16.0, 6.0, 50.0, 300, c.text1());
-                    c.num(&format!(":{:02}", n.second), 18.0 + tw, 30.0, 22.0, 300, c.text3());
-                    c.tw(ampm(n.hour), 20.0 + tw + 34.0, 34.0, 15.0, 500, c.text2(), 40.0);
-                    c.tw(&date_long, 18.0, 68.0, 13.0, 400, c.text2(), c.w - 36.0);
-                }
-                Shape::Medium => {
-                    let tw = c.num(&time, 16.0, 12.0, 40.0, 400, c.text1());
-                    c.tw(ampm(n.hour), 20.0 + tw, 34.0, 13.0, 500, c.text2(), 40.0);
-                    c.tw(&date_long, 18.0, 66.0, 12.0, 400, c.text2(), c.w * 0.6);
-                    if let Some((e, t)) = weather {
-                        c.text(e, c.w - 60.0, 16.0, 28.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
-                        c.tr(&t, c.w - 16.0, 56.0, 20.0, 500, c.text1());
-                    }
-                }
-                Shape::Large => {
-                    // Big time with seconds, the date, and this week underneath.
-                    if weather.is_some() {
-                        // The weather takes the right side: no seconds, so AM/PM has room.
-                        let tw = c.num(&time, 16.0, 8.0, 58.0, 200, c.text1());
-                        c.tw(ampm(n.hour), 20.0 + tw, 42.0, 16.0, 500, c.text2(), 40.0);
-                    } else {
-                        let tw = c.num(&time, 16.0, 6.0, 64.0, 200, c.text1());
-                        c.num(&format!(":{:02}", n.second), 20.0 + tw, 38.0, 26.0, 300, c.text3());
-                        c.tw(ampm(n.hour), 20.0 + tw + 42.0, 42.0, 16.0, 500, c.text2(), 40.0);
-                    }
-                    c.tw(&date_long, 18.0, 86.0, 13.0, 500, c.text2(), c.w - 36.0);
-                    if let Some((e, t)) = weather {
-                        c.text(e, c.w - 56.0, 18.0, 30.0, 400, c.text1(), Align::Center, 60.0, Font::Text);
-                        c.tr(&t, c.w - 18.0, 62.0, 20.0, 500, c.text1());
-                    }
-                    week_row(c, &n, 14.0, 124.0, c.w - 28.0, c.h - 136.0);
-                }
-            }
-        }
-        ClockKind::Flip => {
-            let digits = [h12(n.hour) / 10, h12(n.hour) % 10, n.minute / 10, n.minute % 10];
-            let tile_col = if c.light { (0.13, 0.13, 0.15, 1.0) } else { (0.06, 0.06, 0.075, 1.0) };
-            let tile = |tx: f32, ty: f32, tw: f32, th: f32, d: u32| {
-                c.rr(tx, ty, tw, th, tw * 0.16, tile_col);
-                // Upper half a touch lighter, like a real flap.
-                c.rr(tx, ty, tw, th / 2.0, tw * 0.16, (1.0, 1.0, 1.0, 0.035));
-                let fs = (th * 0.66).min(tw * 1.08);
-                c.text(&d.to_string(), tx + tw / 2.0, ty + th / 2.0 - fs * 0.68, fs, 600, (0.97, 0.97, 0.98, 1.0), Align::Center, tw, Font::Display);
-                c.line(tx + 1.0, ty + th / 2.0, tx + tw - 1.0, ty + th / 2.0, 1.0, (0.0, 0.0, 0.0, 0.55));
-            };
-            if matches!(sh, Shape::Mini | Shape::Small) {
-                // Square spaces: hours above minutes, each a pair of flaps.
-                let pad = if sh == Shape::Mini { 5.0 } else { 14.0 };
-                let gap = if sh == Shape::Mini { 2.0 } else { 6.0 };
-                let tw = (c.w - 2.0 * pad - gap) / 2.0;
-                let th = ((c.h - 2.0 * pad - gap) / 2.0).min(tw * 1.25);
-                let top = (c.h - 2.0 * th - gap) / 2.0;
-                for (i, d) in digits.iter().enumerate() {
-                    let (col, row) = ((i % 2) as f32, (i / 2) as f32);
-                    tile(pad + col * (tw + gap), top + row * (th + gap), tw, th, *d);
-                }
+    match kind {
+        ClockKind::Digital => digital(c, x, &t, sh, false),
+        ClockKind::ClockWeather => digital(c, x, &t, sh, true),
+        ClockKind::Flip => flip(c, &t, sh),
+        ClockKind::World => world(c, x, &t, sh),
+        ClockKind::WorldTime => world_time(c, x, &t, sh),
+        ClockKind::WeekStrip => week(c, x, &t, sh),
+        ClockKind::Today => today(c, x, &t, sh),
+        ClockKind::Date => date(c, &t, sh),
+        ClockKind::DayPage => day_page(c, &t, sh),
+        ClockKind::Analog => analog(c, &t, sh),
+        ClockKind::AnalogSquare => analog_square(c, &t, sh),
+        ClockKind::Segment => segment(c, &t, sh),
+        ClockKind::Month => month(c, &t, sh),
+    }
+}
+
+/// A weather icon in a `size` box: the condition's emoji, or a quiet cloud glyph when there
+/// is no weather (so nothing moves when it arrives).
+fn wx_icon(c: &Canvas, wx: Option<&laminar_sys::weather::Weather>, x: f32, y: f32, size: f32) {
+    match wx {
+        Some(w) => draw_vis(c, &Vis::Emoji(weather_emoji(w.code, w.is_day)), x, y, size),
+        None => c.glyph(G_CLOUD, x + size / 2.0, y + size / 2.0, size * 0.7, c.text3()),
+    }
+}
+
+/// Today's date as a small day tile for a Dock L slot: "MON" over "16", right-aligned.
+fn day_slot(c: &Canvas, t: &Cl) {
+    let k = t.k;
+    let r = c.w - style::M_DOCK * k;
+    c.text_base(&t.day[..3].to_uppercase(), r, 24.0 * k, style::MICRO.size * k, style::MICRO.weight, RED, Align::Right, 40.0 * k);
+    c.text_base(&t.n.day.to_string(), r, 44.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Right, 40.0 * k);
+}
+
+/// Where a dock text column must end: before the day tile on Dock L, else the margin.
+fn day_slot_left(c: &Canvas, t: &Cl) -> f32 {
+    let k = t.k;
+    let r = c.w - style::M_DOCK * k;
+    if !t.wide {
+        return r;
+    }
+    let w = c.measure(&t.day[..3].to_uppercase(), style::MICRO.size * k, style::MICRO.weight, Font::Text).0.max(c.measure(&t.n.day.to_string(), style::VALUE.size * k, style::VALUE.weight, Font::Text).0);
+    r - w - style::SP[5] * k
+}
+
+/// A 1 px separator before a Dock L slot.
+fn slot_rule(c: &Canvas, t: &Cl) {
+    let k = t.k;
+    let (sx, _) = t.slot(c);
+    c.rr((sx - 8.0 * k).round(), 14.0 * k, 1.0, 26.0 * k, 0.0, c.sep());
+}
+
+/// The time (Value + AM/PM) over a caption in a dock text column from `x0`.
+fn dock_time(c: &Canvas, t: &Cl, x0: f32, caption: &str, right: f32) {
+    let k = t.k;
+    time_ap(c, &t.time, t.ap, x0, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), k);
+    c.text_base(caption, x0, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, right - x0);
+}
+
+/// Up to `max` event rows from baseline `base0`: time column, a calendar-colour bar, title.
+fn event_rows(c: &Canvas, evs: &[&Ev], base0: f32, max: usize) -> usize {
+    let m = style::M_CARD;
+    let shown: Vec<&&Ev> = evs.iter().take(max).collect();
+    let tcol = shown.iter().map(|e| c.measure(&ev_when(e), style::FOOT.size, 500, Font::Text).0).fold(52.0f32, f32::max) + style::SP[3];
+    for (i, e) in shown.iter().enumerate() {
+        let base = base0 + i as f32 * style::ROW_L;
+        c.text_base(&ev_when(e), m, base, style::FOOT.size, 500, c.text2(), Align::Left, tcol);
+        let bx = m + tcol;
+        c.rr(bx, base - 11.0, 3.0, 13.0, 1.5, BLUE);
+        c.text_base(&e.title, bx + 8.0, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, c.w - m - bx - 8.0);
+    }
+    shown.len()
+}
+
+/// Large fallback: Week / Day of year / Days left.
+fn year_stats(c: &Canvas, n: &super::Now, label_base: f32) {
+    let (wk, doy, left) = (iso_week(n).to_string(), n.day_of_year().to_string(), days_left(n).to_string());
+    let top = label_base - style::SP[6] - c.cap_h(style::VALUE.size);
+    stat_footer(c, [(wk.as_str(), "Week"), (doy.as_str(), "Day of year"), (left.as_str(), "Days left")], top);
+}
+
+/// Clock and Clock & Weather.
+fn digital(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape, with_wx: bool) {
+    let n = &t.n;
+    let k = t.k;
+    let wx = if with_wx { x.weather } else { None };
+    let temp = wx.map(|w| format!("{:.0}°", d0(w.temp_c))).unwrap_or_else(|| "--°".into());
+    let temp_col = if wx.is_some() { c.text1() } else { c.text3() };
+    let hi_lo = wx.map(|w| format!("H {:.0}° L {:.0}°", d0(w.high_c), d0(w.low_c))).unwrap_or_else(|| "H --° L --°".into());
+    let md = format!("{} {}", &t.mon[..3], n.day);
+    match sh {
+        Shape::Mini => {
+            if with_wx {
+                // Value-led: the weather mark over the time.
+                let v = style::BADGE_MINI * k;
+                wx_icon(c, wx, (c.w - v) / 2.0, 8.0 * k, v);
+                let role = Type { size: style::MINI_VALUE.size * k, min: style::MINI_VALUE.min * k, ..style::MINI_VALUE };
+                let (s, fs) = fit_value(c, &t.time, role, c.w - 2.0 * style::M_MINI * k);
+                c.text_base(&s, c.w / 2.0, 45.0 * k, fs, role.weight, c.text1(), Align::Center, c.w * 2.0);
             } else {
-                let dense = sh == Shape::Dock;
-                let pad = if dense { 6.0 } else { 14.0 };
-                let gap = if dense { 2.0 } else { 5.0 };
-                let mid = if dense { 9.0 } else { 18.0 };
-                let tw = (c.w - 2.0 * pad - 2.0 * gap - mid) / 4.0;
-                let th = (c.h - 2.0 * pad).min(tw * 1.45);
-                let top = (c.h - th) / 2.0;
-                let mut tx = pad;
-                for (i, d) in digits.iter().enumerate() {
-                    if i == 2 {
-                        // The colon between hours and minutes.
-                        let cx = tx - gap + mid / 2.0;
-                        let r = (mid * 0.16).max(1.5);
-                        c.circle(cx, top + th * 0.36, r, c.text2());
-                        c.circle(cx, top + th * 0.64, r, c.text2());
-                        tx += mid - gap;
+                let fs = fit(c, &t.time, 15.0 * k, 12.0 * k, 600, Font::Text, c.w - 2.0 * style::M_MINI * k);
+                c.text_base(&t.time, c.w / 2.0, 32.0 * k, fs, 600, c.text1(), Align::Center, c.w * 2.0);
+                c.text_base(t.ap, c.w / 2.0, 45.0 * k, style::MICRO.size * k, style::MICRO.weight, c.text3(), Align::Center, c.w);
+            }
+        }
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let (sx, sw) = t.slot(c);
+            let right = if t.wide { sx - 16.0 * k } else { c.w - m };
+            if !with_wx {
+                dock_time(c, t, m, &t.date_short(), right);
+                if t.wide {
+                    // This week as dots: weekday letters, today in red.
+                    let colw = sw / 7.0;
+                    for i in 0..7u32 {
+                        let cx = sx + colw * (i as f32 + 0.5);
+                        let today = i == n.weekday;
+                        let ms = style::MICRO.size * k;
+                        c.text_cap(&DAYS[i as usize][..1], cx, 14.0 * k, ms, style::MICRO.weight, if today { RED } else { c.text3() }, Align::Center, colw);
+                        c.circle(cx, 33.0 * k, 2.0 * k, if today { RED } else { c.track() });
                     }
-                    tile(tx, top, tw, th, *d);
-                    tx += tw + if i == 1 { 0.0 } else { gap };
+                }
+            } else if t.wide {
+                dock_time(c, t, m, &format!("{}, {md}", &t.day[..3]), right);
+                slot_rule(c, t);
+                let vs = style::VALUE.size * k;
+                let tw = c.measure(&temp, vs, style::VALUE.weight, Font::Text).0;
+                c.text_base(&temp, c.w - m, 30.0 * k, vs, style::VALUE.weight, temp_col, Align::Right, sw);
+                let is = 18.0 * k;
+                wx_icon(c, wx, c.w - m - tw - style::SP[1] * k - is, 30.0 * k - c.cap_h(vs) / 2.0 - is / 2.0, is);
+                c.text_base(&hi_lo, c.w - m, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Right, sw);
+            } else {
+                time_ap(c, &t.time, t.ap, m, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), k);
+                // Caption: icon, temperature (never cut), then the condition (may truncate).
+                let fs = style::FOOT.size * k;
+                let is = 12.0 * k;
+                wx_icon(c, wx, m, 44.0 * k - c.cap_h(fs) / 2.0 - is / 2.0, is);
+                let tx = m + is + style::SP[1] * k;
+                c.text_base(&temp, tx, 44.0 * k, fs, style::FOOT.weight, c.text2(), Align::Left, c.w * 2.0);
+                let cx = tx + c.measure(&temp, fs, style::FOOT.weight, Font::Text).0 + style::SP[1] * k;
+                if let Some(w) = wx {
+                    c.text_base(&w.description, cx, 44.0 * k, fs, style::FOOT.weight, c.text2(), Align::Left, c.w - m - cx);
                 }
             }
         }
-        ClockKind::World => {
-            let cities = super::world_cities(x.cfg);
-            let n_c = match sh {
+        Shape::Small => {
+            let m = style::M_SMALL;
+            if with_wx {
+                wx_icon(c, wx, m, 12.0, 24.0);
+                c.text_base(&temp, c.w - m, 30.0, style::VALUE.size, style::VALUE.weight, temp_col, Align::Right, 60.0);
+            } else {
+                c.text_cap(&t.day[..3].to_uppercase(), m, 16.0, style::MICRO.size, style::MICRO.weight, RED, Align::Left, 60.0);
+            }
+            let aw = c.measure(t.ap, style::MICRO.size, style::MICRO.weight, Font::Text).0 + 3.0;
+            let fs = fit(c, &t.time, 40.0, if with_wx { 26.0 } else { 30.0 }, 300, Font::Text, c.w - 2.0 * m - aw);
+            time_ap(c, &t.time, t.ap, m, 86.0, fs, style::time_weight(fs), c.text1(), 1.0);
+            let cap = if with_wx { format!("{}, {md}", &t.day[..3]) } else { format!("{} {}", t.mon, n.day) };
+            c.text_base(&cap, m, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let hs = style::HERO_XL.size;
+            let base = m + c.cap_h(hs);
+            time_ap(c, &t.time, t.ap, m, base, hs, style::time_weight(hs), c.text1(), 1.0);
+            let large = sh == Shape::Large;
+            if large && !with_wx {
+                // Seconds stack under AM/PM, on the hero's baseline.
+                let tw = c.measure(&t.time, hs, style::time_weight(hs), Font::Text).0;
+                c.text_base(&format!(":{:02}", n.second), m + tw + 3.0, base, style::BODY.size, 400, c.text3(), Align::Left, 40.0);
+            }
+            if with_wx {
+                let is = 28.0;
+                wx_icon(c, wx, c.w - m - is, 14.0, is);
+                let ts = 20.0;
+                let tw = c.measure(&temp, ts, style::time_weight(ts), Font::Text).0;
+                c.text_base(&temp, c.w - m, 64.0, ts, style::time_weight(ts), temp_col, Align::Right, 80.0);
+                let cw = c.w - 2.0 * m - tw - style::SP[4];
+                let cap = fit_label(c, &[t.date_long(), format!("{}, {md}", &t.day[..3])], style::CAPTION.size, 400, cw);
+                c.text_base(&cap, m, 64.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, cw);
+                let third = wx.map(|w| format!("{} · {hi_lo}", w.description)).unwrap_or_else(|| "Weather unavailable".into());
+                c.text_base(&third, m, 80.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - 2.0 * m);
+            } else {
+                // The date, and this week in the right accessory box.
+                let bx = 148.0;
+                let cap = fit_label(c, &[t.date_long(), format!("{}, {md}", &t.day[..3])], style::CAPTION.size, 400, bx - m - style::SP[3]);
+                c.text_base(&cap, m, 70.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, bx - m - style::SP[3]);
+                week_row(c, n, bx, c.w - m - bx, 48.0 + c.cap_h(style::MICRO.size), 75.0, style::MICRO.size, style::MICRO.size, 500, 16.0, false);
+            }
+            if large {
+                separator(c, style::SEP_Y_LARGE);
+                let base0 = style::DETAIL_TOP + 16.0;
+                if with_wx {
+                    // The next hours: hour, icon, temperature in six columns.
+                    let (rx, _, rw, _) = detail_region(c);
+                    let cw = rw / 6.0;
+                    for i in 0..6usize {
+                        let cx = rx + cw * (i as f32 + 0.5);
+                        let hour = (n.hour as usize + i) % 24;
+                        let (label, w_i, tt) = match wx {
+                            Some(w) if i == 0 => ("Now".to_string(), Some((w.code, w.is_day)), format!("{:.0}°", d0(w.temp_c))),
+                            Some(w) if w.hourly.len() >= i => {
+                                let (hh, tc, code) = w.hourly[i - 1];
+                                (format!("{} {}", h12(hh as u32), ampm(hh as u32)), Some((code, (6..19).contains(&hh))), format!("{:.0}°", d0(tc)))
+                            }
+                            _ => (if i == 0 { "Now".into() } else { format!("{} {}", h12(hour as u32), ampm(hour as u32)) }, None, "--°".into()),
+                        };
+                        c.text_base(&label, cx, base0, style::FOOT.size, 500, c.text2(), Align::Center, cw);
+                        let is = 22.0;
+                        match w_i {
+                            Some((code, day)) => draw_vis(c, &Vis::Emoji(weather_emoji(code, day)), cx - is / 2.0, 134.0, is),
+                            None => c.glyph(G_CLOUD, cx, 134.0 + is / 2.0, is * 0.7, c.text3()),
+                        }
+                        c.text_base(&tt, cx, 178.0, style::TITLE.size, style::TITLE.weight, if w_i.is_some() { c.text1() } else { c.text3() }, Align::Center, cw);
+                    }
+                } else {
+                    match events(x).filter(|e| !e.is_empty()) {
+                        Some(evs) => {
+                            event_rows(c, &evs.iter().collect::<Vec<_>>(), base0, 3);
+                        }
+                        None => year_stats(c, n, 164.0),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One split-flap: a dark flap with a lighter upper half, a hinge split and notches, an
+/// optional character (cap height 62% of the flap) and an "AM/PM" in its bottom-left.
+#[allow(clippy::too_many_arguments)]
+fn flap(c: &Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, ch: Option<&str>, fs: f32, ap: Option<&str>, k: f32) {
+    let fill = if c.light { hex(0x2C2C2E) } else { (0.06, 0.06, 0.075, 1.0) };
+    if c.light {
+        // Soft 0/1/2 shadow so the flap sits on the card rather than in it.
+        c.rr(x - 0.5, y + 1.0, w + 1.0, h + 1.0, r + 0.5, (0.0, 0.0, 0.0, 0.06));
+        c.rr(x, y + 1.0, w, h, r, (0.0, 0.0, 0.0, 0.12));
+    }
+    c.rr(x, y, w, h, r, fill);
+    rr_top(c, x, y, w, h / 2.0, r, (1.0, 1.0, 1.0, 0.04));
+    if let Some(s) = ch {
+        c.text_cap(s, x + w / 2.0, y + (h - c.cap_h(fs)) / 2.0, fs, 600, (0.97, 0.97, 0.98, 1.0), Align::Center, w * 1.5);
+    }
+    if let Some(ap) = ap {
+        let ms = style::MICRO.size * k;
+        c.text_base(ap, x + 4.0 * k, y + h - 4.0 * k, ms, style::MICRO.weight, (1.0, 1.0, 1.0, 0.55), Align::Left, w);
+    }
+    // The split: a gap in the card colour, with a notch at each side.
+    let hy = y + h / 2.0;
+    c.rr(x, hy - 0.5, w, 1.0, 0.0, if c.light { (0.0, 0.0, 0.0, 0.5) } else { c.halo() });
+    if h >= 40.0 * k {
+        c.rr(x, hy - 1.5 * k, 2.0 * k, 3.0 * k, 0.0, c.halo());
+        c.rr(x + w - 2.0 * k, hy - 1.5 * k, 2.0 * k, 3.0 * k, 0.0, c.halo());
+    }
+    if c.light {
+        c.rr_stroke(x - 1.0, y - 1.0, w + 2.0, h + 2.0, r + 1.0, (0.0, 0.0, 0.0, 0.10), 1.0);
+    }
+}
+
+/// The font size whose cap height is 62% of a flap `h` tall.
+fn flap_fs(c: &Canvas, h: f32) -> f32 {
+    let guess = h * 0.62 / 0.7;
+    h * 0.62 / (c.cap_h(guess) / guess)
+}
+
+fn flip(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let hr = h12(n.hour);
+    // A 12-hour clock has no leading zero: that flap stays blank, like a real split-flap.
+    let digits = [(hr >= 10).then(|| (hr / 10).to_string()), Some((hr % 10).to_string()), Some((n.minute / 10).to_string()), Some((n.minute % 10).to_string())];
+    match sh {
+        Shape::Mini | Shape::Small => {
+            // Square spaces: hours above minutes.
+            let mini = sh == Shape::Mini;
+            let (pad, gap) = if mini { (6.0 * k, 2.0 * k) } else { (style::M_SMALL, style::SP[2]) };
+            let r = if mini { style::concentric(style::DOCK_R, 6.0) * k } else { style::concentric(style::CARD_R, style::M_SMALL) };
+            let fw = (c.w - 2.0 * pad - gap) / 2.0;
+            let fh = (c.h - 2.0 * pad - gap) / 2.0;
+            let fs = flap_fs(c, fh);
+            for (i, d) in digits.iter().enumerate() {
+                let (col, row) = ((i % 2) as f32, (i / 2) as f32);
+                let ap = (!mini && i == 0).then_some(t.ap);
+                flap(c, pad + col * (fw + gap), pad + row * (fh + gap), fw, fh, r, d.as_deref(), fs, ap, k);
+            }
+        }
+        Shape::Dock => {
+            // Dock L keeps Dock M's flaps and adds AM/PM and the date in its slot.
+            let (pad, gap, mid) = (6.0 * k, 2.0 * k, 9.0 * k);
+            let span = c.w.min(2.6 * c.h);
+            let fw = (span - 2.0 * pad - 2.0 * gap - mid) / 4.0;
+            let fh = c.h - 2.0 * pad;
+            let fs = flap_fs(c, fh).min(fw * 1.3);
+            let x0 = if t.wide { pad } else { (c.w - (4.0 * fw + 2.0 * gap + mid)) / 2.0 };
+            flap_row(c, &digits, x0, pad, fw, fh, gap, mid, style::concentric(style::DOCK_R, 6.0) * k, fs, None, k);
+            if t.wide {
+                let r = c.w - style::M_DOCK * k;
+                c.text_base(t.ap, r, 24.0 * k, style::MICRO.size * k, style::MICRO.weight, c.text2(), Align::Right, 60.0 * k);
+                c.text_base(&format!("{} {}", &t.day[..3], n.day), r, 40.0 * k, style::FOOT.size * k, 600, c.text1(), Align::Right, 60.0 * k);
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let (gap, mid) = (style::SP[2], style::SP[6]);
+            let fw = (c.w - 2.0 * m - 2.0 * gap - mid) / 4.0;
+            let fh = 80.0 - m;
+            let r = style::concentric(style::CARD_R, m);
+            flap_row(c, &digits, m, m, fw, fh, gap, mid, r, flap_fs(c, fh), Some(t.ap), 1.0);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                // The date as a smaller split-flap board: MON · 16 · NOV.
+                let groups = [t.day[..3].to_uppercase(), n.day.to_string(), t.mon[..3].to_uppercase()];
+                let (bw, bh, bg_, gg) = (22.0, 34.0, style::SP[0], style::SP[5]);
+                let total: f32 = groups.iter().map(|g| g.chars().count() as f32 * (bw + bg_) - bg_).sum::<f32>() + gg * 2.0;
+                let mut bx = (c.w - total) / 2.0;
+                let by = 120.0;
+                for g in &groups {
+                    for ch in g.chars() {
+                        flap(c, bx, by, bw, bh, style::R_MIN, Some(&ch.to_string()), 20.0, None, 1.0);
+                        bx += bw + bg_;
+                    }
+                    bx += gg - bg_;
+                }
+                c.text_base(&t.date_long(), c.w / 2.0, 178.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Center, c.w - 2.0 * m);
+            }
+        }
+    }
+}
+
+/// Four flaps in a row (hours, colon gutter, minutes); AM/PM inside the first hour flap.
+#[allow(clippy::too_many_arguments)]
+fn flap_row(c: &Canvas, digits: &[Option<String>; 4], x0: f32, y: f32, fw: f32, fh: f32, gap: f32, mid: f32, r: f32, fs: f32, ap: Option<&str>, k: f32) {
+    let mut fx = x0;
+    for (i, d) in digits.iter().enumerate() {
+        if i == 2 {
+            let cx = fx - gap + mid / 2.0;
+            let rr = (mid * 0.16).max(1.5);
+            c.circle(cx, y + fh * 0.36, rr, c.text2());
+            c.circle(cx, y + fh * 0.64, rr, c.text2());
+            fx += mid - gap;
+        }
+        flap(c, fx, y, fw, fh, r.max(style::R_MIN * k), d.as_deref(), fs, if i == 0 { ap } else { None }, k);
+        fx += fw + if i == 1 { 0.0 } else { gap };
+    }
+}
+
+fn world(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let cities = super::world_cities(x.cfg);
+    let night = |h: u32| !(6..18).contains(&h);
+    match sh {
+        Shape::Mini | Shape::Dock => {
+            let nc = match sh {
                 Shape::Mini => 1,
-                Shape::Dock | Shape::Small => 2,
-                _ => 3,
+                _ if t.wide => 3,
+                _ => 2,
             }
             .min(cities.len());
-            let labels = !matches!(sh, Shape::Mini | Shape::Dock);
-            let slot = c.w / n_c as f32;
-            for (i, (label, key)) in cities.iter().take(n_c).enumerate() {
-                let (h, m, s, _) = super::tz_now(key).unwrap_or((n.hour, n.minute, n.second, n.weekday));
-                let cx = slot * (i as f32 + 0.5);
-                let room = if labels { c.h - if sh == Shape::Large { 50.0 } else { 34.0 } } else { c.h - 6.0 };
-                let r = (room / 2.0).min(slot / 2.0 - 6.0);
-                let cy = if labels { 10.0 + r } else { c.h / 2.0 };
-                dial(c, cx, cy, r, h, m, Some(s), !(6..18).contains(&h));
-                if labels {
-                    let name = if sh == Shape::Large { label.clone() } else { label.chars().take(3).collect::<String>().to_uppercase() };
-                    c.tc(&name, cx, cy + r + 6.0, 11.0, 600, c.text2(), slot);
-                    if sh == Shape::Large {
-                        c.tc(&format!("{}:{:02} {}", h12(h), m, ampm(h)), cx, cy + r + 22.0, 11.0, 400, c.text3(), slot);
-                    }
+            let (x0, x1) = if sh == Shape::Mini { (0.0, c.w) } else { (style::M_DOCK * k, c.w - style::M_DOCK * k) };
+            let slot = (x1 - x0) / nc as f32;
+            let r = if sh == Shape::Mini { 20.0 * k } else { 19.0 * k };
+            for (i, (label, key)) in cities.iter().take(nc).enumerate() {
+                let (h, m, s, _) = city_time(n, key);
+                dial(c, x0 + slot * (i as f32 + 0.5), c.h / 2.0, r, h, m, Some(s), night(h), Some(&city_code(label)), k);
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let (sw, gap) = (46.0, style::SP[3]);
+            for (i, (label, key)) in cities.iter().take(2).enumerate() {
+                let (h, mm, s, wd) = city_time(n, key);
+                let cx = m + sw / 2.0 + i as f32 * (sw + gap);
+                dial(c, cx, m + sw / 2.0, sw / 2.0, h, mm, Some(s), night(h), None, 1.0);
+                let tw = sw + gap;
+                c.text_base(&city_short(c, label, style::FOOT.size, 600, tw), cx, 78.0, style::FOOT.size, 600, c.text1(), Align::Center, tw);
+                c.text_base(&format!("{}:{:02} {}", h12(h), mm, ampm(h)), cx, 94.0, style::FOOT.size, 400, c.text2(), Align::Center, tw);
+                c.text_base(&fmt_hours(zone_diff(n, h, mm, wd).0), cx, 108.0, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Center, tw);
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let slot = (c.w - 2.0 * m) / 3.0;
+            let r = 25.0;
+            for (i, (label, key)) in cities.iter().take(3).enumerate() {
+                let (h, mm, s, _) = city_time(n, key);
+                let cx = m + slot * (i as f32 + 0.5);
+                dial(c, cx, m - 2.0 + r, r, h, mm, Some(s), night(h), None, 1.0);
+                c.text_base(&city_short(c, label, style::FOOT.size, 600, slot - 4.0), cx, 80.0, style::FOOT.size, 600, c.text1(), Align::Center, slot);
+            }
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                zone_rows(c, n, &cities.iter().take(3).collect::<Vec<_>>());
+            }
+        }
+    }
+}
+
+/// Large world-clock rows from the detail top, one per 24: the city, its day and offset,
+/// and its time (Value + AM/PM) right-aligned. The offset column follows the longest name.
+fn zone_rows(c: &Canvas, n: &super::Now, cities: &[&(String, String)]) {
+    let m = style::M_CARD;
+    let names_w = cities.iter().map(|(l, _)| c.measure(l, style::BODY.size, style::BODY.weight, Font::Text).0).fold(0.0f32, f32::max);
+    let ox = (m + names_w + style::SP[5]).min(112.0);
+    for (i, (label, key)) in cities.iter().enumerate() {
+        let (h, mm, _, wd) = city_time(n, key);
+        let base = style::DETAIL_TOP + 16.0 + i as f32 * style::ROW_L;
+        let (diff, dname) = zone_diff(n, h, mm, wd);
+        let tm = format!("{}:{:02}", h12(h), mm);
+        let vs = style::VALUE.size;
+        let gw = time_ap_w(c, &tm, ampm(h), vs, style::VALUE.weight, 1.0);
+        time_ap(c, &tm, ampm(h), c.w - m - gw, base, vs, style::VALUE.weight, c.text1(), 1.0);
+        c.text_base(label, m, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, ox - m - style::SP[2]);
+        c.text_base(&format!("{dname}, {}", fmt_hours(diff)), ox, base, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - m - gw - ox - style::SP[1]);
+    }
+}
+
+fn world_time(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let cities = super::world_cities(x.cfg);
+    let hero = 2.min(cities.len().saturating_sub(1));
+    let (label, key) = cities.get(hero).cloned().unwrap_or(("Tokyo".into(), "Tokyo Standard Time".into()));
+    let (h, m, _, wd) = city_time(n, &key);
+    let (diff, dname) = zone_diff(n, h, m, wd);
+    let tm = format!("{}:{:02}", h12(h), m);
+    let tap = ampm(h);
+    let offset = format!("{dname}, {}", fmt_hours(diff));
+    // Day or night there: the one mark that says this isn't your clock.
+    let (g, gcol) = if (6..18).contains(&h) { (G_SUN, if c.light { ORANGE } else { YELLOW }) } else { (G_MOON, if c.light { INDIGO_LIGHT } else { NIGHT_INDIGO }) };
+    match sh {
+        Shape::Mini => {
+            let gs = 18.0 * k;
+            c.glyph(g, c.w / 2.0, 8.0 * k + gs / 2.0, gs, gcol);
+            let role = Type { size: style::MINI_VALUE.size * k, min: style::MINI_VALUE.min * k, ..style::MINI_VALUE };
+            let (s, fs) = fit_value(c, &tm, role, c.w - 2.0 * style::M_MINI * k);
+            c.text_base(&s, c.w / 2.0, 45.0 * k, fs, role.weight, c.text1(), Align::Center, c.w * 2.0);
+        }
+        Shape::Dock => {
+            let mg = style::M_DOCK * k;
+            let ps = style::BADGE_DOCK * k;
+            c.rr(mg, mg, ps, ps, ps * style::BADGE_R, c.plate());
+            c.glyph(g, mg + ps / 2.0, mg + ps / 2.0, 16.0 * k, gcol);
+            let x0 = mg + ps + style::SP[4] * k;
+            let (sx, sw) = t.slot(c);
+            let right = if t.wide { sx - 16.0 * k } else { c.w - mg };
+            time_ap(c, &tm, tap, x0, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), k);
+            c.text_base(&label, x0, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, right - x0);
+            if t.wide {
+                c.text_base(&fmt_hours(diff), c.w - mg, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Right, sw);
+                c.text_base(dname, c.w - mg, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Right, sw);
+            }
+        }
+        Shape::Small => {
+            let mg = style::M_SMALL;
+            let ts = style::TITLE.size;
+            c.glyph(g, mg + 6.0, 16.0 + c.cap_h(ts) / 2.0, 12.0, gcol);
+            c.text_cap(&label, mg + 16.0, 16.0, ts, style::TITLE.weight, c.text1(), Align::Left, c.w - 2.0 * mg - 16.0);
+            let aw = c.measure(tap, style::MICRO.size, style::MICRO.weight, Font::Text).0 + 3.0;
+            let fs = fit(c, &tm, 36.0, 26.0, 300, Font::Text, c.w - 2.0 * mg - aw);
+            time_ap(c, &tm, tap, mg, 86.0, fs, style::time_weight(fs), c.text1(), 1.0);
+            c.text_base(&offset, mg, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * mg);
+        }
+        Shape::Medium | Shape::Large => {
+            let mg = style::M_CARD;
+            let ts = style::TITLE.size;
+            // Here: your own time, for comparison.
+            let here = format!("{} {}", t.time, t.ap);
+            let hs = 20.0;
+            let hw = c.measure(&here, hs, style::time_weight(hs), Font::Text).0;
+            c.text_base("Here", c.w - mg, 58.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Right, 60.0);
+            c.text_base(&here, c.w - mg, 80.0, hs, style::time_weight(hs), c.text2(), Align::Right, hw + 4.0);
+            let left_w = c.w - 2.0 * mg - hw - style::SP[6];
+            c.glyph(g, mg + 6.0, 16.0 + c.cap_h(ts) / 2.0, 12.0, gcol);
+            c.text_cap(&label, mg + 16.0, 16.0, ts, style::TITLE.weight, c.text1(), Align::Left, c.w - 2.0 * mg - 16.0);
+            let hero_s = 40.0;
+            time_ap(c, &tm, tap, mg, 62.0, hero_s, style::time_weight(hero_s), c.text1(), 1.0);
+            c.text_base(&offset, mg, 80.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, left_w);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let others: Vec<&(String, String)> = cities.iter().enumerate().filter(|(i, _)| *i != hero).map(|(_, v)| v).take(3).collect();
+                zone_rows(c, n, &others);
+                if others.len() < 3 {
+                    let base = style::DETAIL_TOP + 16.0 + others.len() as f32 * style::ROW_L;
+                    let note = local_zone().map(|z| format!("Here: {z}")).unwrap_or_else(|| "Times update automatically".into());
+                    c.text_base(&note, mg, base, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - 2.0 * mg);
                 }
             }
         }
-        ClockKind::WeekStrip => match sh {
-            Shape::Mini | Shape::Small => day_tile(c, &n, sh),
-            Shape::Dock => week_row(c, &n, 6.0, 4.0, c.w - 12.0, c.h - 8.0),
-            _ => {
-                c.tw(&format!("{mon} {}", n.year), 14.0, 10.0, 12.5, 600, c.text1(), c.w - 30.0);
-                week_row(c, &n, 14.0, 32.0, c.w - 28.0, if sh == Shape::Large { 70.0 } else { c.h - 40.0 });
-                if sh == Shape::Large {
-                    month_grid(c, &n, 14.0, 110.0, c.w - 28.0, c.h - 116.0);
-                }
-            }
-        },
-        ClockKind::WorldTime => {
-            let cities = super::world_cities(x.cfg);
-            let (label, key) = cities.into_iter().nth(2).unwrap_or(("Tokyo".into(), "Tokyo Standard Time".into()));
-            let (h, m, _, wd) = super::tz_now(&key).unwrap_or((n.hour, n.minute, 0, n.weekday));
-            let dname = if wd == n.weekday { "Today" } else if wd == (n.weekday + 1) % 7 { "Tomorrow" } else { "Yesterday" };
-            let diff = {
-                let mut d = (h as i32 * 60 + m as i32) - (n.hour as i32 * 60 + n.minute as i32);
-                if wd == (n.weekday + 1) % 7 {
-                    d += 24 * 60;
-                } else if wd != n.weekday {
-                    d -= 24 * 60;
-                }
-                d as f32 / 60.0
-            };
-            let t = format!("{}:{:02}", h12(h), m);
-            let offset = format!("{dname}, {}{:.0}h", if diff >= 0.0 { "+" } else { "" }, diff);
-            match sh {
-                Shape::Mini | Shape::Dock => compact_sum(c, &Sum::new(Vis::Glyph(G_CLOCK, c.text1()), t, label.clone()), sh),
-                Shape::Small => {
-                    c.circle(20.0, 22.0, 5.0, if (6..18).contains(&h) { YELLOW } else { hex(0x8E8EFF) });
-                    c.tw(&label, 32.0, 14.0, 12.5, 600, c.text1(), c.w - 44.0);
-                    let fs = fit(c, &t, 36.0, 18.0, 300, Font::Display, c.w - 50.0);
-                    c.num(&t, 14.0, 40.0, fs, 300, c.text1());
-                    c.tw(ampm(h), 18.0 + c.measure(&t, fs, 300, Font::Display).0, 40.0 + fs * 0.62, 11.0, 600, c.text2(), 30.0);
-                    c.tw(&offset, 14.0, c.h - 26.0, 11.0, 400, c.text2(), c.w - 28.0);
-                }
-                _ => {
-                    c.circle(22.0, 24.0, 5.0, if (6..18).contains(&h) { YELLOW } else { hex(0x8E8EFF) });
-                    c.tw(&label, 34.0, 15.0, 13.0, 600, c.text1(), c.w * 0.5);
-                    c.tw(&offset, 16.0, 40.0, 11.5, 400, c.text2(), c.w * 0.5);
-                    let tw = c.measure(ampm(h), 14.0, 500, Font::Text).0;
-                    c.text(&t, c.w - 22.0 - tw, 14.0, 40.0, 300, c.text1(), Align::Right, c.w, Font::Display);
-                    c.tr(ampm(h), c.w - 16.0, 36.0, 14.0, 500, c.text2());
-                    if sh == Shape::Large {
-                        // The other cities too.
-                        for (i, (l, key)) in super::world_cities(x.cfg).into_iter().take(2).enumerate() {
-                            let (hh, mm, _, _) = super::tz_now(&key).unwrap_or((n.hour, n.minute, 0, n.weekday));
-                            let y = 110.0 + i as f32 * 42.0;
-                            c.line(16.0, y - 8.0, c.w - 16.0, y - 8.0, 1.0, c.ink(0.08));
-                            c.tw(&l, 16.0, y + 4.0, 13.0, 600, c.text1(), c.w * 0.5);
-                            c.tr(&format!("{}:{:02} {}", h12(hh), mm, ampm(hh)), c.w - 16.0, y, 20.0, 300, c.text1());
+    }
+}
+
+/// The week strip in a dock pill (week and month): Dock L adds the month and week number.
+fn dock_week(c: &Canvas, t: &Cl) {
+    let k = t.k;
+    let n = &t.n;
+    if t.wide {
+        let m = style::M_DOCK * k;
+        c.text_base(&t.mon[..3].to_uppercase(), m, 22.0 * k, style::MICRO.size * k, style::MICRO.weight, c.text1(), Align::Left, 40.0 * k);
+        c.text_base(&format!("Wk {}", iso_week(n)), m, 40.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, 40.0 * k);
+        c.rr((52.0 * k).round(), 14.0 * k, 1.0, 26.0 * k, 0.0, c.sep());
+        let x0 = 60.0 * k;
+        week_row(c, n, x0, c.w - m - x0, 20.0 * k, 42.0 * k, style::MICRO.size * k, 13.0 * k, 600, 22.0 * k, false);
+    } else {
+        let x0 = 10.0 * k;
+        week_row(c, n, x0, c.w - 2.0 * x0, 20.0 * k, 41.0 * k, style::MICRO.size * k, style::FOOT.size * k, 600, 18.0 * k, false);
+    }
+}
+
+/// Header template for the calendar faces: title at the left, meta at the right.
+fn cal_header(c: &Canvas, title: &str, meta: &str) {
+    let m = style::M_CARD;
+    let mw = c.measure(meta, style::FOOT.size, style::FOOT.weight, Font::Text).0;
+    c.text_base(meta, c.w - m, style::HEADER_BASE, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Right, mw + 4.0);
+    c.text_base(title, m, style::HEADER_BASE, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, c.w - 2.0 * m - mw - style::SP[3]);
+}
+
+/// The Medium week strip (week and month).
+fn medium_week(c: &Canvas, n: &super::Now, dy: f32, month_scope: bool) {
+    let m = style::M_CARD;
+    week_row(c, n, m, c.w - 2.0 * m, 52.0 + dy, 77.0 + dy, style::MICRO.size, 15.0, 600, 24.0, month_scope);
+}
+
+fn week(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    match sh {
+        Shape::Mini => mini_tile(c, n, t.k),
+        Shape::Dock => dock_week(c, t),
+        Shape::Small => {
+            let m = style::M_SMALL;
+            c.text_base(&format!("Week {}", iso_week(n)), m, 28.0, style::TITLE.size, style::TITLE.weight, c.text1(), Align::Left, c.w - 2.0 * m);
+            c.text_base(&week_range(n), m, 44.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+            week_row(c, n, m, c.w - 2.0 * m, 84.0, 104.0, style::MICRO.size, style::MICRO.size, 600, 16.0, false);
+        }
+        Shape::Medium | Shape::Large => {
+            cal_header(c, t.mon, &format!("Week {}", iso_week(n)));
+            medium_week(c, n, 0.0, false);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let m = style::M_CARD;
+                match events(x).filter(|e| !e.is_empty()) {
+                    Some(evs) => {
+                        // A day chip ("TODAY", "TUE"), the title, the time at the right.
+                        let chip = |e: &Ev| match e.day.to_lowercase().as_str() {
+                            "" => String::new(),
+                            d if d.chars().count() > 5 => d.chars().take(3).collect::<String>().to_uppercase(),
+                            d => d.to_uppercase(),
+                        };
+                        let shown: Vec<&Ev> = evs.iter().take(3).collect();
+                        let cw = shown.iter().map(|e| c.measure(&chip(e), style::MICRO.size, style::MICRO.weight, Font::Text).0).fold(0.0f32, f32::max);
+                        let tx = (m + cw + style::SP[3]).max(52.0);
+                        for (i, e) in shown.iter().enumerate() {
+                            let base = style::DETAIL_TOP + 16.0 + i as f32 * style::ROW_L;
+                            c.text_base(&chip(e), m, base, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, cw + 4.0);
+                            let tw = c.measure(&e.time, style::FOOT.size, 500, Font::Text).0;
+                            c.text_base(&e.time, c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, tw + 4.0);
+                            c.text_base(&e.title, tx, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, c.w - m - tw - style::SP[3] - tx);
                         }
                     }
+                    None => year_stats(c, n, 164.0),
                 }
             }
         }
-        ClockKind::Today => {
-            let next = x.hub.feed("calendar").and_then(|f| f.extra.get("next_title").map(|t| format!("{t} · {}", f.extra.get("next_time").cloned().unwrap_or_default())));
-            match sh {
-                Shape::Mini => day_tile(c, &n, sh),
-                Shape::Dock => {
-                    c.tw(&day.to_uppercase(), 10.0, c.h * 0.12, (c.h * 0.18).max(9.0), 700, RED, c.w - 12.0);
-                    let t = format!("{} {}", &mon[..3], n.day);
-                    c.num(&t, 10.0, c.h * 0.36, fit(c, &t, c.h * 0.36, 9.0, 600, Font::Display, c.w - 12.0), 600, c.text1());
-                }
-                Shape::Small => {
-                    c.tw(&day.to_uppercase(), 14.0, 14.0, 11.0, 700, RED, c.w - 28.0);
-                    c.num(&n.day.to_string(), 12.0, 28.0, 44.0, 400, c.text1());
-                    c.tw(mon, 14.0, 84.0, 12.0, 600, c.text1(), c.w - 28.0);
-                    c.tw(next.as_deref().unwrap_or("No more events"), 14.0, c.h - 20.0, 10.0, 400, c.text3(), c.w - 28.0);
-                }
-                _ => {
-                    c.tw(&day.to_uppercase(), 16.0, 12.0, 11.5, 700, RED, 160.0);
-                    c.num(&format!("{mon} {}", n.day), 16.0, 28.0, 26.0, 600, c.text1());
-                    c.tr(&format!("{} {}", time, ampm(n.hour)), c.w - 16.0, 14.0, 13.0, 500, c.text2());
-                    c.tw(&next.unwrap_or_else(|| "No more events today".into()), 16.0, 68.0, 11.5, 400, c.text2(), c.w - 32.0);
-                    if sh == Shape::Large {
-                        month_grid(c, &n, 14.0, 100.0, c.w - 28.0, c.h - 108.0);
+    }
+}
+
+fn today(c: &Canvas, x: &Ctx, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let evs = events(x).unwrap_or_default();
+    let today_evs: Vec<&Ev> = evs.iter().filter(|e| e.day.eq_ignore_ascii_case("today")).collect();
+    let next = today_evs.first().copied();
+    let weekday = t.day.to_uppercase();
+    match sh {
+        Shape::Mini => {
+            mini_tile(c, n, k);
+            if next.is_some() {
+                // Events left today: a blue dot at the tile's corner.
+                let s = 44.0 * k;
+                let (dx, dy) = ((c.w + s) / 2.0 - 2.0 * k, (c.h - s) / 2.0 + 2.0 * k);
+                c.circle(dx, dy, 4.5 * k, c.halo());
+                c.circle(dx, dy, 3.0 * k, BLUE);
+            }
+        }
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let (sx, sw) = t.slot(c);
+            let right = if t.wide { sx - 16.0 * k } else { c.w - m };
+            c.text_cap(&weekday, m, 12.0 * k, style::MICRO.size * k, style::MICRO.weight, RED, Align::Left, right - m);
+            c.text_base(&format!("{} {}", &t.mon[..3], n.day), m, 42.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Left, c.w * 2.0);
+            if t.wide {
+                slot_rule(c, t);
+                let fs = style::FOOT.size * k;
+                match next {
+                    Some(e) => {
+                        c.text_base(&e.title, sx, 26.0 * k, fs, 600, c.text1(), Align::Left, sw);
+                        c.text_base(&e.time, sx, 42.0 * k, fs, style::FOOT.weight, c.text2(), Align::Left, sw);
+                    }
+                    None => {
+                        c.text_cap("No events", sx, (c.h - c.cap_h(fs)) / 2.0, fs, style::FOOT.weight, c.text2(), Align::Left, sw);
                     }
                 }
             }
         }
-        ClockKind::Date => match sh {
-            Shape::Mini => day_tile(c, &n, sh),
-            Shape::Dock => {
-                c.tw(day, 12.0, c.h * 0.14, (c.h * 0.19).max(9.5), 400, c.text2(), c.w);
-                let t = format!("{} {}", &mon[..3], n.day);
-                c.num(&t, 12.0, c.h * 0.38, fit(c, &t, c.h * 0.36, 10.0, 600, Font::Display, c.w - 16.0), 600, c.text1());
-            }
-            Shape::Small => {
-                c.tw(day, 14.0, 16.0, 12.0, 400, c.text2(), c.w - 28.0);
-                c.num(&n.day.to_string(), 12.0, 32.0, 46.0, 500, c.text1());
-                c.tw(mon, 14.0, 90.0, 13.0, 600, c.text1(), c.w - 28.0);
-            }
-            _ => {
-                c.tw(day, 18.0, 18.0, 13.0, 400, c.text2(), c.w);
-                c.num(&format!("{mon} {}", n.day), 18.0, 36.0, 30.0, 600, c.text1());
-                if sh == Shape::Large {
-                    month_grid(c, &n, 14.0, 92.0, c.w - 28.0, c.h - 100.0);
+        Shape::Small => {
+            let m = style::M_SMALL;
+            c.text_cap(&weekday, m, 14.0, style::MICRO.size, style::MICRO.weight, RED, Align::Left, c.w - 2.0 * m);
+            c.text_base(&n.day.to_string(), m, 62.0, style::HERO_XL.size, style::HERO_XL.weight, c.text1(), Align::Left, c.w * 2.0);
+            match next {
+                Some(e) => {
+                    c.rr(m, 88.0 - c.cap_h(style::CAPTION.size) / 2.0 - 6.0, 3.0, 12.0, 1.5, BLUE);
+                    c.text_base(&e.title, m + 7.0, 88.0, style::CAPTION.size, 600, c.text1(), Align::Left, c.w - 2.0 * m - 7.0);
+                    c.text_base(&e.time, m + 7.0, 104.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w * 2.0);
+                }
+                None => {
+                    c.text_base(t.mon, m, 88.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+                    c.text_base("No more events", m, 104.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w - 2.0 * m);
                 }
             }
-        },
-        ClockKind::DayPage => day_tile(c, &n, sh),
-        ClockKind::Analog => {
-            let r = c.h.min(c.w) / 2.0 - if matches!(sh, Shape::Mini | Shape::Dock) { 3.0 } else { 10.0 };
-            dial(c, c.w / 2.0, c.h / 2.0, r, n.hour, n.minute, Some(n.second), !c.light);
         }
-        ClockKind::AnalogSquare => {
-            let dense = matches!(sh, Shape::Mini | Shape::Dock);
-            let s = c.h.min(c.w) - if dense { 4.0 } else { 16.0 };
-            if !dense && c.w > c.h * 1.3 {
-                bg(c, false);
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let mb = 16.0 + c.cap_h(style::MICRO.size);
+            c.text_base(&weekday, m, mb, style::MICRO.size, style::MICRO.weight, RED, Align::Left, 120.0);
+            if !today_evs.is_empty() {
+                let cnt = if today_evs.len() == 1 { "1 event".to_string() } else { format!("{} events", today_evs.len()) };
+                c.text_base(&cnt, c.w - m, mb, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Right, 100.0);
             }
-            square_dial(c, (c.w - s) / 2.0, (c.h - s) / 2.0, s, n.hour, n.minute, n.second);
-        }
-        ClockKind::Segment => {
-            let on = RED;
-            let off = c.ink(0.06);
-            let dense = matches!(sh, Shape::Mini | Shape::Dock);
-            let pad = if dense { 6.0 } else { 14.0 };
-            let top = if dense || sh == Shape::Small { pad } else { 26.0 };
-            // Four digits (0.55 wide, spaced 1.25) and a colon (0.45), fitted both ways.
-            let units = 4.0 * 0.55 * 1.25 + 0.45 * 0.55;
-            let dh = (c.h - top - pad).min((c.w - 2.0 * pad) / units);
-            let dw = dh * 0.55;
-            let colon = dw * 0.45;
-            let total = 4.0 * dw + 3.0 * dw * 0.25 + colon;
-            let mut sx = (c.w - total) / 2.0;
-            let y0 = top + (c.h - top - pad - dh) / 2.0;
-            if !dense && sh != Shape::Small {
-                c.tw(ampm(n.hour), 16.0, 8.0, 10.5, 700, RED, 40.0);
-                c.tr(&date_short.to_uppercase(), c.w - 16.0, 8.0, 10.5, 700, c.text3());
-            }
-            let d = [h12(n.hour) / 10, h12(n.hour) % 10, n.minute / 10, n.minute % 10];
-            for (i, v) in d.iter().enumerate() {
-                if i == 2 {
-                    let blink = if n.second % 2 == 0 { on } else { off };
-                    c.circle(sx + colon / 2.0 - dw * 0.12, y0 + dh * 0.3, dw * 0.09, blink);
-                    c.circle(sx + colon / 2.0 - dw * 0.12, y0 + dh * 0.7, dw * 0.09, blink);
-                    sx += colon;
+            let (s, fs) = fit_value(c, &format!("{} {}", t.mon, n.day), style::HERO, c.w - 2.0 * m);
+            c.text_base(&s, m, 56.0, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
+            match next {
+                Some(e) => {
+                    let when = format!(" · {}", e.time);
+                    let ww = c.measure(&when, style::CAPTION.size, 400, Font::Text).0;
+                    c.rr(m, 78.0 - 11.0, 3.0, 13.0, 1.5, BLUE);
+                    let tx = m + 8.0;
+                    let tw = c.text_base(&e.title, tx, 78.0, style::BODY.size, 600, c.text1(), Align::Left, c.w - m - tx - ww);
+                    c.text_base(&when, tx + tw, 78.0, style::CAPTION.size, 400, c.text2(), Align::Left, ww + 4.0);
                 }
-                if !(i == 0 && *v == 0) {
-                    seg_digit(c, sx, y0, dw, dh, *v, on, off);
+                None => {
+                    c.text_base("No more events today", m, 78.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+                }
+            }
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let rest: Vec<&Ev> = evs.iter().filter(|e| next.map(|nx| !std::ptr::eq(*e, nx)).unwrap_or(true)).collect();
+                let base0 = style::DETAIL_TOP + 16.0;
+                if evs.is_empty() {
+                    // No calendar (or nothing coming): this week, centred in the region.
+                    medium_week(c, n, 84.0, false);
                 } else {
-                    seg_digit(c, sx, y0, dw, dh, 8, off, off);
+                    let shown = event_rows(c, &rest, base0, 3);
+                    if shown < 3 {
+                        let base = base0 + shown as f32 * style::ROW_L;
+                        let note = format!("{} upcoming \u{00B7} {} today", evs.len(), today_evs.len());
+                        c.text_base(&note, m, base, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - 2.0 * m);
+                    }
                 }
-                sx += dw * 1.25;
             }
         }
-        ClockKind::Month => match sh {
-            Shape::Mini => day_tile(c, &n, sh),
-            Shape::Dock => week_row(c, &n, 6.0, 4.0, c.w - 12.0, c.h - 8.0),
-            Shape::Medium => {
-                c.tw(mon, 16.0, 10.0, 13.0, 600, c.text1(), 160.0);
-                c.tr(&n.year.to_string(), c.w - 16.0, 10.0, 13.0, 600, RED);
-                week_row(c, &n, 14.0, 32.0, c.w - 28.0, c.h - 40.0);
+    }
+}
+
+fn date(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let md = format!("{} {}", &t.mon[..3], n.day);
+    match sh {
+        Shape::Mini => mini_tile(c, n, k),
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            c.text_base(&md, m, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(t.day, m, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+            if t.wide {
+                let (_, sw) = t.slot(c);
+                c.text_base(&iso_week(n).to_string(), c.w - m, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Right, sw);
+                c.text_base("week", c.w - m, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Right, sw);
             }
-            _ => {
-                let pad = if sh == Shape::Small { 10.0 } else { 14.0 };
-                let hs = if sh == Shape::Small { 11.5 } else { 14.0 };
-                c.tw(if sh == Shape::Small { &mon[..3] } else { mon }, pad + 2.0, 10.0, hs, 600, c.text1(), 160.0);
-                c.tr(&n.year.to_string(), c.w - pad - 2.0, 10.0, hs, 600, RED);
-                month_grid(c, &n, pad, 32.0, c.w - 2.0 * pad, c.h - 38.0);
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            c.text_cap(t.day, m, 14.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+            c.text_base(&n.day.to_string(), m, 86.0, style::HERO_XL.size, style::HERO_XL.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(t.mon, m, 106.0, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            c.text_cap(t.day, m, 16.0, style::BODY.size, style::BODY.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+            let (s, fs) = fit_value(c, &format!("{} {}", t.mon, n.day), style::HERO, c.w - 2.0 * m);
+            c.text_base(&s, m, 58.0, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
+            let third = format!("Week {} \u{00B7} Day {} of {}", iso_week(n), n.day_of_year(), n.days_in_year());
+            c.text_base(&third, m, 78.0, style::FOOT.size, style::FOOT.weight, c.text3(), Align::Left, c.w - 2.0 * m);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                // How far through the year: a neutral meter, then three stats.
+                let frac = n.day_of_year() as f32 / n.days_in_year() as f32;
+                c.bar(m, 114.0, c.w - 2.0 * m, style::METER_H, frac, c.text2());
+                c.text_base(&format!("Day {} of {}", n.day_of_year(), n.days_in_year()), m, 136.0, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, c.w - 2.0 * m);
+                c.text_base(&format!("{:.0}%", frac * 100.0), c.w - m, 136.0, style::FOOT.size, 500, c.text2(), Align::Right, 60.0);
+                let (wk, q, left) = (iso_week(n).to_string(), format!("Q{}", (n.month - 1) / 3 + 1), days_left(n).to_string());
+                stat_footer(c, [(wk.as_str(), "Week"), (q.as_str(), "Quarter"), (left.as_str(), "Days left")], 168.0 - c.cap_h(style::VALUE.size));
             }
-        },
+        }
+    }
+}
+
+/// Day Page: on the Launchpad the card itself is the calendar page (full bleed).
+fn day_page(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let page = |band: f32| {
+        c.rr(0.0, 0.0, c.w, c.h, style::CARD_R, PAGE);
+        rr_top(c, 0.0, 0.0, c.w, band, style::CARD_R, RED);
+        if c.light {
+            c.rr_stroke(0.0, 0.0, c.w, c.h, style::CARD_R, c.card_edge(), 1.0);
+        }
+    };
+    let wk = format!("Week {}", iso_week(n));
+    match sh {
+        Shape::Mini => mini_tile(c, n, k),
+        Shape::Dock => {
+            let m = style::M_DOCK * k;
+            let s = style::BADGE_DOCK * k;
+            day_tile(c, n, m, m, s, style::R_MIN * k, 11.0 * k, style::MICRO.size * k, 14.0 * k);
+            let x0 = m + s + style::SP[4] * k;
+            let (sx, sw) = t.slot(c);
+            let right = if t.wide { sx - 16.0 * k } else { c.w - m };
+            c.text_base(t.day, x0, 30.0 * k, style::VALUE.size * k, style::VALUE.weight, c.text1(), Align::Left, right - x0);
+            c.text_base(&wk, x0, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Left, right - x0);
+            if t.wide {
+                slot_rule(c, t);
+                // The week so far: past days, today, days to come.
+                let (d, g) = (6.0 * k, 4.0 * k);
+                let x1 = c.w - m - (7.0 * d + 6.0 * g);
+                for i in 0..7u32 {
+                    let col = match i.cmp(&n.weekday) {
+                        std::cmp::Ordering::Less => c.text3(),
+                        std::cmp::Ordering::Equal => RED,
+                        std::cmp::Ordering::Greater => c.track(),
+                    };
+                    c.circle(x1 + d / 2.0 + i as f32 * (d + g), 26.0 * k, d / 2.0, col);
+                }
+                c.text_base(&format!("Day {}", n.day_of_year()), c.w - m, 44.0 * k, style::FOOT.size * k, style::FOOT.weight, c.text2(), Align::Right, sw);
+            }
+        }
+        Shape::Small => {
+            page(30.0);
+            c.text_base(&t.day.to_uppercase(), c.w / 2.0, 20.0, style::FOOT.size, 700, WHITE, Align::Center, c.w - 2.0 * style::M_SMALL);
+            c.text_base(&n.day.to_string(), c.w / 2.0, 86.0, 52.0, 600, PAGE_INK, Align::Center, c.w);
+            c.text_base(t.mon, c.w / 2.0, 106.0, style::CAPTION.size, style::CAPTION.weight, PAGE_INK2, Align::Center, c.w - 2.0 * style::M_SMALL);
+        }
+        Shape::Medium => {
+            let m = style::M_CARD;
+            page(26.0);
+            let yr = n.year.to_string();
+            let yw = c.measure(&yr, style::FOOT.size, 600, Font::Text).0;
+            c.text_base(&yr, c.w - m, 18.0, style::FOOT.size, 600, alpha(WHITE, 0.8), Align::Right, yw + 4.0);
+            c.text_base(&format!("{}, {}", t.day, t.mon).to_uppercase(), m, 18.0, style::FOOT.size, 700, WHITE, Align::Left, c.w - 2.0 * m - yw - style::SP[3]);
+            c.text_base(&n.day.to_string(), m, 82.0, style::HERO_XL.size, 600, PAGE_INK, Align::Left, c.w);
+            c.text_base(&wk, c.w - m, 62.0, style::TITLE.size, style::TITLE.weight, PAGE_INK, Align::Right, 120.0);
+            c.text_base(&format!("Day {} of {}", n.day_of_year(), n.days_in_year()), c.w - m, 80.0, style::FOOT.size, style::FOOT.weight, PAGE_INK2, Align::Right, 120.0);
+        }
+        Shape::Large => {
+            page(56.0);
+            let w = c.w - 2.0 * style::M_CARD;
+            c.text_base(&t.mon.to_uppercase(), c.w / 2.0, 36.0, style::VALUE.size, 700, WHITE, Align::Center, w);
+            c.text_base(&n.day.to_string(), c.w / 2.0, 150.0, 96.0, 600, PAGE_INK, Align::Center, c.w);
+            c.text_base(t.day, c.w / 2.0, 176.0, style::VALUE.size, style::VALUE.weight, PAGE_INK, Align::Center, w);
+            c.text_base(&format!("{wk} \u{00B7} Day {}", n.day_of_year()), c.w / 2.0, 192.0, style::FOOT.size, style::FOOT.weight, PAGE_INK2, Align::Center, w);
+        }
+    }
+}
+
+fn analog(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let s = Some(n.second);
+    let dark = !c.light;
+    match sh {
+        Shape::Mini => dial(c, c.w / 2.0, c.h / 2.0, 20.0 * k, n.hour, n.minute, s, dark, None, k),
+        Shape::Dock => {
+            let r = 20.0 * k;
+            dial(c, style::M_MINI * k + r, c.h / 2.0, r, n.hour, n.minute, s, dark, None, k);
+            let x0 = 56.0 * k;
+            dock_time(c, t, x0, &t.date_short(), day_slot_left(c, t));
+            if t.wide {
+                day_slot(c, t);
+            }
+        }
+        Shape::Small => dial(c, c.w / 2.0, c.h / 2.0, 46.0, n.hour, n.minute, s, dark, None, 1.0),
+        Shape::Medium => {
+            let m = style::M_CARD;
+            dial(c, m + 32.0, m + 32.0, 32.0, n.hour, n.minute, s, dark, None, 1.0);
+            side_time(c, t, 96.0, 20.0, 72.0);
+        }
+        Shape::Large => {
+            let m = style::M_CARD;
+            dial(c, m + 86.0, m + 86.0, 86.0, n.hour, n.minute, s, dark, None, 1.0);
+            date_column(c, t, 200.0, 20.0, 32.0, 188.0);
+        }
+    }
+}
+
+/// Medium analog faces: the digital time and full date beside the dial, from `x0`.
+fn side_time(c: &Canvas, t: &Cl, x0: f32, cap_top: f32, cap_base: f32) {
+    let hs = style::HERO.size;
+    time_ap(c, &t.time, t.ap, x0, cap_top + c.cap_h(hs), hs, style::time_weight(hs), c.text1(), 1.0);
+    let w = c.w - style::M_CARD - x0;
+    let cap = fit_label(c, &[t.date_long(), format!("{}, {} {}", &t.day[..3], &t.mon[..3], t.n.day)], style::CAPTION.size, 400, w);
+    c.text_base(&cap, x0, cap_base, style::CAPTION.size, style::CAPTION.weight, c.text2(), Align::Left, w);
+}
+
+/// Large analog faces: weekday, day and month at the top of a narrow right column, the
+/// digital time on the dial's bottom line.
+fn date_column(c: &Canvas, t: &Cl, x0: f32, top: f32, ds: f32, bottom: f32) {
+    let w = c.w - style::M_CARD - x0;
+    c.text_cap(&t.day[..3].to_uppercase(), x0, top, style::MICRO.size, style::MICRO.weight, RED, Align::Left, w);
+    let dtop = top + c.cap_h(style::MICRO.size) + style::SP[3];
+    let dbase = dtop + c.cap_h(ds);
+    c.text_base(&t.n.day.to_string(), x0, dbase, ds, 400, c.text1(), Align::Left, c.w);
+    c.text_base(&t.mon[..3], x0, dbase + style::SP[6], style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, w);
+    let tm = format!("{} {}", t.time, t.ap);
+    let fs = fit(c, &tm, style::FOOT.size, style::MICRO.size, 500, Font::Text, w);
+    c.text_base(&tm, x0, bottom, fs, 500, c.text2(), Align::Left, c.w);
+}
+
+fn analog_square(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let (h, m, s) = (n.hour, n.minute, n.second);
+    if !matches!(sh, Shape::Mini | Shape::Dock) {
+        // The Launchpad dispatch leaves this face's card to it.
+        bg(c, false);
+    }
+    match sh {
+        Shape::Mini => {
+            let p = c.h - 12.0 * k;
+            square_dial(c, (c.w - p) / 2.0, 6.0 * k, p, p, style::concentric(style::DOCK_R, 6.0) * k, h, m, s);
+        }
+        Shape::Dock => {
+            let p = c.h - 12.0 * k;
+            square_dial(c, 6.0 * k, 6.0 * k, p, p, style::concentric(style::DOCK_R, 6.0) * k, h, m, s);
+            dock_time(c, t, 58.0 * k, &t.date_short(), day_slot_left(c, t));
+            if t.wide {
+                day_slot(c, t);
+            }
+        }
+        Shape::Small => {
+            let i = style::SP[2];
+            square_dial(c, i, i, c.w - 2.0 * i, c.h - 2.0 * i, style::concentric(style::CARD_R, i), h, m, s);
+        }
+        Shape::Medium => {
+            let i = style::SP[3];
+            square_dial(c, i, i, 80.0, 80.0, style::concentric(style::CARD_R, i), h, m, s);
+            side_time(c, t, 104.0, 20.0, 72.0);
+        }
+        Shape::Large => {
+            let i = style::SP[3];
+            let p = c.h - 2.0 * i;
+            square_dial(c, i, i, p, p, style::concentric(style::CARD_R, i), h, m, s);
+            date_column(c, t, i + p + style::SP[5], 18.0, 26.0, 188.0);
+        }
+    }
+}
+
+fn segment(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    let k = t.k;
+    let on = RED;
+    let off = c.ink(0.06);
+    // The colon blinks between full and dim, never off, so a still glance reads as a time.
+    let colon = if n.second % 2 == 0 { on } else { alpha(on, 0.35) };
+    let hr = h12(n.hour);
+    let d = [hr / 10, hr % 10, n.minute / 10, n.minute % 10];
+    let lead = if hr >= 10 { LcdLead::Digit } else { LcdLead::Ghost };
+    let md = format!("{} {}", &t.day[..3], n.day);
+    match sh {
+        Shape::Mini => {
+            // No ghost here: "5:38" alone reads at a glance; "85:38" didn't.
+            let (lead, nd) = if hr >= 10 { (LcdLead::Digit, 4) } else { (LcdLead::None, 3) };
+            let room = c.w - 2.0 * style::M_MINI * k;
+            let dh = room.min(room / seg_w(1.0, nd));
+            seg_time(c, (c.w - seg_w(dh, nd)) / 2.0, (c.h - dh) / 2.0, dh, d, lead, on, off, colon);
+        }
+        Shape::Dock => {
+            let dh = 30.0 * k;
+            let w = seg_w(dh, 4);
+            let x0 = if t.wide { style::M_DOCK * k } else { (c.w - w) / 2.0 };
+            seg_time(c, x0, (c.h - dh) / 2.0, dh, d, lead, on, off, colon);
+            if t.wide {
+                let r = c.w - style::M_DOCK * k;
+                c.text_base(t.ap, r, 24.0 * k, style::MICRO.size * k, style::MICRO.weight, RED, Align::Right, 60.0 * k);
+                c.text_base(&md, r, 40.0 * k, style::FOOT.size * k, 600, c.text2(), Align::Right, 60.0 * k);
+            }
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            c.text_cap(t.ap, m, 16.0, style::MICRO.size, style::MICRO.weight, RED, Align::Left, 40.0);
+            c.text_cap(&md, c.w - m, 16.0, style::MICRO.size, style::MICRO.weight, c.text2(), Align::Right, 80.0);
+            let room = c.w - 2.0 * m;
+            let dh = room / seg_w(1.0, 4);
+            seg_time(c, m, 34.0 + (72.0 - dh) / 2.0, dh, d, lead, on, off, colon);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let base = 16.0 + c.cap_h(style::MICRO.size);
+            c.text_base(t.ap, m, base, style::MICRO.size, style::MICRO.weight, RED, Align::Left, 40.0);
+            c.text_base(&t.date_short(), c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, 140.0);
+            let dh = 44.0;
+            seg_time(c, (c.w - seg_w(dh, 4)) / 2.0, 36.0, dh, d, lead, on, off, colon);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let w = c.w - 2.0 * m;
+                // An LCD weekday strip: today lit.
+                let colw = w / 7.0;
+                for i in 0..7u32 {
+                    let today = i == n.weekday;
+                    let lbl = DAYS[i as usize][..3].to_uppercase();
+                    c.text_cap(&lbl, m + colw * (i as f32 + 0.5), 112.0, style::MICRO.size, style::MICRO.weight, if today { RED } else { c.ink(0.22) }, Align::Center, colw);
+                }
+                // The seconds: 60 segment ticks, lit up to now.
+                let pitch = (w - 2.0) / 59.0;
+                for i in 0..60u32 {
+                    c.rr(m + i as f32 * pitch, 140.0, 2.0, 12.0, 0.5, if i <= n.second { on } else { c.ink(0.10) });
+                }
+                for s in [0u32, 15, 30, 45] {
+                    let tx = m + s as f32 * pitch + 1.0;
+                    let (ax, al) = if s == 0 { (m, Align::Left) } else { (tx, Align::Center) };
+                    c.text_base(&s.to_string(), ax, 172.0, style::MICRO.size, style::MICRO.weight, c.text3(), al, 30.0);
+                }
+            }
+        }
+    }
+}
+
+fn month(c: &Canvas, t: &Cl, sh: Shape) {
+    let n = &t.n;
+    match sh {
+        Shape::Mini => mini_tile(c, n, t.k),
+        Shape::Dock => dock_week(c, t),
+        Shape::Small => {
+            let m = style::M_SMALL;
+            c.text_cap(&t.mon.to_uppercase(), m, 14.0, style::MICRO.size, style::MICRO.weight, c.text1(), Align::Left, c.w - 2.0 * m);
+            let rows = month_rows(n);
+            let pitch = ((106.0 - 52.0) / (rows as f32 - 1.0)).min(14.0);
+            month_grid(c, n, m, c.w - 2.0 * m, 38.0, 52.0, pitch, style::MICRO.size, 500, 14.0);
+        }
+        Shape::Medium => {
+            cal_header(c, t.mon, &format!("{} days left", n.days_in_month() - n.day));
+            medium_week(c, n, 0.0, true);
+        }
+        Shape::Large => {
+            let m = style::M_CARD;
+            cal_header(c, t.mon, &n.year.to_string());
+            let rows = month_rows(n);
+            let pitch = ((184.0 - 76.0) / (rows as f32 - 1.0)).min(26.0);
+            month_grid(c, n, m, c.w - 2.0 * m, 52.0, 76.0, pitch, style::BODY.size, 500, 26.0);
+        }
     }
 }
 
