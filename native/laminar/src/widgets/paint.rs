@@ -2502,7 +2502,9 @@ fn sys_dock(c: &Canvas, mark: Mark, value: &str, cap: &str, arrow: Option<(&str,
     match slot {
         SysSlot::None => {}
         SysSlot::Spark(v, col) => c.area(slot_x, y0, slot_w, y1 - y0, v, *col, true),
-        SysSlot::Net(d, u) => sys_net_chart(c, slot_x, y0, slot_w, y1 - y0, d, u, style::STROKE_SPARK, false),
+        SysSlot::Net(d, u) => {
+            sys_net_chart(c, slot_x, y0, slot_w, y1 - y0, d, u, style::STROKE_SPARK, false);
+        }
         SysSlot::Meter(label, f, col) => {
             let mh = style::METER_H_COMPACT * k;
             if label.is_empty() {
@@ -2645,17 +2647,21 @@ fn sys_header(c: &Canvas, glyph: &'static str, gcol: Col, title: &str, trailing_
 
 /// What a Large card shows under the separator.
 enum Detail {
-    /// A history chart (y 108 to 174) with "1 min ago" / "Now" under it.
-    Chart(Vec<f64>, Col),
+    /// A history chart (y 108 to 174) with "1 min ago" / "Now" under it, and the current
+    /// level (0..1) for the first seconds before there's any history.
+    Chart(Vec<f64>, Col, f32),
     /// Three stats: (value, label).
     Stats([(String, String); 3]),
 }
 
 fn sys_detail(c: &Canvas, d: &Detail) {
     match d {
-        Detail::Chart(v, col) => {
-            sys_history(c, v, *col, style::DETAIL_TOP, c.h - style::M_CARD - 14.0);
-            sys_time_labels(c);
+        Detail::Chart(v, col, level) => {
+            if sys_history(c, v, *col, style::DETAIL_TOP, c.h - style::M_CARD - 14.0, *level) {
+                sys_time_labels(c);
+            } else {
+                sys_collecting(c);
+            }
         }
         Detail::Stats(s) => {
             let items = [(s[0].0.as_str(), s[0].1.as_str()), (s[1].0.as_str(), s[1].1.as_str()), (s[2].0.as_str(), s[2].1.as_str())];
@@ -2680,14 +2686,28 @@ fn sys_stat_footer(c: &Canvas, items: [(&str, &str); 3]) {
     }
 }
 
-/// A full-width history chart from y0 to y1, or a baseline hairline until there's data.
-fn sys_history(c: &Canvas, vals: &[f64], col: Col, y0: f32, y1: f32) {
+/// A full-width history chart from y0 to y1. Until there are two samples it draws the chart
+/// starting: a track line at the current `level` (0..1) ending in the accent dot. Returns
+/// whether a real chart was drawn.
+fn sys_history(c: &Canvas, vals: &[f64], col: Col, y0: f32, y1: f32, level: f32) -> bool {
     let (x, w) = (style::M_CARD, c.w - 2.0 * style::M_CARD);
     if vals.len() < 2 {
-        c.line(x, y1 - 0.5, x + w, y1 - 0.5, 1.0, c.sep());
-        return;
+        let pad = style::CHART_DOT + 1.5;
+        let y = y1 - pad - level.clamp(0.0, 1.0) * (y1 - y0 - 2.0 * pad);
+        let dx = x + w - pad;
+        c.line(x + 1.0, y, dx, y, style::STROKE, c.track());
+        c.circle(dx, y, style::CHART_DOT + 1.5, c.halo());
+        c.circle(dx, y, style::CHART_DOT, col);
+        return false;
     }
     c.chart(x, y0, w, y1 - y0, vals, col, ChartOpts { fill: true, dot: true, stroke: style::STROKE, smooth: vals.len() >= 8 });
+    true
+}
+
+/// Under a history chart that hasn't started yet: what's happening, instead of time labels.
+fn sys_collecting(c: &Canvas) {
+    let r = style::MICRO;
+    c.text_base("Charting the last minute", style::M_CARD, c.h - style::M_CARD, r.size, r.weight, c.text3(), Align::Left, c.w - 2.0 * style::M_CARD);
 }
 
 /// "1 min ago" and "Now" under a Large history chart, on the bottom margin.
@@ -2717,17 +2737,29 @@ fn sys_chart_range(vals: &[f64]) -> Option<(f64, f64)> {
 }
 
 /// Download (blue area) and upload (green line) on one scale from zero, so their heights
-/// compare. Each series is drawn into the part of the box its range covers.
+/// compare. Each series is drawn into the part of the box its range covers. The zero line
+/// sits a little above the box bottom (§2.5 floor), so a quiet upload line never lies on
+/// the edge; the baseline hairline shows only while there's nothing to draw.
 #[allow(clippy::too_many_arguments)]
-fn sys_net_chart(c: &Canvas, x: f32, y: f32, w: f32, h: f32, down: &[f64], up: &[f64], stroke: f32, dot: bool) {
-    c.line(x, y + h - 0.5, x + w, y + h - 0.5, 1.0, c.sep());
+fn sys_net_chart(c: &Canvas, x: f32, y: f32, w: f32, h: f32, down: &[f64], up: &[f64], stroke: f32, dot: bool) -> bool {
     let peak = down.iter().chain(up.iter()).copied().filter(|v| v.is_finite()).fold(0.0f64, f64::max);
-    if peak <= 0.0 {
-        return;
+    if peak <= 0.0 || (down.len() < 2 && up.len() < 2) {
+        if dot {
+            // Before any history: the chart starting, a track line ending in the download dot.
+            let r = style::CHART_DOT;
+            let (cy, dx) = (y + h - r - 1.5, x + w - r - 1.5);
+            c.line(x + 1.0, cy, dx, cy, stroke, c.track());
+            c.circle(dx, cy, r + 1.5, c.halo());
+            c.circle(dx, cy, r, BLUE);
+        } else {
+            c.line(x, y + h - 0.5, x + w, y + h - 0.5, 1.0, c.sep());
+        }
+        return false;
     }
     let top_v = peak * (1.0 + style::CHART_PAD_HI);
     let t_in = (stroke / 2.0).max(if dot { style::CHART_DOT + 1.5 } else { 0.0 });
-    let (t, b) = (y + t_in, y + h - stroke / 2.0);
+    let floor = (h * style::CHART_PAD_LO as f32).max(style::SP[0]);
+    let (t, b) = (y + t_in, y + h - floor - stroke / 2.0);
     let map = |v: f64| b - (v / top_v) as f32 * (b - t);
     for (vals, col, fill, st) in [(down, BLUE, true, stroke), (up, GREEN, false, style::STROKE_SPARK)] {
         if vals.len() < 2 {
@@ -2737,6 +2769,7 @@ fn sys_net_chart(c: &Canvas, x: f32, y: f32, w: f32, h: f32, down: &[f64], up: &
         let (ty, by) = (map(hi) - t_in, map(lo) + st / 2.0);
         c.chart(x, ty, w, by - ty, vals, col, ChartOpts { fill, dot, stroke: st, smooth: vals.len() >= 8 });
     }
+    true
 }
 
 // ---- Placeholder states
@@ -2950,7 +2983,7 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     third: (cpu_hist.len() >= 2).then(|| (format!("Peak {} · last minute", sys_pct(peak)), c.text3())),
                     meter: None,
                     acc: Acc::Spark(cpu_hist.clone(), BLUE),
-                    detail: Detail::Chart(cpu_hist, BLUE),
+                    detail: Detail::Chart(cpu_hist, BLUE, cpu / 100.0),
                 },
             );
         }
@@ -3045,7 +3078,7 @@ fn sys_resource(c: &Canvas, sh: Shape, cpu: f32, mu: f32, mt: f32, cpu_hist: &[f
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
                 let base = c.h - style::M_CARD - 2.0;
-                sys_history(c, cpu_hist, BLUE, style::DETAIL_TOP, base - 18.0);
+                sys_history(c, cpu_hist, BLUE, style::DETAIL_TOP, base - 18.0, cpu / 100.0);
                 let peak = cpu_hist.iter().copied().fold(cpu as f64, f64::max) as f32;
                 let pw = c.text_base(&format!("Peak {}", sys_pct(peak)), c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, c.w / 2.0);
                 c.text_base(&format!("{mu:.1} of {mt:.0} GB memory in use"), m, base, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m - pw - style::SP[3]);
@@ -3085,9 +3118,13 @@ fn sys_network(c: &Canvas, x: &Ctx, sh: Shape) {
             sys_arrow_text(c, "↑", GREEN, &rate(u), c.w - m, 45.0, style::FOOT.size, 400, c.text2(), Align::Right, c.w / 2.0);
             let (top, large) = (52.0, sh == Shape::Large);
             let bottom = if large { c.h - m - 14.0 } else { c.h - m };
-            sys_net_chart(c, m, top, c.w - 2.0 * m, bottom - top, &down, &up, if large { style::STROKE } else { style::STROKE_SPARK }, true);
+            let drawn = sys_net_chart(c, m, top, c.w - 2.0 * m, bottom - top, &down, &up, if large { style::STROKE } else { style::STROKE_SPARK }, true);
             if large {
-                sys_time_labels(c);
+                if drawn {
+                    sys_time_labels(c);
+                } else {
+                    sys_collecting(c);
+                }
             }
         }
     }
@@ -3104,10 +3141,16 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open(open.into())));
     let pct = format!("{:.0}%", v * 100.0);
     let mark = Mark::Plate(G_SUN, c.text2());
+    // One neutral level colour at every size (the slider, meters and the chosen preset):
+    // text1 in dark (a white level, like a lit screen); text2 in light, so the slider is a
+    // calm graphite rather than a solid black slab.
+    let fill = if c.light { c.text2() } else { c.text1() };
+    // The value is read from the main display (DDC/CI); the plate already says brightness.
+    let cap = "Main display";
     match sh {
         Shape::Mini => sys_mini_value(c, G_SUN, c.text2(), &pct),
-        Shape::Dock => sys_dock(c, mark, &pct, "Brightness", None, None, &SysSlot::Meter(String::new(), v, YELLOW)),
-        Shape::Small => sys_small(c, mark, &SmallSlot::Meter(v, YELLOW, String::new()), &pct, None, "Brightness", None),
+        Shape::Dock => sys_dock(c, mark, &pct, cap, None, None, &SysSlot::Meter(String::new(), v, fill)),
+        Shape::Small => sys_small(c, mark, &SmallSlot::Meter(v, fill, String::new()), &pct, None, cap, None),
         _ => {
             let m = style::M_CARD;
             let r = style::VALUE;
@@ -3117,7 +3160,7 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             // The slider: 28 tall, track = plate, fill = text1 with the sun in the card colour.
             let (bx, bw, bh, by) = (m, c.w - 2.0 * m, style::BTN_SECONDARY, 52.0);
             c.rr(bx, by, bw, bh, bh / 2.0, c.plate());
-            c.rr(bx, by, (bw * v.clamp(0.0, 1.0)).max(bh), bh, bh / 2.0, c.text1());
+            c.rr(bx, by, (bw * v.clamp(0.0, 1.0)).max(bh), bh, bh / 2.0, fill);
             c.glyph(G_SUN, bx + bh / 2.0, by + bh / 2.0, style::CAPTION.size, c.halo());
             out.hits.push(((bx, by - style::SP[1], bw, bh + style::SP[3]), WAct::Brightness));
             if sh == Shape::Large {
@@ -3129,11 +3172,11 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 for (i, p) in [0.3f32, 0.6, 1.0].iter().enumerate() {
                     let px = m + i as f32 * (pw + gap);
                     let on = (v - p).abs() < 0.025;
-                    c.rr(px, 120.0, pw, bh, bh / 2.0, if on { c.text1() } else { c.plate() });
+                    c.rr(px, 120.0, pw, bh, bh / 2.0, if on { fill } else { c.plate() });
                     let fs = style::CAPTION.size;
                     c.text_cap(&format!("{:.0}%", p * 100.0), px + pw / 2.0, 120.0 + (bh - c.cap_h(fs)) / 2.0, fs, 600, if on { c.halo() } else { c.text1() }, Align::Center, pw);
                 }
-                c.text_base("Display 1 · DDC/CI", m, c.h - m - 4.0, style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
+                c.text_base("Main display · DDC/CI", m, c.h - m - 4.0, style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
         }
     }
@@ -3279,7 +3322,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                         hero_glyph: None,
                         third: Some((format!("{free_s} free of {total_s}"), c.text3())),
                         meter: None,
-                        acc: Acc::None,
+                        acc: Acc::Meter(used, col),
                         detail: stats,
                     },
                 );
@@ -3321,7 +3364,10 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                 Shape::Dock => sys_dock(c, mark, &code, &lang, None, None, &SysSlot::Keys),
                 Shape::Small => sys_small(c, mark, &SmallSlot::None, &code, None, &full, None),
                 _ => {
-                    sys_glance(c, &Glance { mark, hero: &code, hero_glyph: None, cap: &full, third: Some(("Win + Space to switch", c.text3())), meter: None, acc: &Acc::None });
+                    // Large shows the shortcut as keycaps, so its third line says which
+                    // window the language belongs to instead of repeating the hint.
+                    let third = if sh == Shape::Large { "For the window in front" } else { "Win + Space to switch" };
+                    sys_glance(c, &Glance { mark, hero: &code, hero_glyph: None, cap: &full, third: Some((third, c.text3())), meter: None, acc: &Acc::None });
                     if sh == Shape::Large {
                         // Only the current language is known: a keycap composition for the shortcut.
                         separator(c, style::SEP_Y_LARGE);
@@ -3353,12 +3399,14 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
             match sh {
                 Shape::Mini => sys_mini_value(c, G_CLOCK, c.text2(), &t),
                 Shape::Dock => {
-                    let (a, b) = match days_back {
-                        0 => ("Since today".to_string(), at.clone()),
-                        1..=6 => (format!("Since {}", SYS_DAY_SHORT[boot_day]), at.clone()),
-                        n => (format!("{n} days"), "Restart soon".to_string()),
+                    // The plate already says uptime: the caption says since when, and Dock L's
+                    // slot adds the start time.
+                    let (cap, a, b) = match days_back {
+                        0 => ("Since today".to_string(), at.clone(), "Started".to_string()),
+                        1..=6 => (format!("Since {}", SYS_DAY_SHORT[boot_day]), at.clone(), "Started".to_string()),
+                        n => ("Restart soon".to_string(), at.clone(), format!("{n} days ago")),
                     };
-                    sys_dock(c, mark, &t, "Uptime", None, None, &SysSlot::Two(a, b));
+                    sys_dock(c, mark, &t, &cap, None, None, &SysSlot::Two(a, b));
                 }
                 Shape::Small => {
                     // The caption must fit whole: drop "Since" before cutting the time.
@@ -3410,6 +3458,17 @@ fn sys_drive_rows(c: &Canvas, drives: &[(String, f64, f64, f32)], head: &str, he
     }
 }
 
+/// Run `draw` with everything outside the (logical) rectangle clipped away.
+fn sys_clipped(c: &Canvas, x: f32, y: f32, w: f32, h: f32, draw: impl FnOnce()) {
+    use windows::Win32::Graphics::Direct2D::{Common::D2D_RECT_F, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE};
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    unsafe { c.dc.PushAxisAlignedClip(&D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h }, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    draw();
+    unsafe { c.dc.PopAxisAlignedClip() };
+}
+
 /// Uptime Large: the last seven days (today at the right), filled from boot to now, and when it started.
 fn sys_uptime_strip(c: &Canvas, now: &super::Now, days_back: i64, boot_min: i64, boot_day: usize) {
     let m = style::M_CARD;
@@ -3428,11 +3487,13 @@ fn sys_uptime_strip(c: &Canvas, now: &super::Now, days_back: i64, boot_min: i64,
             continue;
         }
         // The part of this day the PC was up: from boot (on the boot day) to now (today).
+        // A partial day is the cell itself, clipped to that span, so its corners stay the
+        // cell's and the cut edge is straight (a fill, not a separate pill).
         let from = if back == days_back { boot_min as f32 / 1440.0 } else { 0.0 };
-        let to = if today { now_min / 1440.0 } else { 1.0 };
-        let (fx, fw) = (x0 + cw * from, (cw * (to - from)).max(r));
-        c.rr(fx.min(x0 + cw - r), y, fw, h, r, alpha(BLUE, 0.9));
+        let to = if today { (now_min / 1440.0).max(from + 0.03) } else { 1.0 };
+        sys_clipped(c, x0 + cw * from, y, cw * (to - from).clamp(0.0, 1.0), h, || c.rr(x0, y, cw, h, r, alpha(BLUE, 0.9)));
         if today {
+            // Drawn after the fill, on the cell's own outline, so stroke and fill stay concentric.
             c.rr_stroke(x0, y, cw, h, r, c.text3(), 1.0);
         }
     }
