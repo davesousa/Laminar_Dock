@@ -337,7 +337,7 @@ pub static ALL: &[Def] = &[
     dock(w("language", "Keyboard Language", "The input language. Click to switch (Win + Space).", &[System], Face::Sys(SysKind::Language)), 1.0),
     dock(w("uptime", "Uptime", "Time since Windows started.", &[System], Face::Sys(SysKind::Uptime)), 2.0),
     w("brightness", "Brightness", "Monitor brightness (monitors that support DDC/CI). Click the bar to set it.", &[System], Face::Sys(SysKind::Brightness)),
-    w("quick-toggles", "Quick Toggles", "Wi-Fi, Bluetooth, dark mode and mute.", &[System], Face::Tool(ToolKind::Toggles)),
+    w("quick-toggles", "Quick toggles", "Wi-Fi, Bluetooth, dark mode and mute.", &[System], Face::Tool(ToolKind::Toggles)),
     dock(w("dark-mode", "Dark Mode", "Switch Windows between light and dark.", &[System], Face::Tool(ToolKind::DarkMode)), 1.0),
     dock(w("focus", "Focus", "Opens Windows' Do Not Disturb and Focus settings.", &[System], Face::Tool(ToolKind::Focus)), 1.0),
     dock(w("notifications", "Notifications", "Opens the notification centre.", &[System], Face::Tool(ToolKind::Notifications)), 1.0),
@@ -414,8 +414,8 @@ pub static ALL: &[Def] = &[
 /// Windows Settings are always shown unless turned off in Settings → Widgets.
 pub static CONTROL: &[Def] = &[
     small(w("connectivity", "Wi-Fi & Bluetooth", "Turn Wi-Fi and Bluetooth on or off; click a name for networks or devices.", &[Control], Face::Tool(ToolKind::Connectivity))),
-    w("control-tiles", "Quick Controls", "Dark mode, mute, snip and lock.", &[Control], Face::Tool(ToolKind::ControlTiles)),
-    tall(w("background-apps", "Background Apps", "The icons apps put beside the clock. Click to open, right-click for the app's menu.", &[Control], Face::Tool(ToolKind::Tray))),
+    w("control-tiles", "Quick controls", "Dark mode, mute, snip and lock.", &[Control], Face::Tool(ToolKind::ControlTiles)),
+    tall(w("background-apps", "Background apps", "The icons apps put beside the clock. Click to open, right-click for the app's menu.", &[Control], Face::Tool(ToolKind::Tray))),
     w("windows-update", "Windows Update", "Updates waiting or a restart needed. Click for Windows Update.", &[Control], Face::Tool(ToolKind::WinUpdate)),
     small(w("windows-settings", "Windows Settings", "Opens Windows Settings.", &[Control], Face::Tool(ToolKind::WinSettings))),
 ];

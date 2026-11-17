@@ -4,7 +4,8 @@
 //!
 //! - `light`: light theme (dark is the default)
 //! - `scale=2`: render at 2x (like a 200% display) to check fine detail
-//! - `empty`: no sample data, so connector widgets show their waiting state
+//! - `empty`: no sample data, so connector widgets show their waiting state (and Control
+//!   Center widgets show no radios, no tray apps and an unchecked Windows Update)
 //! - `filter`: a widget id fragment or category name ("clocks"), or a comma-separated
 //!   list of exact ids ("stripe,stripe-chart")
 //! - `state=setup|error`: force every connector face into its setup or error state
@@ -93,8 +94,10 @@ Call the dentist".into();
         let control = crate::services::ControlState {
             volume: Some(0.42),
             muted: Some(empty),
-            wifi: Some(true),
-            bluetooth: Some(true),
+            // `empty` clears the live Control Center state too: no radios, no tray apps and
+            // no Windows Update answer yet (each `tray=`/`update=` option still wins).
+            wifi: (!empty).then_some(true),
+            bluetooth: (!empty).then_some(true),
             dark: !light,
             media: (!empty).then(|| laminar_sys::media::NowPlaying {
                 title: "Midnight Drive".into(),
@@ -109,7 +112,7 @@ Call the dentist".into();
         let pinned = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(), "e".to_string()];
         let names: HashMap<String, String> =
             if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Calendar", "Photos", "Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
-        let n_tray = opt("tray").and_then(|v| v.parse::<u64>().ok()).unwrap_or(14);
+        let n_tray = opt("tray").and_then(|v| v.parse::<u64>().ok()).unwrap_or(if empty { 0 } else { 14 });
         let tray: Vec<(u64, String)> = (1..=n_tray).map(|k| (k, format!("App {k}"))).collect();
         use laminar_sys::update::UpdateStatus;
         let update = match opt("update").as_deref() {
@@ -117,6 +120,8 @@ Call the dentist".into();
             Some("current") => Some(UpdateStatus::UpToDate),
             Some("unknown") => Some(UpdateStatus::Unknown),
             Some("none") => None,
+            Some("pending") => Some(UpdateStatus::Pending(3)),
+            _ if empty => None,
             _ => Some(UpdateStatus::Pending(3)),
         };
         let ctx = Ctx {
