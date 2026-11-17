@@ -104,6 +104,9 @@ enum Got<'a> {
 /// Widget sheet only (`state=setup|error`): force every connector face into its §7 setup
 /// (1) or error (2) state so those layouts can be reviewed. 0 = off (always in the app).
 pub(super) static SHEET_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Widget sheet only (`battery=charging|plugged|none`): the battery sample charging (1),
+/// plugged in and not charging (2) or a PC with no battery (3). 0 = the sample as is.
+pub(super) static SHEET_BATTERY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 fn got<'a>(x: &'a Ctx, conn: &str) -> Got<'a> {
     match SHEET_STATE.load(std::sync::atomic::Ordering::Relaxed) {
@@ -325,7 +328,8 @@ fn stat_footer(c: &Canvas, items: [(&str, &str); 3], top: f32) {
     let m = style::M_CARD;
     let cw = (c.w - 2.0 * m) / 3.0;
     let base = top + c.cap_h(style::VALUE.size);
-    for (i, (v, label)) in items.iter().enumerate() {
+    // An empty value is a stat with no data: the others keep their columns.
+    for (i, (v, label)) in items.iter().enumerate().filter(|(_, (v, _))| !v.is_empty()) {
         let x = m + i as f32 * cw;
         let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
         c.text_base(&v, x, base, fs, style::VALUE.weight, c.text1(), Align::Left, c.w);
@@ -348,10 +352,11 @@ fn pill_button(c: &Canvas, out: &mut Painted, x: f32, y: f32, w: f32, h: f32, la
 }
 
 /// The fill of every level control (brightness, volume): a neutral level, text1 in dark
-/// (a lit white) and text2 in light (a calm graphite). Blue is kept for on/off (§2.3).
+/// (a lit white) and text1 at 0.88 in light (a crisp near-black, not a muddy mid grey).
+/// Blue is kept for on/off (§2.3).
 fn level_fill(c: &Canvas) -> Col {
     if c.light {
-        c.text2()
+        alpha(c.text1(), 0.88)
     } else {
         c.text1()
     }
@@ -8190,9 +8195,17 @@ fn rate(bps: f64) -> String {
     }
 }
 
-/// The Mini form of a rate: "2.4M", "310K".
+/// The Mini form of a rate (5 glyphs, units spelled out; the down-arrow mark says it's a
+/// rate): "2.4MB", "12MB", "310KB".
 fn rate_short(bps: f64) -> String {
-    rate(bps).replace(" KB/s", "K").replace(" MB/s", "M")
+    let mb = bps / 1_000_000.0;
+    if mb >= 9.95 {
+        format!("{mb:.0}MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1}MB")
+    } else {
+        format!("{:.0}KB", (bps / 1000.0).min(999.0))
+    }
 }
 
 /// A load percentage (§2.2): one decimal under 10, whole numbers otherwise.
@@ -8257,9 +8270,9 @@ fn sys_fmt_gb(gb: f64) -> String {
     }
 }
 
-/// The Mini form (5 glyphs): "241G", "1.2T", "9.5G", "640M".
+/// The Mini form (5 glyphs, the unit spelled out): "241GB", "1.2TB", "9.5GB", "640MB".
 fn sys_fmt_gb_short(gb: f64) -> String {
-    sys_fmt_gb(gb).replace(" MB", "M").replace(" GB", "G").replace(" TB", "T")
+    sys_fmt_gb(gb).replace(' ', "")
 }
 
 /// Made-up history for previews (the gallery and the widget sheet) before any real samples
@@ -8364,6 +8377,17 @@ fn sys_keycaps(c: &Canvas, keys: &[(&str, f32)], x: f32, y: f32, h: f32, fs: f32
     }
 }
 
+/// A sparkline in an accessory slot. Before there are two samples it draws the flat
+/// baseline hairline (separator colour), as network's slot does, so the slot never sits empty.
+#[allow(clippy::too_many_arguments)]
+fn sys_spark(c: &Canvas, x: f32, y: f32, w: f32, h: f32, vals: &[f64], col: Col) {
+    if vals.len() < 2 {
+        c.line(x, y + h - 0.5, x + w, y + h - 0.5, 1.0, c.sep());
+    } else {
+        c.area(x, y, w, h, vals, col, true);
+    }
+}
+
 // ---- Mini
 
 /// Visual-led Mini: a 38 px mark, with a number (or a glyph) inside a ring.
@@ -8446,7 +8470,7 @@ fn sys_dock(c: &Canvas, mark: Mark, value: &str, cap: &str, arrow: Option<(&str,
     let (y0, y1, sr) = (14.0 * k, 40.0 * k, c.w - m);
     match slot {
         SysSlot::None => {}
-        SysSlot::Spark(v, col) => c.area(slot_x, y0, slot_w, y1 - y0, v, *col, true),
+        SysSlot::Spark(v, col) => sys_spark(c, slot_x, y0, slot_w, y1 - y0, v, *col),
         SysSlot::Net(d, u) => {
             sys_net_chart(c, slot_x, y0, slot_w, y1 - y0, d, u, style::STROKE_SPARK, false);
         }
@@ -8495,7 +8519,7 @@ fn sys_small(c: &Canvas, mark: Mark, slot: &SmallSlot, hero: &str, unit: Option<
     let sw = sx1 - sx0;
     match slot {
         SmallSlot::None => {}
-        SmallSlot::Spark(v, col) => c.area(sx0, 16.0, sw, 26.0, v, *col, true),
+        SmallSlot::Spark(v, col) => sys_spark(c, sx0, 16.0, sw, 26.0, v, *col),
         SmallSlot::Meter(f, col, label) => {
             if !label.is_empty() {
                 c.text_base(label, sx1, 22.0, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Right, sw);
@@ -8579,7 +8603,7 @@ fn sys_glance(c: &Canvas, g: &Glance) {
     }
     match g.acc {
         SysAcc::None => {}
-        SysAcc::Spark(v, col) => c.area(ax, 48.0, SYS_ACC_W, 32.0, v, *col, true),
+        SysAcc::Spark(v, col) => sys_spark(c, ax, 48.0, SYS_ACC_W, 32.0, v, *col),
         SysAcc::Meter(f, col) => c.bar(ax, 70.0, SYS_ACC_W, style::METER_H, *f, *col),
     }
 }
@@ -8598,8 +8622,9 @@ enum SysDetail {
     /// A history chart (y 108 to 174) with "1 min ago" / "Now" under it, and the current
     /// level (0..1) for the first seconds before there's any history.
     Chart(Vec<f64>, Col, f32),
-    /// Three stats: (value, label).
-    Stats([(String, String); 3]),
+    /// The whole capacity as a full-width meter with tick labels (start, middle, end) under
+    /// it, then three stats (value, label) on the bottom margin: the progress widgets' Large.
+    Meter(f32, Col, [String; 3], [(String, String); 3]),
 }
 
 fn sys_detail(c: &Canvas, d: &SysDetail) {
@@ -8611,22 +8636,35 @@ fn sys_detail(c: &Canvas, d: &SysDetail) {
                 sys_collecting(c);
             }
         }
-        SysDetail::Stats(s) => {
+        SysDetail::Meter(f, col, ticks, s) => {
+            sys_meter_ticks(c, *f, *col, ticks);
             let items = [(s[0].0.as_str(), s[0].1.as_str()), (s[1].0.as_str(), s[1].1.as_str()), (s[2].0.as_str(), s[2].1.as_str())];
             sys_stat_footer(c, items);
         }
     }
 }
 
-/// Three-stat footer (§3 Large): values 17/600 at baseline 150 over 11 text2 labels at
-/// 166, in three equal columns. All three values share one size, so a long word in one
-/// column shrinks the row evenly instead of standing out.
+/// A full-width 6 px meter centred on y 112 with Micro text3 tick labels at baseline 132
+/// (left, centre, right-aligned), as day-, month- and year-progress draw theirs.
+fn sys_meter_ticks(c: &Canvas, f: f32, col: Col, ticks: &[String; 3]) {
+    let m = style::M_CARD;
+    let (w, h) = (c.w - 2.0 * m, style::METER_H);
+    c.bar(m, 112.0 - h / 2.0, w, h, f, col);
+    let r = style::MICRO;
+    for (t, (x, al)) in ticks.iter().zip([(m, Align::Left), (c.w / 2.0, Align::Center), (c.w - m, Align::Right)]) {
+        c.text_base(t, x, 132.0, r.size, r.weight, c.text3(), al, w / 3.0);
+    }
+}
+
+/// Three-stat footer (§5 Large): values 17/600 at baseline 166 over 11 text2 labels at
+/// 182, in three equal columns, anchored to the bottom margin like the progress widgets.
+/// All three values share one size, so a long one shrinks the row evenly.
 fn sys_stat_footer(c: &Canvas, items: [(&str, &str); 3]) {
     let m = style::M_CARD;
     let cw = (c.w - 2.0 * m) / 3.0;
     let r = style::VALUE;
     let fs = items.iter().map(|(v, _)| fit(c, v, r.size, r.min, r.weight, Font::Text, cw - style::SP[3])).fold(r.size, f32::min);
-    let base = 150.0;
+    let base = 166.0;
     for (i, (v, label)) in items.iter().enumerate() {
         let x = m + i as f32 * cw;
         c.text_base(v, x, base, fs, r.weight, c.text1(), Align::Left, c.w);
@@ -8862,10 +8900,12 @@ fn sys_ring(c: &Canvas, sh: Shape, r: &RingFace) {
         Shape::Small => sys_small(c, mark, &r.small_slot, &r.value, None, &r.caption, None),
         _ => {
             let third = r.third.as_ref().map(|(t, col)| (t.as_str(), *col));
-            // A Large history chart shows the accessory's sparkline again, full width: the
-            // box gives way to it (as Detail2::replaces_box does for the stat cards).
+            // A Large history chart or full-width meter shows the accessory's sparkline or
+            // meter again, full width: the box gives way to it (§5, as Detail2::replaces_box
+            // does for the stat cards).
             let none = SysAcc::None;
-            let acc = if sh == Shape::Large && matches!(r.detail, SysDetail::Chart(..)) && matches!(r.acc, SysAcc::Spark(..)) { &none } else { &r.acc };
+            let replaced = matches!((&r.detail, &r.acc), (SysDetail::Chart(..), SysAcc::Spark(..)) | (SysDetail::Meter(..), SysAcc::Meter(..)));
+            let acc = if sh == Shape::Large && replaced { &none } else { &r.acc };
             sys_glance(c, &Glance { mark, hero: &r.value, hero_glyph: r.hero_glyph, cap: &r.caption, third, acc });
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
@@ -8934,7 +8974,7 @@ fn sys(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     hero_glyph: None,
                     third: Some((gb, c.text3())),
                     acc: glance_meter(memf, PURPLE),
-                    detail: SysDetail::Stats([
+                    detail: SysDetail::Meter(memf, PURPLE, ["0".into(), sys_fmt_gb(mt as f64 / 2.0), sys_fmt_gb(mt as f64)], [
                         (format!("{mu:.1} GB"), "Used".into()),
                         (format!("{:.1} GB", (mt - mu).max(0.0)), "Free".into()),
                         (format!("{mt:.0} GB"), "Total".into()),
@@ -8973,7 +9013,7 @@ fn sys_resource(c: &Canvas, sh: Shape, cpu: f32, mu: f32, mt: f32, cpu_hist: &[f
                 c.text_base(v, x0 + lw, base, vs, 600, c.text1(), Align::Left, right - x0 - lw);
             }
             if wide {
-                c.area(slot_x, 14.0 * k, slot_w, 26.0 * k, cpu_hist, BLUE, true);
+                sys_spark(c, slot_x, 14.0 * k, slot_w, 26.0 * k, cpu_hist, BLUE);
             }
         }
         Shape::Small => {
@@ -8981,7 +9021,7 @@ fn sys_resource(c: &Canvas, sh: Shape, cpu: f32, mu: f32, mt: f32, cpu_hist: &[f
             let bs = style::BADGE_SMALL;
             sys_mark(c, mark, m, m, bs);
             let sx0 = m + bs + style::SP[4];
-            c.area(sx0, 16.0, c.w - m - sx0, 26.0, cpu_hist, BLUE, true);
+            sys_spark(c, sx0, 16.0, c.w - m - sx0, 26.0, cpu_hist, BLUE);
             for (i, (l, v, _, col)) in rows.iter().enumerate() {
                 let x0 = if i == 0 { m } else { c.w / 2.0 + style::SP[2] };
                 let cw = c.w / 2.0 - m - style::SP[2];
@@ -9046,13 +9086,20 @@ fn sys_network(c: &Canvas, x: &Ctx, sh: Shape) {
             sys_arrow_text(c, "↑", GREEN, &rate(u), c.w - m, 45.0, style::FOOT.size, 400, c.text2(), Align::Right, c.w / 2.0);
             let (top, large) = (52.0, sh == Shape::Large);
             let bottom = if large { c.h - m - 14.0 } else { c.h - m };
-            let drawn = sys_net_chart(c, m, top, c.w - 2.0 * m, bottom - top, &down, &up, if large { style::STROKE } else { style::STROKE_SPARK }, true);
-            if large {
-                if drawn {
-                    sys_time_labels(c);
+            if !large {
+                // Medium: download only, on its own range (§2.5), so its shape reads in the
+                // 28 px strip; the upload rate is already in the header.
+                if down.len() >= 2 {
+                    c.chart(m, top, c.w - 2.0 * m, bottom - top, &down, BLUE, ChartOpts { fill: true, dot: true, stroke: style::STROKE_SPARK, smooth: down.len() >= 8 });
                 } else {
-                    sys_collecting(c);
+                    sys_net_chart(c, m, top, c.w - 2.0 * m, bottom - top, &[], &[], style::STROKE_SPARK, true);
                 }
+                return;
+            }
+            if sys_net_chart(c, m, top, c.w - 2.0 * m, bottom - top, &down, &up, style::STROKE, true) {
+                sys_time_labels(c);
+            } else {
+                sys_collecting(c);
             }
         }
     }
@@ -9070,8 +9117,7 @@ fn sys_brightness(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let pct = format!("{:.0}%", v * 100.0);
     let mark = Mark::Plate(G_SUN, c.text2());
     // One neutral level colour at every size (the slider, meters and the chosen preset):
-    // text1 in dark (a white level, like a lit screen); text2 in light, so the slider is a
-    // calm graphite rather than a solid black slab.
+    // `level_fill`, a lit white in dark and a crisp near-black in light.
     let fill = level_fill(c);
     // The value is read from the main display (DDC/CI); the plate already says brightness.
     let cap = "Main display";
@@ -9133,19 +9179,42 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
     let (name, mark, glyph, open) = match k {
         SysKind::Battery => ("Battery", Mark::Ring(0.0, GREEN), G_BATTERY, ""),
         SysKind::Disk => ("Disk", Mark::Ring(0.0, ORANGE), G_DRIVE, "ms-settings:storagesense"),
-        SysKind::Storage => ("Storage", Mark::Plate(G_DRIVE, c.text2()), G_DRIVE, "ms-settings:storagesense"),
+        SysKind::Storage => ("Storage", Mark::Ring(0.0, ORANGE), G_DRIVE, "ms-settings:storagesense"),
         SysKind::Language => ("Language", Mark::Plate(G_KEYBOARD, c.text2()), G_KEYBOARD, ""),
         _ => ("Uptime", Mark::Plate(G_CLOCK, c.text2()), G_CLOCK, ""),
     };
-    let f = match got(x, conn) {
+    let mut got_now = got(x, conn);
+    // Widget sheet only (`battery=charging|plugged|none`): review the battery's other states.
+    if k == SysKind::Battery {
+        if let Got::Feed(f) = &mut got_now {
+            match SHEET_BATTERY.load(std::sync::atomic::Ordering::Relaxed) {
+                1 | 2 => {
+                    let charging = SHEET_BATTERY.load(std::sync::atomic::Ordering::Relaxed) == 1;
+                    let e = &mut f.to_mut().extra;
+                    e.insert("charging".into(), charging.to_string());
+                    e.insert("plugged_in".into(), "true".into());
+                    e.insert("time_left".into(), String::new());
+                    // A 52 Wh battery (56 Wh new) at the sample's 82%, charging at 15 W.
+                    e.insert("full_mwh".into(), "52000".into());
+                    e.insert("design_mwh".into(), "56000".into());
+                    e.insert("remaining_mwh".into(), "42640".into());
+                    e.insert("charge_rate_mw".into(), if charging { "15000" } else { "0" }.into());
+                }
+                3 => got_now = Got::Setup(String::new()),
+                _ => {}
+            }
+        }
+    }
+    let f = match got_now {
         Got::Feed(f) => f,
         Got::Loading => {
-            sys_skeleton(c, sh, mark, k == SysKind::Language, k == SysKind::Storage);
+            sys_skeleton(c, sh, mark, k == SysKind::Language, false);
             return;
         }
         // The battery connector's "setup" is a fact about this PC: there is no battery.
-        Got::Setup(m) if k == SysKind::Battery => {
-            let u = Unsup { glyph, name, short: "No battery", sub: "Runs on AC power", reason: &m, err: false, pill: "Power settings" };
+        // (Its own wording, so `state=setup` on the widget sheet shows the real face.)
+        Got::Setup(_) if k == SysKind::Battery => {
+            let u = Unsup { glyph, name, short: "No battery", sub: "Runs on AC power", reason: "This PC has no battery", err: false, pill: "Power settings" };
             sys_unsupported(c, out, sh, &u, "ms-settings:powersleep");
             return;
         }
@@ -9174,6 +9243,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                 "On battery"
             };
             let cap = left.clone().unwrap_or_else(|| status.to_string());
+            let mins_left = f.extra.get("time_left").and_then(|s| sys_parse_dur(s)).filter(|_| !charging);
             let wide = sh == Shape::Dock && sys_dock_l(c);
             sys_ring(
                 c,
@@ -9182,7 +9252,8 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     frac,
                     col,
                     value: format!("{pct:.0}%"),
-                    mini: format!("{pct:.0}"),
+                    // With % like the cpu, memory and disk Minis: one rule for the family.
+                    mini: format!("{pct:.0}%"),
                     mini_glyph: charging.then_some(G_BOLT),
                     // Dock L puts the time left in its slot, so its caption is the power state.
                     dock_cap: if wide { status.to_string() } else { cap.clone() },
@@ -9191,8 +9262,12 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                         SmallSlot::Chip(G_BOLT, String::new())
                     } else if plugged {
                         SmallSlot::Chip(G_PLUG, String::new())
+                    } else if left.is_some() {
+                        // The caption is the time left, so the slot says the power state.
+                        SmallSlot::Foot("On battery".into(), c.text2())
                     } else {
-                        SmallSlot::None
+                        // The caption already says "On battery": the charge as a meter.
+                        SmallSlot::Meter(frac, col, String::new())
                     },
                     // The third line names what the caption doesn't: the power state, or
                     // the power source when the caption already is the state.
@@ -9200,21 +9275,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                     caption: cap,
                     hero_glyph: charging.then_some(G_BOLT),
                     acc: glance_meter(frac, col),
-                    detail: SysDetail::Stats([
-                        (f.extra.get("time_left").filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| "—".into()), "Time left".into()),
-                        (if plugged || charging { "Plugged in" } else { "Battery" }.into(), "Power source".into()),
-                        (
-                            if charging {
-                                "Charging"
-                            } else if plugged {
-                                "Not charging"
-                            } else {
-                                "Discharging"
-                            }
-                            .into(),
-                            "Status".into(),
-                        ),
-                    ]),
+                    detail: SysDetail::Meter(frac, col, ["0%".into(), "50%".into(), "100%".into()], sys_battery_stats(&x.now, pct, mins_left, charging, plugged, &f.extra)),
                 },
             );
         }
@@ -9228,7 +9289,7 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
             let (free_s, total_s, used_s) = (sys_fmt_gb(free), sys_fmt_gb(total), sys_fmt_gb((total - free).max(0.0)));
             let col = sys_disk_col(used);
             let used_pct = format!("{:.0}%", used * 100.0);
-            let stats = SysDetail::Stats([(used_s.clone(), "Used".into()), (free_s.clone(), "Free".into()), (total_s.clone(), "Total".into())]);
+            let stats = SysDetail::Meter(used, col, ["0".into(), sys_fmt_gb(total / 2.0), total_s.clone()], [(used_s.clone(), "Used".into()), (free_s.clone(), "Free".into()), (total_s.clone(), "Total".into())]);
             if k == SysKind::Disk {
                 let cap = format!("Used on {head}");
                 sys_ring(
@@ -9252,19 +9313,24 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                 );
                 return;
             }
-            let mark = Mark::Plate(G_DRIVE, c.text2());
+            // The same orange ring identity as disk, so the two read as one family; storage's
+            // hero is the free space (disk's is the used share).
+            let mark = Mark::Ring(used, col);
             let cap = format!("Free on {head}");
             match sh {
-                Shape::Mini => sys_mini_value(c, G_DRIVE, c.text2(), &sys_fmt_gb_short(free)),
+                Shape::Mini => sys_mini_value(c, G_DRIVE, col, &sys_fmt_gb_short(free)),
                 Shape::Dock if sys_dock_l(c) => sys_dock(c, mark, &free_s, &cap, None, None, &SysSlot::Meter(format!("{used_pct} used"), used, col)),
-                Shape::Dock => sys_dock(c, mark, &free_s, &cap, None, Some((used, col)), &SysSlot::None),
-                Shape::Small => sys_small(c, mark, &SmallSlot::Meter(used, col, used_pct), &free_s, None, &cap, None),
+                Shape::Dock => sys_dock(c, mark, &free_s, &cap, None, None, &SysSlot::None),
+                Shape::Small => sys_small(c, mark, &SmallSlot::Foot(format!("{used_pct} used"), c.text2()), &free_s, None, &cap, None),
                 _ => {
                     let third = format!("{used_s} used of {total_s}");
-                    sys_glance(c, &Glance { mark, hero: &free_s, hero_glyph: None, cap: &cap, third: Some((&third, c.text3())), acc: &glance_meter(used, col) });
+                    let multi = drives.len() > 1;
+                    // Single drive: the Large meter replaces the box meter (as in sys_ring).
+                    let acc = if sh == Shape::Large && !multi { SysAcc::None } else { glance_meter(used, col) };
+                    sys_glance(c, &Glance { mark, hero: &free_s, hero_glyph: None, cap: &cap, third: Some((&third, c.text3())), acc: &acc });
                     if sh == Shape::Large {
                         separator(c, style::SEP_Y_LARGE);
-                        if drives.len() > 1 {
+                        if multi {
                             sys_drive_rows(c, &drives, &head, free);
                         } else {
                             sys_detail(c, &stats);
@@ -9289,15 +9355,16 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
                 Shape::Dock => sys_dock(c, mark, &code, &lang, None, None, &SysSlot::Keys),
                 Shape::Small => sys_small(c, mark, &SmallSlot::None, &code, None, &full, None),
                 _ => {
-                    // Large shows the shortcut as keycaps, so its third line says which
-                    // window the language belongs to instead of repeating the hint.
-                    let third = if sh == Shape::Large { "For the window in front" } else { "Win + Space to switch" };
-                    sys_glance(c, &Glance { mark, hero: &code, hero_glyph: None, cap: &full, third: Some((third, c.text3())), acc: &SysAcc::None });
+                    // Large keeps Medium's block unchanged (rows 0 to 96).
+                    sys_glance(c, &Glance { mark, hero: &code, hero_glyph: None, cap: &full, third: Some(("Win + Space to switch", c.text3())), acc: &SysAcc::None });
                     if sh == Shape::Large {
-                        // Only the current language is known: a keycap composition for the shortcut.
+                        // Only the current language is known: the shortcut as keycaps, left on
+                        // the 16 margin like every Large detail region, and a footnote on the
+                        // bottom margin saying where the language applies.
                         separator(c, style::SEP_Y_LARGE);
-                        sys_keycaps(c, &[("Win", 56.0), ("Space", 112.0)], c.w / 2.0, 120.0, 32.0, style::TITLE.size, style::TITLE.weight, c.text1(), 8.0, style::SP[3], Align::Center);
-                        c.text_base("Switch input language", c.w / 2.0, 178.0, style::FOOT.size, 400, c.text2(), Align::Center, c.w - 2.0 * style::M_CARD);
+                        let m = style::M_CARD;
+                        sys_keycaps(c, &[("Win", 56.0), ("Space", 112.0)], m, 120.0, 32.0, style::TITLE.size, style::TITLE.weight, c.text1(), 8.0, style::SP[3], Align::Left);
+                        c.text_base("Applies to the window in front", m, c.h - m, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m);
                     }
                 }
             }
@@ -9352,17 +9419,83 @@ fn sys_local(c: &Canvas, out: &mut Painted, k: SysKind, x: &Ctx, sh: Shape) {
     }
 }
 
-/// Storage Large with more than one drive: one row per drive at the 24 pitch (label, a
-/// 60 px meter, free space), then a summary when there's room.
+/// Minutes in a duration as the battery connector writes it: "4h 10m", "45m", "1d 2h".
+fn sys_parse_dur(s: &str) -> Option<i64> {
+    let mut mins = 0i64;
+    for t in s.split_whitespace() {
+        let (n, unit) = t.split_at(t.len().checked_sub(1)?);
+        let n: i64 = n.parse().ok()?;
+        mins += match unit {
+            "d" => n * 1440,
+            "h" => n * 60,
+            "m" => n,
+            _ => return None,
+        };
+    }
+    (mins > 0).then_some(mins)
+}
+
+/// Battery Large's stats, which add to the caption instead of repeating it. On battery with
+/// an estimate: when it reaches the 20% warning (where the ring turns yellow), when it runs
+/// out, and the drain rate, in time order. On AC, from the battery report: the time to full
+/// and charge rate while charging, the capacity when not, and the battery's health. A stat
+/// with no data is left out (an empty value), never replaced by a word.
+fn sys_battery_stats(now: &super::Now, pct: f32, mins_left: Option<i64>, charging: bool, plugged: bool, extra: &std::collections::BTreeMap<String, String>) -> [(String, String); 3] {
+    let now_min = (now.hour * 60 + now.minute) as i64;
+    let num = |k: &str| extra.get(k).and_then(|v| v.parse::<f64>().ok());
+    let none = || (String::new(), String::new());
+    match mins_left {
+        Some(left) if !plugged => {
+            let rate = pct as f64 / (left as f64 / 60.0);
+            let low = if pct > 20.0 { sys_time((now_min + (left as f64 * (pct as f64 - 20.0) / pct as f64).round() as i64).rem_euclid(1440)) } else { "Now".into() };
+            [
+                (low, "Reaches 20%".into()),
+                (sys_time((now_min + left).rem_euclid(1440)), "Empty at".into()),
+                (format!("{rate:.0}%/h"), "Drain rate".into()),
+            ]
+        }
+        _ => {
+            let full = num("full_mwh").filter(|v| *v > 0.0);
+            let design = num("design_mwh").filter(|v| *v > 0.0);
+            let health = full.zip(design).map(|(f, d)| (format!("{:.0}%", (f / d * 100.0).min(100.0)), "Battery health".to_string()));
+            let rate = num("charge_rate_mw").filter(|v| *v > 0.0);
+            let left_mwh = full.zip(num("remaining_mwh")).map(|(f, r)| (f - r).max(0.0));
+            let mut out: Vec<(String, String)> = Vec::new();
+            match (charging, full, left_mwh, rate) {
+                (true, Some(f), Some(l), Some(r)) if pct < 100.0 => {
+                    let mins = (l / r * 60.0).round().max(1.0) as i64;
+                    let (h, m) = (mins / 60, mins % 60);
+                    out.push((if h > 0 { format!("{h}h {m:02}m") } else { format!("{m}m") }, "To full".into()));
+                    out.push((format!("{:.0}%/h", r / f * 100.0), "Charge rate".into()));
+                }
+                (true, ..) => out.push((format!("{:.0}%", (100.0 - pct).max(0.0)), "Left to charge".into())),
+                (false, Some(f), ..) => {
+                    out.push((format!("{:.0} Wh", f / 1000.0), "Full capacity".into()));
+                    if let Some(d) = design {
+                        out.push((format!("{:.0} Wh", d / 1000.0), "When new".into()));
+                    }
+                }
+                _ => {}
+            }
+            out.extend(health);
+            let mut it = out.into_iter();
+            [it.next().unwrap_or_else(none), it.next().unwrap_or_else(none), it.next().unwrap_or_else(none)]
+        }
+    }
+}
+
+/// Storage Large with more than one drive: one row per drive at a 22 pitch from just under
+/// the separator (label, a 60 px meter, free space), then a summary footnote on the bottom
+/// margin, a full band below the last row.
 fn sys_drive_rows(c: &Canvas, drives: &[(String, f64, f64, f32)], head: &str, head_free: f64) {
     let m = style::M_CARD;
-    let pitch = style::ROW_L;
+    let pitch = style::ROW_L - style::SP[0];
     let ls = style::BODY.size;
-    let top = style::DETAIL_TOP - style::SP[1];
+    let top = style::SEP_Y_LARGE + style::SP[1];
     let base = |i: usize| top + i as f32 * pitch + (pitch + c.cap_h(ls)) / 2.0;
-    // Up to 3 rows fit; with 2 there's room for the summary, with more than 3 it replaces the third.
+    // Up to 3 rows fit above the summary footnote, which sits on the bottom margin.
     let n = drives.len();
-    let shown = if n == 3 { 3 } else { n.min(2) };
+    let shown = n.min(3);
     let free_of = |d: &(String, f64, f64, f32)| if d.0.starts_with(head) { head_free } else { d.1 };
     let trail: Vec<String> = drives.iter().take(shown).map(|d| format!("{} free", sys_fmt_gb(free_of(d)))).collect();
     let tw = trail.iter().map(|t| c.measure(t, style::FOOT.size, 500, Font::Text).0).fold(0.0, f32::max);
@@ -9376,11 +9509,9 @@ fn sys_drive_rows(c: &Canvas, drives: &[(String, f64, f64, f32)], head: &str, he
         c.bar(mx, b - c.cap_h(ls) / 2.0 - mh / 2.0, mw, mh, d.3, sys_disk_col(d.3));
         c.text_base(t, c.w - m, b, style::FOOT.size, 500, c.text2(), Align::Right, tw + 4.0);
     }
-    if shown < n || n == 2 {
-        let total_free: f64 = drives.iter().map(free_of).sum();
-        let s = format!("{n} drives · {} free", sys_fmt_gb(total_free));
-        c.text_base(&s, m, base(shown), style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
-    }
+    let total_free: f64 = drives.iter().map(free_of).sum();
+    let s = format!("{n} drives · {} free", sys_fmt_gb(total_free));
+    c.text_base(&s, m, c.h - m, style::FOOT.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
 }
 
 /// Uptime Large: the last seven days (today at the right), filled from boot to now, and when it started.

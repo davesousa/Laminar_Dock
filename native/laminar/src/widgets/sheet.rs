@@ -9,6 +9,8 @@
 //!   list of exact ids ("stripe,stripe-chart")
 //! - `state=setup|error`: force every connector face into its setup or error state
 //!   (setup also clears the weather location, so the weather faces show "Set location")
+//! - `battery=charging|plugged|none`: the battery sample charging, plugged in and not
+//!   charging, or a PC with no battery
 //! - `tray=N`: N sample tray apps for Background Apps (0 shows its empty state)
 //! - `update=pending|restart|current|unknown|none`: the Windows Update status (none = not
 //!   checked yet)
@@ -40,6 +42,13 @@ pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool
         _ => 0,
     };
     super::paint::SHEET_STATE.store(state, std::sync::atomic::Ordering::Relaxed);
+    let battery = match opt("battery").as_deref() {
+        Some("charging") => 1,
+        Some("plugged") => 2,
+        Some("none") => 3,
+        _ => 0,
+    };
+    super::paint::SHEET_BATTERY.store(battery, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
         let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;

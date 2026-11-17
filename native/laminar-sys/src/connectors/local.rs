@@ -319,7 +319,30 @@ pub fn battery() -> Result<Feed, FeedError> {
     extra.insert("charging".into(), charging.to_string());
     extra.insert("plugged_in".into(), (s.ACLineStatus == 1).to_string());
     extra.insert("time_left".into(), time_left);
+    // The battery report adds what the power status lacks: the charge rate (for the time to
+    // full) and the full-charge and design capacities (for the battery's health). Optional:
+    // the widget does without them.
+    for (k, v) in battery_report() {
+        extra.insert(k.into(), v.to_string());
+    }
     Ok(Feed { value: Some(pct), unit: "%".into(), caption: "Battery".into(), frac: Some((pct / 100.0) as f32), extra, ..Default::default() })
+}
+
+/// The aggregate battery report's numbers that are present: "charge_rate_mw" (positive
+/// while charging), "remaining_mwh", "full_mwh" and "design_mwh".
+fn battery_report() -> Vec<(&'static str, i32)> {
+    use windows::Devices::Power::Battery;
+    let Ok(r) = Battery::AggregateBattery().and_then(|b| b.GetReport()) else { return Vec::new() };
+    let get = |f: windows::core::Result<windows::Foundation::IReference<i32>>| f.ok().and_then(|v| v.Value().ok());
+    [
+        ("charge_rate_mw", get(r.ChargeRateInMilliwatts())),
+        ("remaining_mwh", get(r.RemainingCapacityInMilliwattHours())),
+        ("full_mwh", get(r.FullChargeCapacityInMilliwattHours())),
+        ("design_mwh", get(r.DesignCapacityInMilliwattHours())),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| Some((k, v?)))
+    .collect()
 }
 
 /// Free space on every fixed drive; the headline is C: (or the first fixed drive).
