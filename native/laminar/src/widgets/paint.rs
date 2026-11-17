@@ -699,7 +699,7 @@ enum Detail {
     Chart,
     /// A 40 px chart over a three-stat footer (Resend, Search Console).
     ChartFooter,
-    /// A stat footer of this many columns, centred in the region (followers).
+    /// Followers: the milestone line and meter over a footer of this many columns.
     Footer(usize),
     /// Three stats, the paid / trial meter and its footnote (RevenueCat).
     Subs,
@@ -911,7 +911,7 @@ fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, con
                         skeleton(c, m, 76.0 - 6.0, 120.0, 6.0);
                     }
                     // Large keeps Medium's box unless its detail shows the same data.
-                    let box_gone = large && matches!(detail, Detail::Chart | Detail::ChartFooter | Detail::Heat);
+                    let box_gone = large && matches!(detail, Detail::Chart | Detail::ChartFooter | Detail::Heat | Detail::Footer(_));
                     if *detail == Detail::Credits {
                         // The full-width meter under the caption.
                         skeleton(c, m, 70.0, c.w - 2.0 * m, style::METER_H);
@@ -932,8 +932,8 @@ fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, con
                         let bottom = y + h;
                         // Three footer columns: value bar over label bar, from the value's baseline.
                         let footer = |n: usize, base: f32| {
-                            let colw = w / n.max(1) as f32;
-                            for i in 0..n {
+                            let colw = w / 3.0;
+                            for i in 0..n.min(3) {
                                 skeleton(c, x + i as f32 * colw, base - 12.0, 40.0, 12.0);
                                 skeleton(c, x + i as f32 * colw, base + style::SP[6] - 8.0, 28.0, 8.0);
                             }
@@ -955,7 +955,11 @@ fn placeholder_tpl(c: &Canvas, out: &mut Painted, name: &str, badge: &Badge, con
                                 c.rr(x, y, w, CHART_FOOT_H, style::R_MIN, alpha(c.track(), 0.5));
                                 footer(3, CHART_FOOT_BASE);
                             }
-                            Detail::Footer(n) => footer(*n, SOCIAL_FOOT_BASE),
+                            Detail::Footer(n) => {
+                                skeleton(c, x, SOCIAL_HEAD_BASE - 9.0, 96.0, 9.0);
+                                c.rr(x, SOCIAL_METER_Y, w, style::METER_H, style::METER_H / 2.0, c.track());
+                                footer(*n, HDR_FOOT_BASE);
+                            }
                             Detail::Subs => {
                                 footer(3, SUBS_FOOT_BASE);
                                 c.rr(x, SUBS_METER_Y, w, style::METER_H, style::METER_H / 2.0, c.track());
@@ -1049,18 +1053,23 @@ const HDR_PLOT_TOP: f32 = 52.0;
 const HDR_PLOT_BOTTOM_L: f32 = 132.0;
 /// Large Header faces: the three-stat footer's value baseline (labels 16 below).
 const HDR_FOOT_BASE: f32 = 166.0;
-/// Large Glance details (y 108 to 188): a 38 px chart over a footer whose values sit on
-/// baseline 168 (Resend, Search Console).
+/// Large Glance details (y 108 to 188): a 38 px chart over the family's footer (values on
+/// 166, labels on 182: Resend, Search Console).
 const CHART_FOOT_H: f32 = 38.0;
-const CHART_FOOT_BASE: f32 = 168.0;
-/// A stat footer alone (followers), centred in the region: values on 142, labels on 158.
-const SOCIAL_FOOT_BASE: f32 = 142.0;
+const CHART_FOOT_BASE: f32 = HDR_FOOT_BASE;
+/// Followers: the next-milestone line on 124 and its 6 px meter at 134, over the footer.
+const SOCIAL_HEAD_BASE: f32 = 124.0;
+const SOCIAL_METER_Y: f32 = 134.0;
 /// RevenueCat and OpenRouter: stats on 126, then the meter at 158 and its footnote on 182.
 const SUBS_FOOT_BASE: f32 = 126.0;
 const SUBS_METER_Y: f32 = 158.0;
 const SUBS_NOTE_BASE: f32 = 182.0;
-/// Daily bars: earlier days are drawn at this opacity, the latest at full colour.
+/// Daily bars: earlier days are drawn at this opacity, the latest at full colour. Light
+/// glass needs more ink for past bars to keep about 3:1 against the card.
 const BAR_PAST: f32 = 0.55;
+const BAR_PAST_LIGHT: f32 = 0.8;
+/// The widest a daily bar gets (a week of bars stays fine, not slab-like).
+const BAR_MAX_W: f32 = 20.0;
 
 fn same_col(a: Col, b: Col) -> bool {
     (a.0 - b.0).abs() < 0.003 && (a.1 - b.1).abs() < 0.003 && (a.2 - b.2).abs() < 0.003
@@ -1139,19 +1148,22 @@ fn day_bars(c: &Canvas, x: f32, y: f32, w: f32, h: f32, vals: &[f64], col: Col, 
     let top = if max > 0.0 { max * (1.0 + style::CHART_PAD_HI) } else { 1.0 };
     let pitch = w / n as f32;
     let gap = (pitch * 0.36).clamp(1.33, 4.0);
-    let bw = (pitch - gap).max(1.0);
+    let bw = (pitch - gap).clamp(1.0, BAR_MAX_W);
     let floor = if baseline { y + h - 2.0 } else { y + h };
     if baseline {
         base_line(c, x, w, y + h);
     }
-    let r = (bw / 2.0).min(3.0);
+    // Fully round tops on a tall plot; short plots keep a tighter corner so low bars
+    // don't turn into pills.
+    let r = (bw / 2.0).min(if h >= 60.0 { 6.0 } else { 3.0 });
+    let past = if c.light { BAR_PAST_LIGHT } else { BAR_PAST };
     for (i, v) in vals.iter().enumerate() {
         let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
         if v <= 0.0 {
             continue;
         }
         let bh = ((v / top) as f32 * (floor - y)).max(bw.min(2.0));
-        let a = if i + 1 == n { 1.0 } else { BAR_PAST };
+        let a = if i + 1 == n { 1.0 } else { past };
         c.rr(x + i as f32 * pitch + (pitch - bw) / 2.0, floor - bh, bw, bh, r, alpha(col, a));
     }
 }
@@ -1331,12 +1343,11 @@ fn min_of(v: &[f64]) -> f64 {
     v.iter().copied().fold(f64::MAX, f64::min)
 }
 
-/// Up to three stats in equal columns across the card: value 17/600 over a footnote
-/// label, by baseline. Fewer stats share the width between them.
+/// Up to three stats on the family's three-column grid (x 16 / 95 / 174): value 17/600
+/// over a footnote label 16 below, by baseline. Fewer stats keep the same columns.
 fn stats_row(c: &Canvas, items: &[(String, String)], value_base: f32) {
     let m = style::M_CARD;
-    let n = items.len().clamp(1, 3);
-    let cw = (c.w - 2.0 * m) / n as f32;
+    let cw = (c.w - 2.0 * m) / 3.0;
     for (i, (v, label)) in items.iter().take(3).enumerate() {
         let x = m + i as f32 * cw;
         let (v, fs) = fit_value(c, v, style::VALUE, cw - style::SP[3]);
@@ -1370,8 +1381,9 @@ enum Detail2 {
     Rows(Vec<(String, String)>, String),
     /// The contribution heat map of the last 21 weeks (GitHub streak).
     Heat(Vec<f32>, usize),
-    /// A stat footer centred in the region (followers: what Medium doesn't show).
-    Footer(Vec<(String, String)>),
+    /// Followers: the next milestone and its meter, over the account's numbers in a footer
+    /// (the box's number among them, so the box gives way).
+    Social(Vec<(String, String)>, Option<(f32, String)>, Col),
     /// Three stats, then the paid / trial split, its footnote and (right) the stats' period.
     Subs(Vec<(String, String)>, f32, Col, String, String),
     /// Three stats, then a secondary pill that opens the credits page (OpenRouter).
@@ -1381,7 +1393,7 @@ enum Detail2 {
 impl Detail2 {
     /// The Large detail shows the accessory's data again, so the box gives way to it.
     fn replaces_box(&self) -> bool {
-        matches!(self, Detail2::Chart(_) | Detail2::ChartFooter(_) | Detail2::Heat(..))
+        matches!(self, Detail2::Chart(_) | Detail2::ChartFooter(_) | Detail2::Heat(..) | Detail2::Social(..))
     }
 }
 
@@ -1538,7 +1550,17 @@ impl Look {
                 c.text_base(summary, rx, bottom - style::SP[0] - 1.0, style::FOOT.size, 500, c.text3(), Align::Left, rw);
             }
             Detail2::Heat(grid, streak) => heat_weeks(c, grid, *streak, x.now.weekday as usize, self.trend()),
-            Detail2::Footer(items) => stats_row(c, items, SOCIAL_FOOT_BASE),
+            Detail2::Social(items, next, meter) => {
+                if let Some((frac, label)) = next {
+                    let fs = style::TITLE.size;
+                    let lw = c.text_base(label, rx + rw, SOCIAL_HEAD_BASE, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Right, rw / 2.0);
+                    c.text_base("Next milestone", rx, SOCIAL_HEAD_BASE, fs, style::TITLE.weight, c.text1(), Align::Left, rw - lw - style::SP[3]);
+                    let mh = style::METER_H;
+                    c.rr(rx, SOCIAL_METER_Y, rw, mh, mh / 2.0, c.track());
+                    c.rr(rx, SOCIAL_METER_Y, (rw * frac.clamp(0.0, 1.0)).max(mh), mh, mh / 2.0, *meter);
+                }
+                stats_row(c, items, HDR_FOOT_BASE);
+            }
             Detail2::Subs(items, paid, red, note, period) => {
                 stats_row(c, items, SUBS_FOOT_BASE);
                 // Paid in the badge colour, trials in the same colour, lighter, after it.
@@ -1567,44 +1589,49 @@ impl Look {
     }
 }
 
-/// GitHub's last 21 weeks as a heat map (cell 9, gap 2) centred in the detail region: the
-/// current streak at full intensity, today ringed.
+/// GitHub's last 21 weeks as a heat map filling the detail region edge to edge (x 16 to
+/// 252, gap 2): the current streak at full intensity, every other active day capped at the
+/// three lower steps so the run stands out, today ringed inside its own cell.
 fn heat_weeks(c: &Canvas, grid: &[f32], streak: usize, weekday: usize, col: Col) {
     let (rx, ry, rw, rh) = detail_region(c);
-    let (cell, gap) = (9.0, style::HEAT_GAP);
-    let weeks = (((rw + gap) / (cell + gap)).floor() as usize).min(21);
-    let (gw, gh) = (weeks as f32 * (cell + gap) - gap, 7.0 * (cell + gap) - gap);
+    const WEEKS: usize = 21;
+    let gap = style::HEAT_GAP;
+    let cell = ((rw - (WEEKS - 1) as f32 * gap) / WEEKS as f32).min((rh - 6.0 * gap) / 7.0);
+    let pitch = cell + gap;
+    let (gw, gh) = (WEEKS as f32 * pitch - gap, 7.0 * pitch - gap);
     let (x0, y0) = (rx + (rw - gw) / 2.0, ry + (rh - gh) / 2.0);
+    let r = 2.0;
     let n = grid.len();
     if n == 0 {
         // Loading: the whole grid in the track colour.
-        for j in 0..weeks {
-            for r in 0..7 {
-                c.rr(x0 + j as f32 * (cell + gap), y0 + r as f32 * (cell + gap), cell, cell, 2.0, c.track());
+        for j in 0..WEEKS {
+            for row in 0..7 {
+                c.rr(x0 + j as f32 * pitch, y0 + row as f32 * pitch, cell, cell, r, c.track());
             }
         }
         return;
     }
-    for j in 0..weeks {
-        for r in 0..7 {
-            let ago = (weeks - 1 - j) * 7 + weekday;
-            let Some(ago) = ago.checked_sub(r) else { continue };
+    for j in 0..WEEKS {
+        for row in 0..7 {
+            let ago = (WEEKS - 1 - j) * 7 + weekday;
+            let Some(ago) = ago.checked_sub(row) else { continue };
             if ago >= n {
                 continue;
             }
             let v = grid[n - 1 - ago];
-            let (x, y) = (x0 + j as f32 * (cell + gap), y0 + r as f32 * (cell + gap));
-            let fill = if v <= 0.0 {
-                c.track()
-            } else if ago < streak {
+            let (x, y) = (x0 + j as f32 * pitch, y0 + row as f32 * pitch);
+            let fill = if ago < streak && v > 0.0 {
                 col
+            } else if v <= 0.0 {
+                c.track()
             } else {
-                let step = ((v * 4.0).ceil() as usize).clamp(1, 4) - 1;
+                let step = ((v * 3.0).ceil() as usize).clamp(1, 3) - 1;
                 alpha(col, style::HEAT_STEPS[step])
             };
-            c.rr(x, y, cell, cell, 2.0, fill);
+            c.rr(x, y, cell, cell, r, fill);
             if ago == 0 {
-                c.rr_stroke(x - 2.0, y - 2.0, cell + 4.0, cell + 4.0, 4.0, c.text1(), 1.5);
+                // Inside the cell, so the grid's right edge stays on the margin.
+                c.rr_stroke(x + 0.75, y + 0.75, cell - 1.5, cell - 1.5, r, c.text1(), 1.5);
             }
         }
     }
@@ -1740,8 +1767,7 @@ fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look
             if let Some(n) = ex("name") {
                 l.third = Some((String::new(), n));
             }
-            // Medium's accessory: the account's second number. Large adds what Medium
-            // doesn't show, as a stat footer (never the accessory again).
+            // Medium's accessory: the account's second number.
             let (second, label) = match conn {
                 "x" | "instagram" => ("posts", "Posts"),
                 "tiktok" => ("likes", "Likes"),
@@ -1751,45 +1777,36 @@ fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look
                 l.acc = Acc::Second(sv.clone(), label.into());
                 l.boxed = Boxed::Stat(sv, label.into());
             }
-            let n = |k: &str| ex(k).and_then(|s| parse_compact(&s));
-            let per = |a: Option<f64>, b: Option<f64>| match (a, b) {
-                (Some(a), Some(b)) if b > 0.0 => Some(a / b),
-                _ => None,
-            };
-            let ratio = per(Some(v), n("following")).map(|r| (if r < 10.0 { format!("{r:.1}\u{00D7}") } else { format!("{}\u{00D7}", compact(r.round())) }, "Follow ratio".to_string()));
+            // Large: the account's own numbers in the footer, the box's first (so the box
+            // gives way), headed by the next follower milestone.
             let mut items: Vec<(String, String)> = Vec::new();
-            let mut push = |k: &str, label: &str| {
+            let keys: &[(&str, &str)] = match conn {
+                "x" => &[("posts", "Posts"), ("following", "Following"), ("listed", "Listed")],
+                "tiktok" => &[("likes", "Likes"), ("videos", "Videos"), ("following", "Following")],
+                "youtube" => &[("views", "Views"), ("videos", "Videos")],
+                _ => &[("posts", "Posts"), ("following", "Following")],
+            };
+            for (k, label) in keys {
                 if let Some(s) = ex(k) {
                     items.push((s, label.to_string()));
                 }
-            };
-            match conn {
-                "x" => {
-                    push("following", "Following");
-                    push("listed", "Listed");
-                }
-                "tiktok" => {
-                    push("videos", "Videos");
-                    push("following", "Following");
-                }
-                "youtube" => push("videos", "Videos"),
-                _ => push("following", "Following"),
             }
-            match conn {
-                "x" => items.extend(ratio),
-                "tiktok" => items.extend(per(n("likes"), n("videos")).map(|a| (compact(a.round()), "Avg likes".to_string()))),
-                "youtube" => {
-                    items.extend(per(n("views"), n("videos")).map(|a| (compact(a.round()), "Avg views".to_string())));
-                    items.extend(per(Some(v), n("videos")).map(|a| (compact(a.round()), "Subs/video".to_string())));
-                }
-                _ => {
-                    items.extend(ratio);
-                    items.extend(per(Some(v), n("posts")).map(|a| (compact(a.round()), "Per post".to_string())));
+            if conn == "youtube" {
+                // Views per video: the one derived number creators already track.
+                let n = |k: &str| ex(k).and_then(|s| parse_compact(&s));
+                if let (Some(views), Some(videos)) = (n("views"), n("videos")) {
+                    if videos > 0.0 {
+                        items.push((compact_tight((views / videos).round()), "Avg views".into()));
+                    }
                 }
             }
             items.truncate(3);
-            if !items.is_empty() {
-                l.detail = Detail2::Footer(items);
+            let next = milestone(v).map(|(frac, target)| (frac, format!("{} to {}", super::grouped((target - v).ceil() as i64), compact_tight(target))));
+            if !items.is_empty() || next.is_some() {
+                // Brand tiles that are black (X, TikTok) fill the meter with the text ink.
+                let (r, g, b) = (badge.bg.0, badge.bg.1, badge.bg.2);
+                let meter = if 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.2 { c.text1() } else { badge.bg };
+                l.detail = Detail2::Social(items, next, meter);
             }
             l
         }
@@ -1843,6 +1860,26 @@ fn stat_look(c: &Canvas, def: &Def, conn: &str, f: &Feed, badge: &Badge) -> Look
             l
         }
     }
+}
+
+/// The next follower milestone on a 1 / 2.5 / 5 ladder from 100 (2,400 → 2.5K, 12,400 →
+/// 25K), and how far `v` has come from the one before it.
+fn milestone(v: f64) -> Option<(f32, f64)> {
+    if !v.is_finite() || v < 0.0 {
+        return None;
+    }
+    let (mut prev, mut k) = (0.0, 100.0);
+    while k < 1e12 {
+        for m in [1.0, 2.5, 5.0] {
+            let t = m * k;
+            if t > v {
+                return Some((((v - prev) / (t - prev)) as f32, t));
+            }
+            prev = t;
+        }
+        k *= 10.0;
+    }
+    None
 }
 
 /// "1.2M" → 1200000, "8,900" → 8900.
@@ -2226,7 +2263,7 @@ fn chart(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
                 c.text_base("No chart data yet", m, 70.0, style::CAPTION.size, 400, c.text3(), Align::Left, right - m);
                 return;
             }
-            let week = conn == "claude_code" && large && l.series.len() <= 16;
+            let week = matches!(conn, "claude_code" | "supabase") && large && l.series.len() <= 16;
             let bottom = if !large {
                 c.h - m
             } else if week {
