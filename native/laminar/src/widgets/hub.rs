@@ -614,7 +614,7 @@ pub fn sample(conn: &str) -> Feed {
         "vercel" => Feed {
             value: Some(14.0),
             caption: "Deploys this week".into(),
-            rows: vec![row("site", "Ready", 0.0), row("api", "Building", 0.0), row("docs", "Ready", 0.0), row("blog", "Ready", 0.0)],
+            rows: vec![row("site", "Ready", 0.0), row("api", "Building", 0.0), row("docs", "Error", 0.0), row("blog", "Ready", 0.0)],
             extra: [("latest_state".to_string(), "Ready".to_string()), ("latest_project".to_string(), "site".to_string())].into(),
             ..Default::default()
         },

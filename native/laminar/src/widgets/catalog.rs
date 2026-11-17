@@ -277,7 +277,8 @@ const B_LINEAR: Badge = mono("L", 0x5E6AD2, 0xFFFFFF);
 const B_SUPABASE: Badge = gly("\u{E945}", 0x1F3D2E, 0x3ECF8E);
 const B_VERCEL: Badge = mono("V", 0x000000, 0xFFFFFF);
 const B_GITHUB: Badge = gly("\u{E943}", 0x24292F, 0xFFFFFF);
-const B_LEETCODE: Badge = mono("LC", 0xFFA116, 0x1B1B1B);
+// An original checklist glyph (problems solved): two letters at 16–20 px fall under 10 px.
+const B_LEETCODE: Badge = gly("\u{E9D5}", 0xFFA116, 0x1B1B1B);
 const B_GMAIL: Badge = gly("\u{E715}", 0xEA4335, 0xFFFFFF);
 const B_X: Badge = mono("X", 0x000000, 0xFFFFFF);
 const B_TIKTOK: Badge = gly("\u{E8D6}", 0x000000, 0xFFFFFF);
