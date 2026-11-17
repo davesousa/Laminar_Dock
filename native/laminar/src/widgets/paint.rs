@@ -2470,7 +2470,7 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: RdAcc) {
     let mut x = x0;
     if let Some(col) = d.dot {
         let r = 3.5 * k;
-        c.circle(x + r, vb - c.cap_h(vs) / 2.0, r, col);
+        rd_status_mark(c, x + r, vb - c.cap_h(vs) / 2.0, r, col);
         x += dot_w;
     }
     let room = right - x - sfx_w;
@@ -2713,7 +2713,7 @@ fn rd_row(c: &Canvas, out: &mut Painted, r: &LRow, base: f32, pitch: f32) {
     }
     if let Some(col) = r.trail_dot {
         let dx = if tw > 0.0 { right - tw - style::SP[2] - RD_DOT / 2.0 } else { right - RD_DOT / 2.0 };
-        c.circle(dx, base - c.cap_h(fs) / 2.0, RD_DOT / 2.0, col);
+        rd_status_mark(c, dx, base - c.cap_h(fs) / 2.0, RD_DOT / 2.0, col);
         tr_left = dx - RD_DOT / 2.0 - style::SP[3];
     }
     if let Some((f, col)) = r.meter {
@@ -2722,13 +2722,28 @@ fn rd_row(c: &Canvas, out: &mut Painted, r: &LRow, base: f32, pitch: f32) {
         c.bar(x1 - RD_METER_W, cy - h / 2.0, RD_METER_W, h, f, col);
         tr_left = x1 - RD_METER_W - style::SP[3];
     }
-    let ew = if r.ext.is_empty() { 0.0 } else { c.measure(&r.ext, ls, 400, Font::Text).0 };
-    let lroom = (tr_left - x - ew).max(1.0);
+    let mut ext = r.ext.as_str();
+    let ew = if ext.is_empty() { 0.0 } else { c.measure(ext, ls, 400, Font::Text).0 };
+    let mut lroom = (tr_left - x - ew).max(1.0);
     // Small labels (11) may step down to 10 before they ellipsize.
     let ls = if small { rd_fit(c, &r.label, ls, style::FOOT.min, 400, lroom) } else { ls };
+    let mut ew = if ext.is_empty() { 0.0 } else { c.measure(ext, ls, 400, Font::Text).0 };
+    if ew > 0.0 && c.measure(&r.label, ls, 400, Font::Text).0 > lroom {
+        // The name ellipsizes: drop the extension's dot so the ellipsis doesn't run into
+        // it ("Quarterly pl…docx", not "Quarterly....docx").
+        ext = ext.strip_prefix('.').unwrap_or(ext);
+        ew = c.measure(ext, ls, 400, Font::Text).0;
+        lroom = (tr_left - x - ew).max(1.0);
+        // If the whole name now fits, it must still show its ellipsis, or the extension
+        // would join it ("Beach sunsetpng").
+        let full = c.measure(&r.label, ls, 400, Font::Text).0;
+        if full <= lroom {
+            lroom = full - 0.5;
+        }
+    }
     let lw = c.text_base(&r.label, x, base, ls, 400, c.text1(), Align::Left, lroom);
     if ew > 0.0 {
-        c.text_base(&r.ext, x + lw, base, ls, 400, c.text3(), Align::Left, ew + 1.0);
+        c.text_base(ext, x + lw, base, ls, 400, c.text3(), Align::Left, ew + 1.0);
     }
     if let Some(a) = &r.act {
         let inset = m - style::SP[2];
@@ -2873,9 +2888,11 @@ fn rd_heat_fill(c: &Canvas, v: f32, col: Col) -> Col {
 }
 
 /// A contribution grid `weeks` wide ending today at `right` (today's column is cut after
-/// today's row). `col` None draws every cell as track (loading).
+/// today's row), with `gap` (between columns, between rows). `col` None draws every cell
+/// as track (loading).
 #[allow(clippy::too_many_arguments)]
-fn rd_heat_cells(c: &Canvas, grid: &[f32], today_row: usize, right: f32, top: f32, weeks: usize, cell: f32, gap: f32, radius: f32, col: Option<Col>) {
+fn rd_heat_cells(c: &Canvas, grid: &[f32], today_row: usize, right: f32, top: f32, weeks: usize, cell: f32, gap: (f32, f32), radius: f32, col: Option<Col>) {
+    let (gx, gy) = gap;
     let n = grid.len() as isize;
     for w in 0..weeks {
         for row in 0..7usize {
@@ -2889,8 +2906,8 @@ fn rd_heat_cells(c: &Canvas, grid: &[f32], today_row: usize, right: f32, top: f3
                 Some(cl) => rd_heat_fill(c, v, cl),
                 None => c.track(),
             };
-            let x = right - (weeks - w) as f32 * (cell + gap) + gap;
-            c.rr(x, top + row as f32 * (cell + gap), cell, cell, radius, fill);
+            let x = right - (weeks - w) as f32 * (cell + gx) + gx;
+            c.rr(x, top + row as f32 * (cell + gy), cell, cell, radius, fill);
         }
     }
 }
@@ -2977,7 +2994,7 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
             let k = c.h / 54.0;
             let (cell, gap) = (4.0 * k, 1.5 * k);
             let s = 7.0 * cell + 6.0 * gap;
-            rd_heat_cells(c, grid, today, (c.w + s) / 2.0, (c.h - s) / 2.0, 7, cell, gap, k, col);
+            rd_heat_cells(c, grid, today, (c.w + s) / 2.0, (c.h - s) / 2.0, 7, cell, (gap, gap), k, col);
         }
         Shape::Dock => match &count {
             Some(v) => {
@@ -3019,7 +3036,10 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
             let gap = 1.5;
             let cell = ((c.h - m - 72.0) - 6.0 * gap) / 7.0;
             let weeks = ((c.w - 2.0 * m + gap) / (cell + gap)).floor() as usize;
-            rd_heat_cells(c, grid, today, c.w - m, 72.0, weeks, cell, gap, 1.0, col);
+            // Spread the leftover width into the column gaps, so the grid spans the badge's
+            // column (x 14) to the right margin exactly.
+            let gx = if weeks > 1 { (c.w - 2.0 * m - weeks as f32 * cell) / (weeks - 1) as f32 } else { gap };
+            rd_heat_cells(c, grid, today, c.w - m, 72.0, weeks, cell, (gx, gap), 1.0, col);
         }
         _ => {
             // Glance grid: hero 32 at cap top 16, caption at 58, the heat map in the right
@@ -3045,7 +3065,7 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
             let (cell, gap) = (7.0, style::HEAT_GAP);
             let gh = 7.0 * cell + 6.0 * gap;
             let weeks = ((c.w - m - 132.0 + gap) / (cell + gap)).floor() as usize;
-            rd_heat_cells(c, grid, today, c.w - m, m + (64.0 - gh) / 2.0, weeks, cell, gap, 2.0, col);
+            rd_heat_cells(c, grid, today, c.w - m, m + (64.0 - gh) / 2.0, weeks, cell, (gap, gap), 2.0, col);
             if sh == Shape::Large {
                 separator(c, style::SEP_Y_LARGE);
                 let Some(f) = f else {
@@ -3054,6 +3074,8 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
                         skeleton(c, m + i as f32 * cw, 136.0 - 12.0, 40.0, 12.0);
                         skeleton(c, m + i as f32 * cw, 152.0 - 8.0, 52.0, 8.0);
                     }
+                    // The footnote bar, so the skeleton reaches the bottom margin as the data does.
+                    skeleton(c, m, c.h - m - 8.0, (c.w - 2.0 * m) * 0.45, 8.0);
                     return;
                 };
                 let active = f.extra.get("active_days").cloned().unwrap_or_else(|| grid.iter().rev().take(365).filter(|v| **v > 0.0).count().to_string());
@@ -3419,8 +3441,9 @@ fn rd_list_model(c: &Canvas, conn: &str, f: &Feed, sh: Shape) -> LModel {
                 md.caption = "No recent files".into();
             }
             if let Some((stem, ext, _, _)) = parts.get(1) {
-                // Body 13/400 text2, so the first file's name stays the dominant value.
-                md.acc = RdAcc::Pair(stem.clone(), c.text2(), style::BODY, rd_file_kind(ext).1);
+                // Footnote 11/500 text2, so the first file's name (13/600) stays the
+                // dominant value and keeps its full size.
+                md.acc = RdAcc::Pair(stem.clone(), c.text2(), Type { weight: 500, ..style::FOOT }, rd_file_kind(ext).1);
             }
             md.rows = parts
                 .iter()
@@ -3516,7 +3539,21 @@ fn rd_status_mini(c: &Canvas, badge: &Badge, col: Col) {
     c.badge(badge, bx, by, bs);
     let (cx, cy, r) = (bx + bs - 2.0 * k, by + bs - 2.0 * k, 4.0 * k);
     c.circle(cx, cy, r + 1.5 * k, c.halo());
-    c.circle(cx, cy, r, col);
+    rd_status_mark(c, cx, cy, r, col);
+}
+
+/// A status mark that does not rely on colour alone: a solid dot (ready), a hollow ring
+/// (orange: building, in progress) or a small rounded square (red: failed).
+fn rd_status_mark(c: &Canvas, cx: f32, cy: f32, r: f32, col: Col) {
+    if col == ORANGE {
+        let sw = (r * 0.45).max(1.25);
+        c.circle_stroke(cx, cy, r - sw / 2.0, col, sw);
+    } else if col == RED {
+        let s = r * 1.8;
+        c.rr(cx - s / 2.0, cy - s / 2.0, s, s, s * 0.22, col);
+    } else {
+        c.circle(cx, cy, r, col);
+    }
 }
 
 /// GitHub Overview: a stats card (repositories, stars, followers); Large adds the last 26
@@ -3824,9 +3861,14 @@ fn next_event(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, sh: Shape) {
                 let later: Vec<Ev> = after.iter().skip(if has { 1 } else { 0 }).take(3).map(|r| ev_from(&r.label, &r.value)).collect();
                 let b0 = style::DETAIL_TOP + c.cap_h(style::BODY.size);
                 event_rows(c, &later.iter().collect::<Vec<_>>(), b0, 3);
-                // The footnote closes the region at the bottom margin.
-                let n = f.value.unwrap_or(0.0) as i64;
-                let foot = if later.is_empty() && has && !after.is_empty() { "Nothing after that".to_string() } else if later.is_empty() { "Nothing else scheduled".to_string() } else if n == 1 { "1 event today".to_string() } else { format!("{n} events today") };
+                // The footnote closes the region at the bottom margin and speaks about the
+                // rest of today, after the next event (the rows above may be later days).
+                let more = after.iter().filter(|r| rd_when_day(&r.value) == "Today").count();
+                let foot = match (has, more) {
+                    (false, _) => "Nothing else scheduled".to_string(),
+                    (true, 0) => "Nothing else today".to_string(),
+                    (true, n) => format!("{n} more today"),
+                };
                 rd_foot(c, &foot, "");
             }
         }
@@ -3859,6 +3901,7 @@ fn rd_next_skeleton(c: &Canvas, badge: &Badge, sh: Shape) {
             skeleton(c, m, b - 8.0, (c.w - 2.0 * m) * w, 8.0);
             skeleton(c, c.w - m - 40.0, b - 8.0, 40.0, 8.0);
         }
+        skeleton(c, m, c.h - m - 8.0, (c.w - 2.0 * m) * 0.45, 8.0);
     }
 }
 
@@ -4167,15 +4210,18 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagin
             if sh == Shape::Medium || desc.is_empty() {
                 // The title in up to 2 lines (13/600) in the column left of the pill, its
                 // last baseline on the pill label's; it only ellipsizes past 2 lines.
-                let (tl, size) = rd_wrap_fit(c, &title, fs, fs, 600, tw);
+                // One line when it fits at 13 → 12; only then wrap at 13.
+                let one = rd_fit(c, &title, fs, fs - 1.0, 600, tw);
+                let (tl, size) = if c.measure(&title, one, 600, Font::Text).0 <= tw { (vec![title.clone()], one) } else { rd_wrap_fit(c, &title, fs, fs, 600, tw) };
                 let tlh = (size * 1.25).round();
                 let tn = tl.len().min(2);
                 for (i, l) in tl.iter().take(2).enumerate() {
                     c.text_base(l, m, label_base - (tn - 1 - i) as f32 * tlh, size, 600, WHITE, Align::Left, tw);
                 }
             } else {
-                // Large: the title (up to 2 lines, 15 → 13) over the description (up to 2
-                // lines), bottom-aligned to the margin in the column left of the pill.
+                // Large: the description (up to 2 lines) beside the pill, bottom-aligned to
+                // the margin, and the title (15 → 13) across the full width above that row,
+                // on one line when it fits.
                 let ds = style::FOOT.size;
                 let lines = rd_wrap(c, &desc, ds, 400, tw, 2);
                 let n = lines.len();
@@ -4183,9 +4229,15 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagin
                 for (i, l) in lines.iter().enumerate() {
                     c.text_base(l, m, c.h - m - (n - 1 - i) as f32 * lh, ds, 400, (1.0, 1.0, 1.0, 0.72), Align::Left, tw);
                 }
-                let (tl, size) = rd_wrap_fit(c, &title, style::VALUE.size - 2.0, fs, 600, tw);
+                let full = c.w - 2.0 * m;
+                let (big, min) = (style::VALUE.size - 2.0, fs);
+                let one = rd_fit(c, &title, big, min, 600, full);
+                let (tl, size) = if c.measure(&title, one, 600, Font::Text).0 <= full { (vec![title.clone()], one) } else { rd_wrap_fit(c, &title, big, min, 600, full) };
                 let tlh = (size * 1.2).round();
-                let tb = c.h - m - (n.max(1) - 1) as f32 * lh - c.cap_h(ds) - style::SP[3];
+                let desc_top = c.h - m - (n.max(1) - 1) as f32 * lh - c.cap_h(ds);
+                let pill_top = c.h - m - style::BTN_SECONDARY;
+                let tb = desc_top.min(pill_top) - style::SP[4];
+                let tw = full;
                 let tn = tl.len().min(2);
                 for (i, l) in tl.iter().take(2).enumerate() {
                     c.text_base(l, m, tb - (tn - 1 - i) as f32 * tlh, size, 600, WHITE, Align::Left, tw);
