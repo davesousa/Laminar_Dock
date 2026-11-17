@@ -387,7 +387,7 @@ pub static ALL: &[Def] = &[
     w("weather", "Weather", "Current conditions.", &[Weather], Face::Weather(WeatherKind::Now)),
     w("weather-detail", "Weather Details", "Feels like, humidity, wind and UV.", &[Weather], Face::Weather(WeatherKind::Detail)),
     w("weather-hourly", "Today's Forecast", "The next hours.", &[Weather], Face::Weather(WeatherKind::Hourly)),
-    w("weather-banner", "Weather Banner", "Conditions on a sky-coloured card.", &[Weather], Face::Weather(WeatherKind::Banner)),
+    w("weather-banner", "Weather Banner", "Conditions on a card coloured like the sky outside.", &[Weather], Face::Weather(WeatherKind::Banner)),
     w("weather-week", "Weekly Forecast", "The next seven days.", &[Weather], Face::Weather(WeatherKind::Week)),
     w("sunrise-sunset", "Sunrise & Sunset", "Where the sun is in today's daylight.", &[Weather], Face::Weather(WeatherKind::Sun)),
     // ------------------------------------------------------------ Stocks
