@@ -12,6 +12,8 @@
 //! - `battery=charging|plugged|none`: the battery sample charging, plugged in and not
 //!   charging, or a PC with no battery
 //! - `tray=N`: N sample tray apps for Background Apps (0 shows its empty state)
+//! - `toggles=on`: Keep Awake and Show Desktop in their on state (Dark Mode follows the
+//!   sheet theme)
 //! - `update=pending|restart|current|unknown|none`: the Windows Update status (none = not
 //!   checked yet)
 //!
@@ -101,6 +103,11 @@ Call the dentist".into();
             hub.stopwatch.today = std::time::Duration::from_secs(48 * 60);
             hub.stopwatch.day = super::hub::day_key(&Now::get());
         }
+        if opt("toggles").as_deref() == Some("on") {
+            // Set the fields directly: Hub::set_keep_awake would really keep the PC awake.
+            hub.keep_awake = true;
+            hub.desktop_shown = true;
+        }
         let hub = hub;
         let weather = sample_weather(&Now::get());
         let stats = laminar_sys::stats::Stats { cpu_percent: 23.0, mem_used_gb: 21.3, mem_total_gb: 32.0, disk_c_used_percent: 74.0, net_down_bps: 2_400_000.0, net_up_bps: 310_000.0 };
@@ -124,9 +131,10 @@ Call the dentist".into();
             cfg.weather_city.clear();
         }
         let cfg = cfg;
-        let pinned = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(), "e".to_string()];
+        // Empty mode clears the pins too, so Apps shows its real no-pins face (real pins always have names).
+        let pinned: Vec<String> = if empty { Vec::new() } else { ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect() };
         let names: HashMap<String, String> =
-            if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Calendar", "Photos", "Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
+            pinned.iter().zip(["Mail", "Microsoft Edge", "File Explorer", "Windows Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect();
         let n_tray = opt("tray").and_then(|v| v.parse::<u64>().ok()).unwrap_or(14);
         let tray: Vec<(u64, String)> = (1..=n_tray).map(|k| (k, format!("App {k}"))).collect();
         use laminar_sys::update::UpdateStatus;
