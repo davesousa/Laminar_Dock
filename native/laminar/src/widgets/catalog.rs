@@ -301,7 +301,7 @@ pub static ALL: &[Def] = &[
     w("openrouter", "OpenRouter Credits", "Credits left and how much you've used.", &[Ai], Face::Usage { conn: "openrouter", badge: B_OPENROUTER, open: "https://openrouter.ai/settings/credits" }),
     w("cursor", "Cursor Spend", "Your team's Cursor spend this billing cycle.", &[Ai], Face::Stat { conn: "cursor", badge: B_CURSOR, open: "https://cursor.com/dashboard" }),
     // ------------------------------------------------------------ Productivity
-    dock(w("day-timeline", "Day Timeline", "When you were at your PC today, hour by hour.", &[Productivity], Face::Tool(ToolKind::Timeline)), 3.0),
+    w("day-timeline", "Day Timeline", "When you were at your PC today, hour by hour.", &[Productivity], Face::Tool(ToolKind::Timeline)),
     w("screen-time", "Screen Time", "Time at your PC today and the apps you used most.", &[Highlights, Productivity], Face::Tool(ToolKind::ScreenTime)),
     dock(w("pomodoro", "Pomodoro", "25-minute focus sessions with 5-minute breaks. Click to start or pause.", &[Productivity], Face::Timer(TimerKind::Pomodoro)), 2.2),
     dock(w("timer", "Timer", "A countdown. Click to start or pause; right-click to choose its length.", &[Productivity], Face::Timer(TimerKind::Countdown)), 2.2),
