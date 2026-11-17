@@ -10522,6 +10522,16 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let d = style::BADGE_DOCK * k;
             let half = c.w / 2.0;
             let wide = cc_wide(c);
+            // Dock L text column for half i (a 28 button leaves the names room).
+            let dl = 28.0 * k;
+            let col = |i: usize| {
+                let x0 = half * i as f32;
+                let tx = x0 + m + dl + style::SP[3] * k;
+                // The right half keeps the full dock margin; the left keeps a gap to the right half.
+                (tx, x0 + half - tx - if i == 0 { style::SP[2] * k } else { m })
+            };
+            // One state size for both halves: the smaller of the two fitted sizes.
+            let ss = rows.iter().enumerate().map(|(i, r)| fit(c, state(r.2), style::FOOT.size * k, style::MICRO.size * k, 400, Font::Text, col(i).1)).fold(style::FOOT.size * k, f32::min);
             for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
                 let x0 = half * i as f32;
                 if !wide {
@@ -10532,17 +10542,12 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     }
                     continue;
                 }
-                // Dock L: each half gains its name and state; a 28 button leaves the names room.
-                let d = 28.0 * k;
-                let cx = x0 + m + d / 2.0;
-                round_toggle(c, cx, c.h / 2.0, d, g, on);
-                let tx = x0 + m + d + style::SP[3] * k;
-                // The right half keeps the full dock margin; the left keeps a gap to the right half.
-                let tw = x0 + half - tx - if i == 0 { style::SP[2] * k } else { m };
+                // Dock L: each half gains its name and state.
+                round_toggle(c, x0 + m + dl / 2.0, c.h / 2.0, dl, g, on);
+                let (tx, tw) = col(i);
                 // Fit a hair narrower than the room so layout rounding never ellipsizes the name.
                 let ns = fit(c, name, style::TITLE.size * 12.0 / 13.0 * k, style::FOOT.size * k, 600, Font::Text, tw - 1.0);
                 c.text_base(name, tx, 29.0 * k, ns, 600, c.text1(), Align::Left, tw + 2.0);
-                let ss = fit(c, state(on), style::FOOT.size * k, style::MICRO.size * k, 400, Font::Text, tw);
                 c.text_base(state(on), tx, 43.0 * k, ss, 400, c.text2(), Align::Left, tw + 2.0);
                 out.hits.push(((tx - style::SP[1] * k, 0.0, x0 + half - tx + style::SP[1] * k, c.h), more));
                 if on.is_some() {
@@ -10898,10 +10903,11 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 return;
             }
             let (cols, rows, s) = if sh == Shape::Large { (7usize, 3usize, 24.0) } else { (7, 1, 22.0) };
-            // First row centred on y 62 (as Medium); Large spreads its rows to the bottom margin.
+            // First row centred on y 62 (as Medium); Large packs its rows under it at the
+            // column pitch, so row and column gaps match and the grid reads as one block.
             let y0 = 62.0 - s / 2.0;
             let px = (c.w - 2.0 * m - s) / (cols - 1) as f32;
-            let py = if rows > 1 { (c.h - m - s - y0) / (rows - 1) as f32 } else { 0.0 };
+            let py = px;
             let (show, more) = split(cols * rows);
             for i in 0..show {
                 let (ix, iy) = (m + (i % cols) as f32 * px, y0 + (i / cols) as f32 * py);
@@ -10913,11 +10919,10 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 let (ix, iy) = (m + (i % cols) as f32 * px, y0 + (i / cols) as f32 * py);
                 more_chip(c, ix + s / 2.0, iy + s / 2.0, s, more, fs);
             }
-            // Large with rows to spare: how to use the icons (the header already counts them).
-            let used = (show + usize::from(more > 0)).div_ceil(cols);
-            if sh == Shape::Large && used < rows {
-                let cy = y0 + (rows - 1) as f32 * py + s / 2.0;
-                c.text_base("Click to open, right-click for its menu", m, cy + c.cap_h(fs) / 2.0, fs, 400, c.text3(), Align::Left, c.w - 2.0 * m);
+            // Large: how to use the icons, pinned to the bottom margin (the header already
+            // counts them); any spare room falls between the grid and this hint.
+            if sh == Shape::Large {
+                c.text_base("Click to open, right-click for its menu", m, c.h - m, fs, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
         }
     }
@@ -10947,7 +10952,7 @@ fn upd_view(x: &Ctx) -> Option<UpdView> {
     use laminar_sys::update::UpdateStatus as U;
     let v = |hero: String, dock: String, caption, dock_caption, third, attention, badge| UpdView { hero, dock, caption, dock_caption, third, attention, restart: false, badge, warn: false, ok: false };
     Some(match x.update? {
-        U::RestartRequired => UpdView { restart: true, ..v("Restart".into(), "Restart".into(), "to finish installing", "to finish", Some("Windows Update"), true, Some(None)) },
+        U::RestartRequired => UpdView { restart: true, ..v("Ready".into(), "Ready".into(), "to restart", "to restart", Some("Windows Update"), true, Some(None)) },
         U::Pending(n) => {
             let one = *n == 1;
             v(n.to_string(), n.to_string(), if one { "Update waiting" } else { "Updates waiting" }, if one { "update" } else { "updates" }, Some("Windows Update"), true, Some(Some(*n)))
@@ -11006,8 +11011,8 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 skeleton(c, tx, (c.h - 10.0 * k) / 2.0, (60.0 * k).min(right - tx), 10.0 * k);
                 return;
             };
-            // Beside a Restart button the value says "Ready", so "Restart" isn't said twice.
-            let (dock, dcap) = if wide && restart { ("Ready", "to restart") } else { (v.dock.as_str(), v.dock_caption) };
+            // One wording at every size: "Ready / to restart".
+            let (dock, dcap) = (v.dock.as_str(), v.dock_caption);
             let role = Type { size: style::VALUE.size * k, ..style::VALUE };
             let (val, fs) = fit_value(c, dock, role, right - tx);
             c.text_base(&val, tx, 30.0 * k, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
@@ -11055,8 +11060,8 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     if v.badge.is_some() {
                         count_badge(c, bx + bs - 1.0, by + 1.0, 8.0, None);
                     }
-                    // Beside the Restart button the hero says "Ready", so "Restart" isn't said twice.
-                    let (hero, cap) = if restart { ("Ready", "Restart to finish") } else { (v.hero.as_str(), v.caption) };
+                    // One wording at every size: "Ready / to restart".
+                    let (hero, cap) = (v.hero.as_str(), v.caption);
                     let (val, fs) = fit_value(c, hero, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
                     c.text_cap(&val, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
                     let bw = if restart { 88.0 } else { 0.0 };
