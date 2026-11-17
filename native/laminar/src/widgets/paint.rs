@@ -10318,7 +10318,7 @@ fn screen_time(c: &Canvas, x: &Ctx, sh: Shape) {
             let lw = 132.0 - m;
             let (v, fs) = fit_value(c, &value, style::HERO, lw);
             c.text_cap(&v, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
-            c.text_base(if none { "Counting from now" } else { "Screen time today" }, m, 58.0, style::CAPTION.size, 400, c.text2(), Align::Left, lw);
+            c.text_base(if none { "Starting now" } else { "Screen time today" }, m, 58.0, style::CAPTION.size, 400, c.text2(), Align::Left, lw);
             share_bar(c, &apps, total, m, 70.0, lw, style::METER_H);
             let (rx, rw) = (148.0, c.w - m - 148.0);
             let first = m + c.cap_h(style::FOOT.size);
@@ -10403,33 +10403,42 @@ fn timeline(c: &Canvas, x: &Ctx, sh: Shape) {
             if sh != Shape::Large {
                 hour_bars(c, &vals, now, 3600.0, m, style::CONTENT_TOP, w, 22.0, bw);
                 hour_ticks(c, &ticks4, m, w, bw, 79.0);
+                if total == 0 {
+                    c.text_base("Your day fills in here", c.w / 2.0, style::CONTENT_TOP + 15.0, style::CAPTION.size, 400, c.text2(), Align::Center, w);
+                }
                 return;
             }
             // Header face (§3): the chart is the idea, so it takes the content region, then a
             // separator and the stat footer with its labels on the bottom margin.
             hour_bars(c, &vals, now, 3600.0, m, style::CONTENT_TOP, w, 76.0, bw);
             hour_ticks(c, &ticks4, m, w, bw, 133.0);
+            if total == 0 {
+                c.text_base("Your day fills in here, hour by hour", c.w / 2.0, style::CONTENT_TOP + 42.0, style::CAPTION.size, 400, c.text2(), Align::Center, w);
+            }
             separator(c, 142.0);
+            // The stat footer keeps its shape with no data: dashes stand in for the hours.
             let used: Vec<usize> = (0..24).filter(|h| vals[*h] > 0.0).collect();
+            let cw = w / 3.0;
+            let lb = c.h - m;
+            let vb = lb - style::SP[6];
+            let vs = style::VALUE.size;
             match used.first() {
                 Some(first) => {
                     let busiest = (0..24).max_by(|a, b| vals[*a].partial_cmp(&vals[*b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
-                    let cw = w / 3.0;
-                    let lb = c.h - m;
-                    let vb = lb - style::SP[6];
-                    let vs = style::VALUE.size;
                     for (i, h) in [*first, busiest].iter().enumerate() {
                         let h = *h as u32;
                         time_ap(c, &h12(h).to_string(), ampm(h), m + i as f32 * cw, vb, vs, style::VALUE.weight, c.text1(), 1.0);
                     }
-                    c.text_base(&format!("{}h", used.len()), m + 2.0 * cw, vb, vs, style::VALUE.weight, c.text1(), Align::Left, cw);
-                    for (i, l) in ["First use", "Busiest hour", "Active hours"].iter().enumerate() {
-                        c.text_base(l, m + i as f32 * cw, lb, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, cw - style::SP[3]);
-                    }
                 }
                 None => {
-                    c.text_base("Counting from now", c.w / 2.0, 172.0, style::CAPTION.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                    for i in 0..2 {
+                        c.text_base("\u{2013}", m + i as f32 * cw, vb, vs, style::VALUE.weight, c.text3(), Align::Left, cw);
+                    }
                 }
+            }
+            c.text_base(&format!("{}h", used.len()), m + 2.0 * cw, vb, vs, style::VALUE.weight, c.text1(), Align::Left, cw);
+            for (i, l) in ["First use", "Busiest hour", "Active hours"].iter().enumerate() {
+                c.text_base(l, m + i as f32 * cw, lb, style::FOOT.size, style::FOOT.weight, c.text2(), Align::Left, cw - style::SP[3]);
             }
         }
     }

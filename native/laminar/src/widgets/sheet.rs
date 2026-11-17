@@ -113,9 +113,10 @@ Call the dentist".into();
             }),
         };
         let cfg = crate::config::Config::default();
-        let pinned = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string(), "e".to_string()];
+        // Empty mode clears the pins too, so Apps shows its real no-pins face (real pins always have names).
+        let pinned: Vec<String> = if empty { Vec::new() } else { ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect() };
         let names: HashMap<String, String> =
-            if empty { HashMap::new() } else { pinned.iter().zip(["Mail", "Microsoft Edge", "File Explorer", "Windows Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect() };
+            pinned.iter().zip(["Mail", "Microsoft Edge", "File Explorer", "Windows Terminal", "Notepad"]).map(|(id, n)| (id.clone(), n.to_string())).collect();
         let n_tray = opt("tray").and_then(|v| v.parse::<u64>().ok()).unwrap_or(14);
         let tray: Vec<(u64, String)> = (1..=n_tray).map(|k| (k, format!("App {k}"))).collect();
         use laminar_sys::update::UpdateStatus;
