@@ -351,7 +351,7 @@ pub static ALL: &[Def] = &[
     w("audio-output", "Audio Output", "Volume and output device. Click the bar to set the volume.", &[Media], Face::Media(MediaKind::Output)),
     dock(w("microphone", "Microphone", "Mute or unmute your microphone.", &[Media], Face::Media(MediaKind::Mic)), 1.0),
     w("now-playing-compact", "Now Playing Compact", "Track and a play button.", &[Media], Face::Media(MediaKind::Compact)),
-    dock(w("now-playing-disc", "Now Playing Disc", "Album art spinning while it plays.", &[Media], Face::Media(MediaKind::Disc)), 1.0),
+    dock(w("now-playing-disc", "Now Playing Disc", "What's playing, as a record and its sleeve.", &[Media], Face::Media(MediaKind::Disc)), 1.0),
     w("now-playing-bar", "Now Playing Bar", "Track with a progress bar.", &[Media], Face::Media(MediaKind::Bar)),
     // ------------------------------------------------------------ Analytics
     w("search-console", "Search Console", "Google search clicks in the last 28 days.", &[Analytics], Face::Stat { conn: "search_console", badge: B_SEARCH, open: "https://search.google.com/search-console" }),
