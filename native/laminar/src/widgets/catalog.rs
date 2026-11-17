@@ -352,7 +352,7 @@ pub static ALL: &[Def] = &[
     dock(w("microphone", "Microphone", "Mute or unmute your microphone.", &[Media], Face::Media(MediaKind::Mic)), 1.0),
     w("now-playing-compact", "Now Playing Compact", "Track and a play button.", &[Media], Face::Media(MediaKind::Compact)),
     dock(w("now-playing-disc", "Now Playing Disc", "What's playing, as a record and its sleeve.", &[Media], Face::Media(MediaKind::Disc)), 1.0),
-    w("now-playing-bar", "Now Playing Bar", "Track with a progress bar.", &[Media], Face::Media(MediaKind::Bar)),
+    w("now-playing-bar", "Now Playing Bar", "The track in a slim player bar, with its controls and volume.", &[Media], Face::Media(MediaKind::Bar)),
     // ------------------------------------------------------------ Analytics
     w("search-console", "Search Console", "Google search clicks in the last 28 days.", &[Analytics], Face::Stat { conn: "search_console", badge: B_SEARCH, open: "https://search.google.com/search-console" }),
     w("plausible-chart", "Visitors Chart", "Daily visitors from Plausible.", &[Highlights, Analytics], Face::Chart { conn: "plausible", badge: B_PLAUSIBLE, open: "https://plausible.io/sites" }),
