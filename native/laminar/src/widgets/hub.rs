@@ -525,13 +525,23 @@ pub fn sample(conn: &str) -> Feed {
         "instagram" => Feed { value: Some(21_700.0), caption: "Followers".into(), ..Default::default() },
         "github" | "leetcode" => {
             let mut r = rng(conn);
-            let grid: Vec<f32> = (0..371).map(|_| { let v = r(); if v < 0.35 { 0.0 } else { (v as f32 - 0.35) / 0.65 } }).collect();
+            let mut grid: Vec<f32> = (0..371).map(|_| { let v = r(); if v < 0.35 { 0.0 } else { (v as f32 - 0.35) / 0.65 } }).collect();
+            // The streak shown is read from the grid, as the real connectors do: the last 7
+            // days (today included) are active and the day before them is not.
+            let n = grid.len();
+            for (i, v) in grid[n - 7..].iter_mut().enumerate() {
+                if *v <= 0.0 {
+                    *v = 0.25 + 0.1 * i as f32;
+                }
+            }
+            grid[n - 8] = 0.0;
+            let streak = grid.iter().rev().take_while(|v| **v > 0.0).count();
             Feed {
                 value: Some(if conn == "github" { 1186.0 } else { 312.0 }),
                 caption: if conn == "github" { "Contributions this year".into() } else { "Problems solved".into() },
                 grid,
                 rows: if conn == "github" { vec![row("Repositories", "42", 0.0), row("Stars", "1.3K", 0.0), row("Followers", "318", 0.0)] } else { vec![row("Easy", "160", 0.0), row("Medium", "128", 0.0), row("Hard", "24", 0.0)] },
-                extra: [("streak".to_string(), "7".to_string())].into(),
+                extra: [("streak".to_string(), streak.to_string())].into(),
                 ..Default::default()
             }
         }
@@ -548,11 +558,12 @@ pub fn sample(conn: &str) -> Feed {
             currency: Some("USD".into()),
             delta_pct: Some(1.42),
             series: walk(conn, 78, 245.0, 1.4, 0.04),
+            // Like the real feed: the headline, series and symbol are the first row's.
             rows: vec![
+                FeedRow { label: "TSLA".into(), value: "$248.31".into(), frac: None, delta: Some(1.42) },
                 FeedRow { label: "AAPL".into(), value: "$228.10".into(), frac: None, delta: Some(0.62) },
                 FeedRow { label: "MSFT".into(), value: "$431.75".into(), frac: None, delta: Some(-0.38) },
                 FeedRow { label: "NVDA".into(), value: "$142.09".into(), frac: None, delta: Some(2.11) },
-                FeedRow { label: "TSLA".into(), value: "$248.31".into(), frac: None, delta: Some(1.42) },
             ],
             extra: [("symbol".to_string(), "TSLA".to_string())].into(),
             ..Default::default()

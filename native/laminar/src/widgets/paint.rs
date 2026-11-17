@@ -888,6 +888,16 @@ impl<'a> DockText<'a> {
     }
 }
 
+/// The largest size from `start` down to `min` at which `s` fits in `max_w`, measured at
+/// each step (optical sizes make width non-linear in size); `min` if nothing fits.
+fn rd_fit(c: &Canvas, s: &str, start: f32, min: f32, weight: u32, max_w: f32) -> f32 {
+    let mut size = start;
+    while size > min && c.measure(s, size, weight, Font::Text).0 > max_w {
+        size = (size - 0.5).max(min);
+    }
+    size
+}
+
 /// Dock M (badge, value, caption) and Dock L (plus `acc` in the accessory slot).
 fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: Acc) {
     let k = c.h / 54.0;
@@ -925,7 +935,8 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: Acc) {
     }
     let room = right - x - sfx_w;
     let (v, fs) = if d.name {
-        (d.value.to_string(), fit(c, d.value, vs, style::FOOT.size * k, role.weight, Font::Text, room))
+        // Names (events, files) step down to 10 before they ellipsize.
+        (d.value.to_string(), rd_fit(c, d.value, vs, style::FOOT.min * k, role.weight, room))
     } else {
         fit_value(c, d.value, Type { size: vs, min: role.min * k, ..role }, room)
     };
@@ -941,7 +952,7 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: Acc) {
         }
         None => {
             // Names (processes, files) may step down to 10 before they ellipsize.
-            let cs = fit(c, d.caption, fs11, style::FOOT.min * k, 400, Font::Text, cap_room);
+            let cs = rd_fit(c, d.caption, fs11, style::FOOT.min * k, 400, cap_room);
             c.text_base(d.caption, x0, cb, cs, 400, c.text2(), Align::Left, cap_room);
         }
     }
@@ -949,7 +960,7 @@ fn rd_dock(c: &Canvas, vis: &Vis, d: DockText, acc: Acc) {
     match acc {
         Acc::None => {}
         Acc::Pair(v, col, role, label) => {
-            let s = fit(c, &v, role.size * k, role.min * k, role.weight, Font::Text, slot_w);
+            let s = rd_fit(c, &v, role.size * k, role.min * k, role.weight, slot_w);
             c.text_base(&v, r, vb, s, role.weight, col, Align::Right, slot_w);
             c.text_base(&label, r, cb, fs11, 400, c.text2(), Align::Right, slot_w);
         }
@@ -996,8 +1007,9 @@ fn rd_small_top(c: &Canvas, vis: &Vis, meta: &str, col: Col) {
     let m = style::M_SMALL;
     draw_vis(c, vis, m, m, style::BADGE_SMALL);
     if !meta.is_empty() {
-        let x0 = m + style::BADGE_SMALL + style::SP[1];
-        let fs = fit(c, meta, style::FOOT.size, style::FOOT.min, 600, Font::Text, c.w - m - x0);
+        // §3 Small accessory slot: x 52 to 114.
+        let x0 = m + style::BADGE_SMALL + style::SP[5];
+        let fs = rd_fit(c, meta, style::FOOT.size, style::FOOT.min, 600, c.w - m - x0);
         c.text_base(meta, c.w - m, 26.0, fs, 600, col, Align::Right, c.w - m - x0);
     }
 }
@@ -1122,7 +1134,10 @@ fn rd_row(c: &Canvas, out: &mut Painted, r: &LRow, base: f32, pitch: f32) {
         tr_left = x1 - RD_METER_W - style::SP[3];
     }
     let ew = if r.ext.is_empty() { 0.0 } else { c.measure(&r.ext, ls, 400, Font::Text).0 };
-    let lw = c.text_base(&r.label, x, base, ls, 400, c.text1(), Align::Left, (tr_left - x - ew).max(1.0));
+    let lroom = (tr_left - x - ew).max(1.0);
+    // Small labels (11) may step down to 10 before they ellipsize.
+    let ls = if small { rd_fit(c, &r.label, ls, style::FOOT.min, 400, lroom) } else { ls };
+    let lw = c.text_base(&r.label, x, base, ls, 400, c.text1(), Align::Left, lroom);
     if ew > 0.0 {
         c.text_base(&r.ext, x + lw, base, ls, 400, c.text3(), Align::Left, ew + 1.0);
     }
@@ -1262,7 +1277,10 @@ fn rd_heat_fill(c: &Canvas, v: f32, col: Col) -> Col {
         return c.track();
     }
     let step = ((v * 4.0).ceil() as usize).clamp(1, 4) - 1;
-    alpha(col, style::HEAT_STEPS[step])
+    // Over the dark glass, the two low steps at 0.35 / 0.55 turn a warm or green accent
+    // muddy (brown, olive): dark theme raises them so they keep the accent's hue.
+    let a = if c.light { style::HEAT_STEPS[step] } else { [0.48, 0.66, 0.82, 1.0][step] };
+    alpha(col, a)
 }
 
 /// A contribution grid `weeks` wide ending today at `right` (today's column is cut after
@@ -1286,6 +1304,52 @@ fn rd_heat_cells(c: &Canvas, grid: &[f32], today_row: usize, right: f32, top: f3
             c.rr(x, top + row as f32 * (cell + gap), cell, cell, radius, fill);
         }
     }
+}
+
+/// The longest run of active days in a contribution grid.
+fn rd_longest_run(grid: &[f32]) -> u32 {
+    let (mut best, mut run) = (0u32, 0u32);
+    for v in grid {
+        run = if *v > 0.0 { run + 1 } else { 0 };
+        best = best.max(run);
+    }
+    best
+}
+
+/// The weekday (0 = Sunday) with the most activity in a grid whose last cell is `today`.
+fn rd_busiest_weekday(grid: &[f32], today: usize) -> Option<usize> {
+    let mut sum = [0.0f32; 7];
+    for (back, v) in grid.iter().rev().enumerate() {
+        sum[(today + 7 - back % 7) % 7] += *v;
+    }
+    let (i, best) = sum.iter().enumerate().fold((0, 0.0f32), |a, (i, v)| if *v > a.1 { (i, *v) } else { a });
+    (best > 0.0).then_some(i)
+}
+
+/// Contribution levels summed per calendar month for the last `n` months (oldest first),
+/// with each month's number (1-12). The grid's last cell is today.
+fn rd_month_sums(grid: &[f32], now: &super::Now, n: usize) -> Vec<(u32, f32)> {
+    let (mut y, mut mo, mut d) = (now.year, now.month, now.day.max(1));
+    let mut out: Vec<(u32, f32)> = vec![(mo, 0.0)];
+    for v in grid.iter().rev() {
+        if let Some(last) = out.last_mut() {
+            last.1 += *v;
+        }
+        d -= 1;
+        if d == 0 {
+            if out.len() >= n {
+                break;
+            }
+            mo = if mo <= 1 { 12 } else { mo - 1 };
+            if mo == 12 {
+                y = y.saturating_sub(1);
+            }
+            d = super::days_in_month(y, mo).max(1);
+            out.push((mo, 0.0));
+        }
+    }
+    out.reverse();
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1385,24 +1449,38 @@ fn rd_heat_layout(c: &Canvas, f: Option<&Feed>, conn: &str, badge: &Badge, color
                     }
                     return;
                 };
-                let items: Vec<(String, String, Option<Col>)> = f
-                    .rows
-                    .iter()
-                    .map(|r| {
-                        let dot = match r.label.to_ascii_lowercase().as_str() {
-                            "easy" if leet => Some(GREEN),
-                            "medium" if leet => Some(YELLOW),
-                            "hard" if leet => Some(RED),
-                            _ => None,
-                        };
-                        let label = if r.label == "Repos" { "Repositories".to_string() } else { r.label.clone() };
-                        (r.value.clone(), label, dot)
-                    })
-                    .collect();
-                rd_stats(c, &items, 136.0, 152.0, false);
                 let active = f.extra.get("active_days").cloned().unwrap_or_else(|| grid.iter().rev().take(365).filter(|v| **v > 0.0).count().to_string());
-                let foot = if streak > 0 { format!("{streak}-day streak · active {active} of the last 365 days") } else { format!("Active {active} of the last 365 days") };
-                rd_foot(c, &foot, "");
+                if leet {
+                    let items: Vec<(String, String, Option<Col>)> = f
+                        .rows
+                        .iter()
+                        .map(|r| {
+                            let dot = match r.label.to_ascii_lowercase().as_str() {
+                                "easy" => Some(GREEN),
+                                "medium" => Some(YELLOW),
+                                "hard" => Some(RED),
+                                _ => None,
+                            };
+                            (r.value.clone(), r.label.clone(), dot)
+                        })
+                        .collect();
+                    rd_stats(c, &items, 136.0, 152.0, false);
+                    let foot = if streak > 0 { format!("{streak}-day streak · active {active} of the last 365 days") } else { format!("Active {active} of the last 365 days") };
+                    rd_foot(c, &foot, "");
+                } else {
+                    // GitHub Activity stays about contributions (GitHub Overview owns the
+                    // profile numbers): streaks and active days, then the busiest weekday.
+                    let days = |n: u32| if n == 1 { "1 day".to_string() } else { format!("{n} days") };
+                    let items = [
+                        (days(streak), "Streak".to_string(), None),
+                        (days(rd_longest_run(grid)), "Best streak".to_string(), None),
+                        (active, "Active days".to_string(), None),
+                    ];
+                    rd_stats(c, &items, 136.0, 152.0, false);
+                    if let Some(wd) = rd_busiest_weekday(grid, today) {
+                        rd_foot(c, &format!("Most active on {}s", DAYS[wd]), "");
+                    }
+                }
             }
         }
     }
@@ -1554,7 +1632,8 @@ fn rd_list_model(c: &Canvas, conn: &str, f: &Feed, sh: Shape) -> LModel {
             let total_gb = f.extra.get("total_gb").and_then(|v| v.parse::<f64>().ok());
             let frac = f.frac.unwrap_or(if mem { total_gb.map(|t| (total / t) as f32).unwrap_or(0.0) } else { (total / 100.0) as f32 });
             md.meta = if mem { format!("{} used", rd_gb(total, false)) } else { format!("{} total", rd_pct(total)) };
-            md.meta_small = if mem { rd_gb(total, false) } else { rd_pct(total) };
+            // The Small slot is 62 px: whole gigabytes keep "used" in it.
+            md.meta_small = if mem { format!("{} used", rd_gb(total, true)) } else { md.meta.clone() };
             md.mini = if mem { rd_gb(total, true) } else { rd_pct(total) };
             match f.rows.first() {
                 Some(r) => {
@@ -1732,7 +1811,8 @@ fn rd_list_model(c: &Canvas, conn: &str, f: &Feed, sh: Shape) -> LModel {
                 md.caption = "No recent files".into();
             }
             if let Some((stem, ext, _, _)) = parts.get(1) {
-                md.acc = Acc::Pair(stem.clone(), c.text1(), RD_FOOT_SB, rd_file_kind(ext).1);
+                // Body 13/400 text2, so the first file's name stays the dominant value.
+                md.acc = Acc::Pair(stem.clone(), c.text2(), style::BODY, rd_file_kind(ext).1);
             }
             md.rows = parts
                 .iter()
@@ -1761,7 +1841,11 @@ fn list(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     let g = got(x, conn);
     let title = if conn == "github" { "GitHub" } else { def.name };
     if matches!(g, Got::Loading) && !matches!(sh, Shape::Mini | Shape::Dock) {
-        rd_list_skeleton(c, badge, title, sh);
+        match (conn, sh) {
+            ("github", _) => rd_github_skeleton(c, badge, sh),
+            ("calendar", Shape::Small) => rd_hero_skeleton(c, badge, 0.6),
+            _ => rd_list_skeleton(c, badge, title, sh),
+        }
         return;
     }
     if placeholder(c, out, def.name, badge, conn, &g, sh) {
@@ -1770,7 +1854,7 @@ fn list(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, b
     let Got::Feed(f) = g else { return };
     open_hit(out, c, open);
     if conn == "github" {
-        rd_github_overview(c, &f, badge, x.now.weekday as usize, sh);
+        rd_github_overview(c, &f, badge, &x.now, sh);
         return;
     }
     let md = rd_list_model(c, conn, &f, sh);
@@ -1829,7 +1913,7 @@ fn rd_status_mini(c: &Canvas, badge: &Badge, col: Col) {
 
 /// GitHub Overview: a stats card (repositories, stars, followers); Large adds the last 26
 /// weeks of contributions.
-fn rd_github_overview(c: &Canvas, f: &Feed, badge: &Badge, today: usize, sh: Shape) {
+fn rd_github_overview(c: &Canvas, f: &Feed, badge: &Badge, now: &super::Now, sh: Shape) {
     let stat = |key: &str, labels: &[&str]| f.extra.get(key).cloned().or_else(|| f.rows.iter().find(|r| labels.contains(&r.label.as_str())).map(|r| r.value.clone())).unwrap_or_else(|| "—".into());
     let repos = stat("repos", &["Repos", "Repositories"]);
     let stars = stat("stars", &["Stars"]);
@@ -1850,19 +1934,79 @@ fn rd_github_overview(c: &Canvas, f: &Feed, badge: &Badge, today: usize, sh: Sha
             let items = [(repos, "Repositories".to_string(), None), (stars, "Stars".to_string(), None), (followers, "Followers".to_string(), None)];
             rd_stats(c, &items, 64.0, 78.0, false);
             if sh == Shape::Large {
+                // Detail: activity per month as columns (GitHub Activity owns the daily grid).
                 separator(c, style::SEP_Y_LARGE);
-                let m = style::M_CARD;
-                let (cell, gap) = (7.0, style::HEAT_GAP);
-                let weeks = ((c.w - 2.0 * m + gap) / (cell + gap)).floor() as usize;
-                rd_heat_cells(c, &f.grid, today, c.w - m, style::DETAIL_TOP, weeks, cell, gap, 2.0, Some(hex(0x39D353)));
+                let months = rd_month_sums(&f.grid, now, 12);
+                let max = months.iter().map(|m| m.1).fold(0.0f32, f32::max);
+                rd_month_bars(c, &months, if max > 0.0 { Some((max, hex(0x39D353))) } else { None });
                 let foot = match f.value {
                     Some(v) => format!("{} contributions in the last year", super::grouped(v.round() as i64)),
                     None => "Contributions in the last year".into(),
                 };
-                c.text_base(&foot, m, c.h - m, style::FOOT.size, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+                rd_foot(c, &foot, "");
             }
         }
     }
+}
+
+/// GitHub Overview's Large detail: one column per month (oldest first) over its initial.
+/// `scale` (the largest month and the colour) None draws track columns (loading).
+fn rd_month_bars(c: &Canvas, months: &[(u32, f32)], scale: Option<(f32, Col)>) {
+    let m = style::M_CARD;
+    let n = months.len().max(1);
+    let pitch = (c.w - 2.0 * m) / n as f32;
+    let bw = 10.0;
+    let (top, bottom) = (style::DETAIL_TOP, 154.0);
+    let label_base = 170.0;
+    for (i, (mo, v)) in months.iter().enumerate() {
+        let cx = m + pitch * (i as f32 + 0.5);
+        // The current month's initial is emphasised (not while loading: no date yet).
+        let last = i + 1 == months.len() && scale.is_some();
+        let (h, col) = match scale {
+            Some((max, col)) => (((bottom - top) * v / max).max(if *v > 0.0 { bw / 2.0 } else { 0.0 }), col),
+            None => ((bottom - top) * 0.5, c.track()),
+        };
+        if h > 0.0 {
+            c.rr(cx - bw / 2.0, bottom - h, bw, h, 3.0, col);
+        } else {
+            c.rr(cx - bw / 2.0, bottom - 3.0, bw, 3.0, 1.5, c.track());
+        }
+        let name = MONTHS[(*mo as usize).clamp(1, 12) - 1];
+        let ink = if last { c.text1() } else { c.text3() };
+        c.text_base(&name[..1], cx, label_base, style::MICRO.size, 600, ink, Align::Center, pitch);
+    }
+}
+
+/// Loading skeleton of GitHub Overview at Small, Medium and Large.
+fn rd_github_skeleton(c: &Canvas, badge: &Badge, sh: Shape) {
+    if sh == Shape::Small {
+        rd_hero_skeleton(c, badge, 0.5);
+        return;
+    }
+    let m = style::M_CARD;
+    header(c, badge, "GitHub", None);
+    let cw = (c.w - 2.0 * m) / 3.0;
+    for i in 0..3 {
+        let x = m + i as f32 * cw;
+        skeleton(c, x, 64.0 - 12.0, 40.0, 12.0);
+        skeleton(c, x, 78.0 - 8.0, 48.0, 8.0);
+    }
+    if sh == Shape::Large {
+        separator(c, style::SEP_Y_LARGE);
+        let months: Vec<(u32, f32)> = (1..=12).map(|mo| (mo, 0.0)).collect();
+        rd_month_bars(c, &months, None);
+        skeleton(c, m, c.h - m - 8.0, 120.0, 8.0);
+    }
+}
+
+/// Loading skeleton of a Small hero glance (§7): the badge, a hero bar at baseline 86 that
+/// is `frac` of the text width, and a 40×8 caption bar at 106.
+fn rd_hero_skeleton(c: &Canvas, badge: &Badge, frac: f32) {
+    let m = style::M_SMALL;
+    c.badge(badge, m, m, style::BADGE_SMALL);
+    let ch = c.cap_h(style::HERO_S.size);
+    skeleton(c, m, 86.0 - ch, (c.w - 2.0 * m) * frac, ch);
+    skeleton(c, m, 106.0 - 8.0, 40.0, 8.0);
 }
 
 // ---------------------------------------------------------------- watchlist
@@ -1871,10 +2015,18 @@ fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
     let badge = super::canvas::gly("\u{E9D2}", 0x30D158, 0xFFFFFF);
     let g = got(x, conn);
     if matches!(g, Got::Loading) && !matches!(sh, Shape::Mini | Shape::Dock) {
-        for (top, cap_w, _) in rd_watch_rows(c, sh, if sh == Shape::Large { style::ROWS_MAX_L } else { 3 }) {
-            let m = if sh == Shape::Small { style::M_SMALL } else { style::M_CARD };
+        // The default list has four symbols, so Large shows four rows over the chart.
+        let m = if sh == Shape::Small { style::M_SMALL } else { style::M_CARD };
+        let rows = rd_watch_rows(c, sh, if sh == Shape::Large { 4 } else { 3 });
+        for (top, cap_w, _) in &rows {
             skeleton(c, m, top + (RD_CAPSULE_H - 10.0) / 2.0, 36.0, 10.0);
-            c.rr(c.w - m - cap_w, top, cap_w, RD_CAPSULE_H, RD_CAPSULE_H / 2.0, c.track());
+            c.rr(c.w - m - cap_w, *top, *cap_w, RD_CAPSULE_H, RD_CAPSULE_H / 2.0, c.track());
+        }
+        if sh == Shape::Large {
+            let chart_bot = c.h - m - c.cap_h(style::FOOT.size) - style::SP[5];
+            c.line(m, chart_bot - 0.5, c.w - m, chart_bot - 0.5, 1.0, c.sep());
+            skeleton(c, m, c.h - m - 8.0, 72.0, 8.0);
+            skeleton(c, c.w - m - 56.0, c.h - m - 8.0, 56.0, 8.0);
         }
         return;
     }
@@ -1929,7 +2081,9 @@ fn watch(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, conn: &'static str, 
             if sh == Shape::Large && n < style::ROWS_MAX_L {
                 let up = f.rows.iter().filter(|r| r.delta.unwrap_or(0.0) >= 0.05).count();
                 let down = f.rows.iter().filter(|r| r.delta.unwrap_or(0.0) <= -0.05).count();
-                let sym = f.extra.get("symbol").cloned().unwrap_or_default();
+                // The feed's series is the first symbol's day (markets.rs watchlist()), the
+                // same quote the Mini and Dock pills show.
+                let sym = f.extra.get("symbol").cloned().unwrap_or_else(|| first.label.clone());
                 let rows_end = lay.last().map(|l| l.0 + RD_CAPSULE_H).unwrap_or(m);
                 let chart_top = rows_end + style::SP[6];
                 let chart_bot = c.h - m - c.cap_h(style::FOOT.size) - style::SP[5];
@@ -2294,11 +2448,10 @@ fn rd_add_days(now: &super::Now, n: u32) -> (u32, u32) {
 
 // ---------------------------------------------------------------- wallpaper
 
-/// The photo scrim: one gradient over the whole card plus a second over the lower 60%, so
-/// it darkens smoothly toward the bottom with no visible start edge.
+/// The photo scrim: one gradient over the whole card shape (clear at the top, darkest at
+/// the bottom), so no second shape leaves a notch along the card's side edges.
 fn rd_scrim(c: &Canvas, r: f32) {
-    c.rr_grad(0.0, 0.0, c.w, c.h, r, (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.30));
-    c.rr_grad(0.0, c.h * 0.4, c.w, c.h * 0.6, r, (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.30));
+    c.rr_grad(0.0, 0.0, c.w, c.h, r, (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.50));
 }
 
 /// A stand-in photo for gallery previews (no image is downloaded there): an original dusk
@@ -2394,7 +2547,8 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagin
             if sh == Shape::Medium || desc.is_empty() {
                 c.text_base(&title, m, label_base, fs, 600, WHITE, Align::Left, tw);
             } else {
-                // Large: the title over a description, bottom-aligned to the margin.
+                // Large: the title (up to 2 lines, 15 → 13) over the description (up to 2
+                // lines), bottom-aligned to the margin in the column left of the pill.
                 let ds = style::FOOT.size;
                 let lines = rd_wrap(c, &desc, ds, 400, tw, 2);
                 let n = lines.len();
@@ -2402,10 +2556,13 @@ fn wallpaper(c: &Canvas, out: &mut Painted, def: &Def, x: &Ctx, wic: &IWICImagin
                 for (i, l) in lines.iter().enumerate() {
                     c.text_base(l, m, c.h - m - (n - 1 - i) as f32 * lh, ds, 400, (1.0, 1.0, 1.0, 0.72), Align::Left, tw);
                 }
-                let ts = style::VALUE.size - 2.0;
+                let (tl, size) = rd_wrap_fit(c, &title, style::VALUE.size - 2.0, fs, 600, tw);
+                let tlh = (size * 1.2).round();
                 let tb = c.h - m - (n.max(1) - 1) as f32 * lh - c.cap_h(ds) - style::SP[3];
-                let size = fit(c, &title, ts, fs, 600, Font::Text, c.w - 2.0 * m);
-                c.text_base(&title, m, tb, size, 600, WHITE, Align::Left, c.w - 2.0 * m);
+                let tn = tl.len().min(2);
+                for (i, l) in tl.iter().take(2).enumerate() {
+                    c.text_base(l, m, tb - (tn - 1 - i) as f32 * tlh, size, 600, WHITE, Align::Left, tw);
+                }
             }
         }
     }
