@@ -535,8 +535,14 @@ pub fn sample(conn: &str) -> Feed {
                 ..Default::default()
             }
         }
-        "linear" => Feed { value: Some(6.0), caption: "Assigned to you".into(), rows: vec![row("ENG-142 Dock widgets", "In Progress", 0.0), row("ENG-139 Flip clock", "Todo", 0.0), row("ENG-131 Tray hover", "Todo", 0.0)], ..Default::default() },
-        "vercel" => Feed { value: Some(14.0), caption: "Deploys this week".into(), rows: vec![row("site", "Ready", 0.0), row("docs", "Ready", 0.0), row("api", "Building", 0.0)], ..Default::default() },
+        "linear" => Feed { value: Some(6.0), caption: "Assigned to you".into(), rows: vec![row("ENG-142 Dock widgets", "In Progress", 0.0), row("ENG-139 Flip clock", "Todo", 0.0), row("ENG-131 Tray hover", "Todo", 0.0), row("ENG-127 Weather banner", "Todo", 0.0)], ..Default::default() },
+        "vercel" => Feed {
+            value: Some(14.0),
+            caption: "Deploys this week".into(),
+            rows: vec![row("site", "Ready", 0.0), row("api", "Building", 0.0), row("docs", "Ready", 0.0), row("blog", "Ready", 0.0)],
+            extra: [("latest_state".to_string(), "Ready".to_string()), ("latest_project".to_string(), "site".to_string())].into(),
+            ..Default::default()
+        },
         "stocks" => Feed {
             value: Some(248.31),
             currency: Some("USD".into()),
@@ -561,18 +567,40 @@ pub fn sample(conn: &str) -> Feed {
         },
         "calendar" => Feed {
             value: Some(3.0),
-            rows: vec![row("Design review", "Today 2:00 PM", 0.0), row("1:1 with Sam", "Today 4:30 PM", 0.0), row("Dentist", "Tue 9:00 AM", 0.0)],
+            rows: vec![row("Design review", "Today 2:00 PM", 0.0), row("1:1 with Sam", "Today 4:30 PM", 0.0), row("Dentist", "Tue 9:00 AM", 0.0), row("Sprint planning", "Tue 11:00 AM", 0.0)],
             extra: [("next_title".to_string(), "Design review".to_string()), ("next_time".to_string(), "Today 2:00 PM".to_string()), ("next_minutes".to_string(), "42".to_string())].into(),
             ..Default::default()
         },
-        "top_cpu" => Feed { value: Some(23.0), unit: "%".into(), rows: vec![row("Microsoft Edge", "8.4%", 0.36), row("Visual Studio Code", "5.1%", 0.22), row("Slack", "2.2%", 0.1), row("Laminar Dock", "0.3%", 0.02)], ..Default::default() },
-        "top_memory" => Feed { value: Some(14.2), unit: "GB".into(), rows: vec![row("Microsoft Edge", "2.1 GB", 0.13), row("Visual Studio Code", "1.4 GB", 0.09), row("Slack", "640 MB", 0.04), row("Explorer", "180 MB", 0.01)], ..Default::default() },
-        "recent_files" => Feed { value: Some(3.0), rows: vec![row("Quarterly plan.docx", "", 0.0), row("Invoice-1042.pdf", "", 0.0), row("photo.png", "", 0.0)], ..Default::default() },
+        "top_cpu" => Feed { value: Some(23.0), unit: "%".into(), rows: vec![row("Microsoft Edge", "8.4%", 0.36), row("Visual Studio Code", "5.1%", 0.22), row("Slack", "2.2%", 0.1), row("Windows Explorer", "0.9%", 0.04), row("Laminar Dock", "0.3%", 0.02)], ..Default::default() },
+        "top_memory" => Feed {
+            value: Some(14.2),
+            unit: "GB".into(),
+            frac: Some(0.44),
+            rows: vec![row("Microsoft Edge", "2.1 GB", 0.13), row("Visual Studio Code", "1.4 GB", 0.09), row("Slack", "640 MB", 0.04), row("Windows Explorer", "180 MB", 0.01), row("Laminar Dock", "96 MB", 0.01)],
+            extra: [("total_gb".to_string(), "32.0".to_string())].into(),
+            ..Default::default()
+        },
+        // Like the real feed: the file name without its extension, and the full path.
+        "recent_files" => Feed {
+            value: Some(5.0),
+            rows: vec![
+                row("Quarterly plan", r"C:\Users\Public\Documents\Quarterly plan.docx", 0.0),
+                row("Invoice-1042", r"C:\Users\Public\Downloads\Invoice-1042.pdf", 0.0),
+                row("Beach sunset", r"C:\Users\Public\Pictures\Beach sunset.png", 0.0),
+                row("Budget 2027", r"C:\Users\Public\Documents\Budget 2027.xlsx", 0.0),
+                row("Meeting notes", r"C:\Users\Public\Documents\Meeting notes.txt", 0.0),
+            ],
+            ..Default::default()
+        },
         "battery" => Feed { value: Some(82.0), frac: Some(0.82), unit: "%".into(), extra: [("charging".to_string(), "false".to_string()), ("time_left".to_string(), "4h 10m".to_string())].into(), ..Default::default() },
         "storage" => Feed { value: Some(240.8), unit: "GB".into(), caption: "Free on C:".into(), frac: Some(0.74), rows: vec![row("C:", "240 GB free of 931 GB", 0.74)], ..Default::default() },
         "language" => Feed { text: Some("ENG".into()), caption: "English (Canada)".into(), ..Default::default() },
         "uptime" => Feed { value: Some(52.0), text: Some("2d 4h".into()), caption: "Uptime".into(), ..Default::default() },
-        "wallpaper" => Feed { text: Some("Today's image".into()), ..Default::default() },
+        "wallpaper" => Feed {
+            text: Some("Morning on the coast".into()),
+            extra: [("title".to_string(), "Morning on the coast".to_string()), ("copyright".to_string(), "Sea cliffs at first light above a quiet bay (© sample image)".to_string())].into(),
+            ..Default::default()
+        },
         _ => Feed { value: Some(42.0), ..Default::default() },
     };
     f.extra.insert("sample".into(), "1".into());
