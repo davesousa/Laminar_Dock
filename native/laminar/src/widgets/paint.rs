@@ -2685,6 +2685,7 @@ fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
 // ------------------------------------------------------------------ Control Center
 
 const G_CHECK: &str = "\u{E73E}";
+const G_APPS: &str = "\u{E71D}";
 
 /// Is a dock pill the wide one (Dock L), which adds an accessory slot? Same rule as `compact_sum`.
 fn cc_wide(c: &Canvas) -> bool {
@@ -2723,12 +2724,13 @@ fn cc_plate(c: &Canvas, g: &str, x: f32, y: f32, s: f32, fill: Col, ink: Col) {
 }
 
 /// A red count badge (diameter `d`) with a card-coloured ring, centred on (cx, cy) but
-/// kept 2 px inside the card. No number draws a plain attention dot.
+/// kept 3 px inside the card. No number draws a plain attention dot.
 fn count_badge(c: &Canvas, cx: f32, cy: f32, d: f32, n: Option<u32>) {
     let ring = 1.5;
     let r = d / 2.0;
-    let cx = cx.min(c.w - 2.0 - r - ring);
-    let cy = cy.max(2.0 + r + ring);
+    let edge = style::SP[1] + 1.0;
+    let cx = cx.min(c.w - edge - r - ring);
+    let cy = cy.max(edge + r + ring);
     c.circle(cx, cy, r + ring, c.halo());
     c.circle(cx, cy, r, RED);
     if let Some(n) = n {
@@ -2964,20 +2966,29 @@ fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str,
             }
         }
         Shape::Medium | Shape::Large => {
-            let inset = style::SP[3];
-            let gap = style::SP[3];
+            // Inset 6 → radius 12 (§2.1), gap 6: four tiles about 59.5 wide.
+            let inset = style::SP[2];
+            let gap = style::SP[2];
             let r = style::concentric(style::CARD_R, inset);
             let n = items.len().max(1);
             let tw = (c.w - 2.0 * inset - gap * (n - 1) as f32) / n as f32;
             // Medium's tile row; Large draws it unchanged in its top 96.
             let th = style::SEP_Y_LARGE - 2.0 * inset;
-            let ls = style::FOOT.size;
-            for (i, (g, label, on, act)) in items.into_iter().enumerate() {
+            // Every label keeps 6 px of air to each tile edge.
+            let room = tw - 2.0 * style::SP[2];
+            let labels: Vec<TileLabel> = items.iter().map(|it| tile_label(c, it.1, room)).collect();
+            // One vertical rhythm per row, so glyphs and first lines align across tiles:
+            // a two-line row lifts the glyph to make room for the second line.
+            let two = labels.iter().any(|l| l.lines.len() > 1);
+            let (gy, base) = if two { (32.0, 60.0) } else { (38.0, 67.0) };
+            let pitch = 13.0;
+            for (i, ((g, _, on, act), l)) in items.into_iter().zip(labels).enumerate() {
                 let (tx, ty) = (inset + i as f32 * (tw + gap), inset);
-                tile(tx, ty, tw, th, r, g, 20.0, ty + 30.0, on);
-                let fs = fit(c, label, ls, style::MICRO.size, 500, Font::Text, tw - 2.0 * style::SP[2]);
-                let ink = if on { alpha(WHITE, 0.9) } else { c.text1() };
-                c.text_base(label, tx + tw / 2.0, ty + 64.0, fs, 500, ink, Align::Center, tw + style::SP[3]);
+                tile(tx, ty, tw, th, r, g, 20.0, gy, on);
+                let ink = if on { WHITE } else { c.text1() };
+                for (j, line) in l.lines.iter().enumerate() {
+                    c.text_base(line, tx + tw / 2.0, base + j as f32 * pitch, l.size, l.weight, ink, Align::Center, room + 1.0);
+                }
                 out.hits.push(((tx, ty, tw, th), act));
             }
             if sh == Shape::Large {
@@ -2987,6 +2998,43 @@ fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str,
             }
         }
     }
+}
+
+/// A toggle tile's label, laid out to fit `room` without cutting a word.
+struct TileLabel {
+    lines: Vec<String>,
+    size: f32,
+    weight: u32,
+}
+
+/// One line at Footnote 11/500 when it fits; otherwise two lines split at the space
+/// nearest the middle ("Dark" / "mode"); a single long word shrinks to 10, then drops to
+/// weight 400. The ink always stays inside `room`.
+fn tile_label(c: &Canvas, s: &str, room: f32) -> TileLabel {
+    let wide = |t: &str, size: f32, weight: u32| c.measure(t, size, weight, Font::Text).0;
+    let top = style::FOOT.size;
+    let min = style::MICRO.size;
+    let lines: Vec<String> = if wide(s, top, 500) <= room {
+        vec![s.to_string()]
+    } else {
+        let mid = s.len() / 2;
+        match s.match_indices(' ').map(|(i, _)| i).min_by_key(|i| i.abs_diff(mid)) {
+            Some(i) => vec![s[..i].to_string(), s[i + 1..].to_string()],
+            None => vec![s.to_string()],
+        }
+    };
+    let widest = |size: f32, weight: u32| lines.iter().map(|l| wide(l, size, weight)).fold(0.0, f32::max);
+    let w = widest(top, 500);
+    if w <= room {
+        return TileLabel { lines, size: top, weight: 500 };
+    }
+    let size = (top * room / w).max(min);
+    if widest(size, 500) <= room {
+        return TileLabel { lines, size, weight: 500 };
+    }
+    let w4 = widest(top, 400);
+    let size = (top * room / w4).clamp(min, top);
+    TileLabel { lines, size, weight: 400 }
 }
 
 /// Dark mode, mute, snip and lock.
@@ -3111,14 +3159,22 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let bs = style::BADGE_HEADER;
             cc_plate(c, G_UP, m, m, bs, c.plate(), c.text1());
             let fs = style::FOOT.size;
-            let trailing = hover_name.unwrap_or_else(|| n.to_string());
+            let trailing = hover_name.unwrap_or_else(|| if n == 0 { String::new() } else { n.to_string() });
             let tw = c.text_base(&trailing, c.w - m, style::HEADER_BASE, fs, 500, c.text2(), Align::Right, (c.w - 2.0 * m) * 0.45);
             let tx = m + bs + style::SP[3];
             c.text_base("Background Apps", tx, style::HEADER_BASE, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tw - style::SP[3] - tx);
             if n == 0 {
-                let mid = if sh == Shape::Large { (style::CONTENT_TOP + c.h - m) / 2.0 } else { 62.0 };
                 let cs = style::CAPTION.size;
-                c.text_base("No background apps", c.w / 2.0, mid + c.cap_h(cs) / 2.0, cs, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                if sh == Shape::Large {
+                    // A centred empty state: a plate, the message and what will appear here.
+                    let p = 40.0;
+                    let py = 72.0;
+                    cc_plate(c, G_UP, (c.w - p) / 2.0, py, p, c.plate(), c.text2());
+                    c.text_base("No background apps", c.w / 2.0, py + p + 24.0, style::TITLE.size, 600, c.text1(), Align::Center, c.w - 2.0 * m);
+                    c.text_base("Apps that run beside the clock show here", c.w / 2.0, py + p + 42.0, style::FOOT.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                } else {
+                    c.text_base("No background apps", m, 62.0 + c.cap_h(cs) / 2.0, cs, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+                }
                 return;
             }
             let (cols, rows, s) = if sh == Shape::Large { (6usize, 4usize, 24.0) } else { (7, 1, 22.0) };
@@ -3202,11 +3258,14 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let (fill, ink) = cc_fill(c, view.as_ref().is_some_and(|v| v.attention));
     let glyph = if view.as_ref().is_some_and(|v| v.ok) { G_CHECK } else { G_UPDATE };
     let ink = if view.as_ref().is_some_and(|v| v.ok) { GREEN } else { ink };
-    // The plate at (px, py) size p, with its count badge of diameter d.
+    // The plate at (px, py) size p, with its count badge of diameter d. Only the Mini,
+    // which shows no value, numbers the badge; elsewhere the hero or value already says
+    // the count, so the plate gets the plain 8 px attention dot (as Medium does).
     let plate_badge = |px: f32, py: f32, p: f32, d: f32| {
         cc_plate(c, glyph, px, py, p, fill, ink);
         if let Some(Some(b)) = view.as_ref().map(|v| v.badge) {
-            let d = if b.is_none() { d * 0.625 } else { d };
+            let b = if sh == Shape::Mini { b } else { None };
+            let d = if b.is_some() { d } else if sh == Shape::Mini { d * 0.625 } else if sh == Shape::Dock { 8.0 * k } else { 8.0 };
             count_badge(c, px + p - d * 0.15, py + d * 0.15, d, b);
         }
     };
@@ -3227,10 +3286,12 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 skeleton(c, tx, (c.h - 10.0 * k) / 2.0, (60.0 * k).min(right - tx), 10.0 * k);
                 return;
             };
+            // Beside a Restart button the value says "Ready", so "Restart" isn't said twice.
+            let (dock, dcap) = if wide && restart { ("Ready", "to restart") } else { (v.dock.as_str(), v.dock_caption) };
             let role = Type { size: style::VALUE.size * k, ..style::VALUE };
-            let (val, fs) = fit_value(c, &v.dock, role, right - tx);
+            let (val, fs) = fit_value(c, dock, role, right - tx);
             c.text_base(&val, tx, 30.0 * k, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
-            upd_caption(c, v.dock_caption, tx, 44.0 * k, style::FOOT.size * k, v.warn, right - tx);
+            upd_caption(c, dcap, tx, 44.0 * k, style::FOOT.size * k, v.warn, right - tx);
             if wide {
                 // A pill button in the accessory slot: Restart (blue) or Open (plate).
                 let bh = style::BTN_SECONDARY_DOCK * k;
@@ -3274,11 +3335,13 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     if v.badge.is_some() {
                         count_badge(c, bx + bs - 1.0, by + 1.0, 8.0, None);
                     }
-                    let (val, fs) = fit_value(c, &v.hero, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
+                    // Beside the Restart button the hero says "Ready", so "Restart" isn't said twice.
+                    let (hero, cap) = if restart { ("Ready", "Restart to finish") } else { (v.hero.as_str(), v.caption) };
+                    let (val, fs) = fit_value(c, hero, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
                     c.text_cap(&val, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
                     let bw = if restart { 88.0 } else { 0.0 };
                     let cap_w = c.w - 2.0 * m - if restart { bw + style::SP[3] } else { 0.0 };
-                    upd_caption(c, v.caption, m, 58.0, style::CAPTION.size, v.warn, cap_w);
+                    upd_caption(c, cap, m, 58.0, style::CAPTION.size, v.warn, cap_w);
                     if let Some(t) = v.third {
                         c.text_base(t, m, 76.0, style::FOOT.size, 400, c.text3(), Align::Left, cap_w);
                     }
@@ -3313,12 +3376,13 @@ fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
     let shortcuts = [(G_SCREEN, "display"), (G_VOL, "sound"), (G_WIFI, "network"), (G_BT, "bluetooth")];
     let (pf, pi) = (c.plate(), c.text1());
     // Round secondary buttons from the right edge `right`, centred on `cy`.
-    let buttons = |out: &mut Painted, n: usize, right: f32, cy: f32, d: f32, gap: f32| {
+    let buttons = |out: &mut Painted, n: usize, right: f32, cy: f32, d: f32, gap: f32, hit: f32| {
         for (i, (g, page)) in shortcuts.iter().take(n).enumerate() {
             let cx = right - d / 2.0 - (n - 1 - i) as f32 * (d + gap);
             c.circle(cx, cy, d / 2.0, pf);
             c.glyph(g, cx, cy, d * style::GLYPH_IN, pi);
-            let hd = (d + gap).max(d + 4.0);
+            // Hit squares are at least 28 (§2.4); neighbours may overlap into the gap.
+            let hd = (d + gap).max(hit);
             out.hits.push(((cx - hd / 2.0, cy - hd / 2.0, hd, hd), open(page)));
         }
     };
@@ -3338,7 +3402,7 @@ fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
             c.text_base("Settings", tx, 30.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, right - tx);
             c.text_base("Windows", tx, 44.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - tx);
             if cc_wide(c) {
-                buttons(out, 3, c.w - m, c.h / 2.0, 22.0 * k, style::SP[1] * k);
+                buttons(out, 3, c.w - m, c.h / 2.0, 22.0 * k, style::SP[1] * k, style::BTN_SECONDARY * k);
             }
         }
         Shape::Small => {
@@ -3357,24 +3421,39 @@ fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
             let bl = c.w - m - n as f32 * d - (n - 1) as f32 * style::SP[3];
             c.text_base("Settings", tx, 44.0, style::TITLE.size, 600, c.text1(), Align::Left, bl - style::SP[3] - tx);
             c.text_base("Windows", tx, 60.0, style::CAPTION.size, 400, c.text2(), Align::Left, bl - style::SP[3] - tx);
-            buttons(out, n, c.w - m, 48.0, d, style::SP[3]);
+            buttons(out, n, c.w - m, 48.0, d, style::SP[3], style::BTN_SECONDARY);
         }
         Shape::Large => {
-            // A state tile with the gear, then shortcut rows.
+            // A state tile with the gear, then Medium's shortcuts (plus Apps) as a row of
+            // labelled round buttons on the bottom margin.
             let inset = style::SP[2];
             let th = 112.0;
             c.rr(inset, inset, c.w - 2.0 * inset, th, style::concentric(style::CARD_R, inset), c.plate());
             let d = 56.0;
             let (cx, cy) = (inset + style::M_CARD + d / 2.0, inset + th / 2.0);
-            c.circle(cx, cy, d / 2.0, c.plate());
+            // A card-coloured disc, so the gear separates from the tile behind it.
+            c.circle(cx, cy, d / 2.0, c.halo());
             c.glyph(G_SETTINGS, cx, cy, 32.0, c.text1());
             let tx = cx + d / 2.0 + style::SP[5];
             let vs = style::VALUE.size;
             c.text_base("Settings", tx, cy - 2.0, vs, 600, c.text1(), Align::Left, c.w - inset - style::M_CARD - tx);
             c.text_base("Windows", tx, cy + 16.0, style::BODY.size, 400, c.text2(), Align::Left, c.w - inset - style::M_CARD - tx);
-            // Two shortcut rows on the bottom margin.
-            let top = c.h - style::M_CARD - 2.0 * style::ROW_L - style::SP[1];
-            link_rows(c, out, vec![("Display", "", open("display")), ("Apps", "", open("appsfeatures"))], top);
+            let m = style::M_CARD;
+            let row = [(G_SCREEN, "Display", "display"), (G_VOL, "Sound", "sound"), (G_WIFI, "Network", "network"), (G_APPS, "Apps", "appsfeatures")];
+            let col_w = (c.w - 2.0 * m) / row.len() as f32;
+            let bd = style::BTN_SECONDARY;
+            let fs = style::FOOT.size;
+            let base = c.h - m - style::SP[1];
+            let bcy = base - c.cap_h(fs) - style::SP[3] - bd / 2.0;
+            let top = inset + th + style::SP[2];
+            for (i, (g, label, page)) in row.into_iter().enumerate() {
+                let x0 = m + i as f32 * col_w;
+                let bx = x0 + col_w / 2.0;
+                c.circle(bx, bcy, bd / 2.0, pf);
+                c.glyph(g, bx, bcy, bd * style::GLYPH_IN, pi);
+                c.text_base(label, bx, base, fs, 500, c.text2(), Align::Center, col_w);
+                out.hits.push(((x0, top, col_w, c.h - top - style::SP[2]), open(page)));
+            }
         }
     }
 }
