@@ -39,7 +39,7 @@ pub(super) static INFOS: &[ConnectorInfo] = &[
     ConnectorInfo {
         id: "instagram",
         name: "Instagram",
-        about: "Followers and post count for a professional account; needs an access token (Instagram Login or Facebook Login) with basic read permission only.",
+        about: "Followers, following and post count for a professional account; needs an access token (Instagram Login or Facebook Login) with basic read permission only.",
         help_url: "https://developers.facebook.com/docs/instagram-platform",
         fields: &[
             Field { key: "access_token", label: "Access token", placeholder: "IGAA… or EAA…", secret: true, required: true },
@@ -83,7 +83,7 @@ fn parse_x(v: &Value) -> Result<Feed, FeedError> {
             None => Err(unexpected("X")),
         };
     };
-    let mut f = followers(n, &[("following", num(&m["following_count"])), ("posts", num(&m["tweet_count"]))]);
+    let mut f = followers(n, &[("following", num(&m["following_count"])), ("posts", num(&m["tweet_count"])), ("listed", num(&m["listed_count"]))]);
     if let Some(name) = v["data"]["name"].as_str() {
         f.extra.insert("name".into(), name.to_string());
     }
@@ -156,10 +156,10 @@ pub fn instagram(p: &Params) -> Result<Feed, FeedError> {
     // Instagram Login tokens (IG…) talk to graph.instagram.com and can use "me";
     // Facebook Login tokens need the Instagram business account ID on graph.facebook.com.
     let url = if token.starts_with("IG") {
-        format!("https://graph.instagram.com/v24.0/{}?fields=followers_count,media_count,username", http::encode(user.unwrap_or("me")))
+        format!("https://graph.instagram.com/v24.0/{}?fields=followers_count,follows_count,media_count,username", http::encode(user.unwrap_or("me")))
     } else {
         let id = user.ok_or_else(|| FeedError::NeedsSetup("Add your Instagram user ID (needed with Facebook Login tokens)".into()))?;
-        format!("https://graph.facebook.com/v24.0/{}?fields=followers_count,media_count,username", http::encode(id))
+        format!("https://graph.facebook.com/v24.0/{}?fields=followers_count,follows_count,media_count,username", http::encode(id))
     };
     let v = get_json(&url, &[("Authorization", auth.as_str())], "Instagram")?;
     parse_instagram(&v)
@@ -171,7 +171,7 @@ fn parse_instagram(v: &Value) -> Result<Feed, FeedError> {
         return Err(FeedError::Failed(format!("Instagram: {short}")));
     }
     let n = num(&v["followers_count"]).ok_or_else(|| unexpected("Instagram"))?;
-    let mut f = followers(n, &[("posts", num(&v["media_count"]))]);
+    let mut f = followers(n, &[("posts", num(&v["media_count"])), ("following", num(&v["follows_count"]))]);
     if let Some(u) = v["username"].as_str() {
         f.extra.insert("name".into(), format!("@{u}"));
     }
@@ -190,6 +190,7 @@ mod tests {
         assert_eq!(f.value, Some(6e6));
         assert_eq!(f.extra["following"], "5,000");
         assert_eq!(f.extra["posts"], "30.0K");
+        assert_eq!(f.extra["listed"], "1");
         assert!(parse_x(&j(r#"{"errors":[{"title":"Not Found Error"}]}"#)).is_err());
     }
     #[test]
@@ -210,9 +211,10 @@ mod tests {
     }
     #[test]
     fn instagram_user() {
-        let f = parse_instagram(&j(r#"{"followers_count":1500,"media_count":40,"username":"me","id":"1"}"#)).unwrap();
+        let f = parse_instagram(&j(r#"{"followers_count":1500,"follows_count":210,"media_count":40,"username":"me","id":"1"}"#)).unwrap();
         assert_eq!(f.value, Some(1500.0));
         assert_eq!(f.extra["posts"], "40");
+        assert_eq!(f.extra["following"], "210");
         assert!(parse_instagram(&j(r#"{"error":{"message":"Invalid OAuth access token","code":190}}"#)).is_err());
     }
 }

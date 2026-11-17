@@ -485,12 +485,19 @@ fn walk(seed: &str, n: usize, base: f64, vol: f64, trend: f64) -> Vec<f64> {
 pub fn sample(conn: &str) -> Feed {
     use laminar_sys::feed::FeedRow;
     let row = |l: &str, v: &str, f: f32| FeedRow { label: l.into(), value: v.into(), frac: Some(f), delta: None };
+    // A series rescaled so it adds up to `total`, as the live revenue and email
+    // connectors report it (the headline is the sum of the daily figures).
+    let to_sum = |w: Vec<f64>, total: f64, cents: bool| {
+        let sum: f64 = w.iter().sum();
+        let k = if sum > 0.0 { total / sum } else { 0.0 };
+        w.iter().map(|v| if cents { (v * k * 100.0).round() / 100.0 } else { v * k }).collect::<Vec<f64>>()
+    };
     let money = |v: f64, s: &str| Feed {
         value: Some(v),
         currency: Some("USD".into()),
         caption: "Last 30 days".into(),
         delta_pct: Some(12.4),
-        series: walk(s, 30, v / 30.0, v / 40.0, v / 900.0),
+        series: to_sum(walk(s, 30, v / 30.0, v / 40.0, v / 900.0), v, true),
         ..Default::default()
     };
     let ex = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<std::collections::BTreeMap<_, _>>();
@@ -546,7 +553,12 @@ pub fn sample(conn: &str) -> Feed {
                 ..Default::default()
             }
         }
-        "plausible" | "umami" => Feed { value: Some(4012.0), unit: "visitors".into(), caption: "Last 30 days".into(), delta_pct: Some(8.1), series: summing(conn, 30, 4012.0).iter().map(|v| v.round()).collect(), ..Default::default() },
+        "plausible" => Feed { value: Some(4012.0), unit: "visitors".into(), caption: "Last 30 days".into(), delta_pct: Some(8.1), series: summing(conn, 30, 4012.0).iter().map(|v| v.round()).collect(), ..Default::default() },
+        // Ordinary traffic: a gentle walk (about 20% of the base), never near zero.
+        "umami" => {
+            let w: Vec<f64> = walk(conn, 30, 10.0, 2.0, 0.05).iter().map(|v| v.max(4.0)).collect();
+            Feed { value: Some(4012.0), unit: "visitors".into(), caption: "Last 30 days".into(), delta_pct: Some(8.1), series: to_sum(w, 4012.0, false).iter().map(|v| v.round()).collect(), ..Default::default() }
+        }
         "search_console" => Feed {
             value: Some(834.0),
             unit: "clicks".into(),
@@ -556,18 +568,18 @@ pub fn sample(conn: &str) -> Feed {
             ..Default::default()
         },
         "supabase" => Feed { value: Some(41_800.0), unit: "requests".into(), caption: "API requests, 7 days".into(), series: summing("supabase-up", 28, 41_800.0).iter().map(|v| v.round()).collect(), ..Default::default() },
-        "resend" => Feed { value: Some(1208.0), unit: "emails".into(), caption: "Emails sent".into(), series: walk(conn, 30, 36.0, 22.0, 0.3), ..Default::default() },
+        "resend" => Feed { value: Some(1208.0), unit: "emails".into(), caption: "Emails sent".into(), series: to_sum(walk(conn, 30, 36.0, 22.0, 0.3), 1208.0, false).iter().map(|v| v.round()).collect(), ..Default::default() },
         "gmail" => Feed {
             value: Some(12.0),
             caption: "Unread".into(),
-            rows: vec![row("Your invoice is ready", "Northwind", 0.0), row("Team sync notes", "Sam Lee", 0.0), row("Flight check-in is open", "Contoso Air", 0.0)],
+            rows: vec![row("Your invoice is ready", "Northwind", 0.0), row("Team sync notes", "Sam Lee", 0.0), row("Flight check-in is open", "Contoso Air", 0.0), row("Your weekly summary", "Fabrikam", 0.0)],
             extra: ex(&[("total", "1,204"), ("threads_unread", "11")]),
             ..Default::default()
         },
-        "x" => Feed { value: Some(2400.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "Laminar"), ("posts", "1,204"), ("following", "318")]), ..Default::default() },
+        "x" => Feed { value: Some(2400.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "Laminar"), ("posts", "1,204"), ("following", "318"), ("listed", "27")]), ..Default::default() },
         "tiktok" => Feed { value: Some(8900.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "Laminar Dock"), ("likes", "142K"), ("videos", "86"), ("following", "41")]), ..Default::default() },
         "youtube" => Feed { value: Some(12_400.0), unit: "subscribers".into(), caption: "Subscribers".into(), extra: ex(&[("name", "Laminar"), ("views", "1.2M"), ("videos", "64")]), ..Default::default() },
-        "instagram" => Feed { value: Some(21_700.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "@laminar"), ("posts", "312")]), ..Default::default() },
+        "instagram" => Feed { value: Some(21_700.0), unit: "followers".into(), caption: "Followers".into(), extra: ex(&[("name", "@laminar"), ("posts", "312"), ("following", "180")]), ..Default::default() },
         "github" | "leetcode" => {
             let mut r = rng(conn);
             let mut grid: Vec<f32> = (0..371).map(|_| { let v = r(); if v < 0.35 { 0.0 } else { (v as f32 - 0.35) / 0.65 } }).collect();
