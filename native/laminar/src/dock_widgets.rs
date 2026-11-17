@@ -149,7 +149,7 @@ impl Dock {
                     t.toggle();
                 }
             }
-            WAct::TimerReset(TimerKind::Stopwatch) => self.hub.stopwatch = Default::default(),
+            WAct::TimerReset(TimerKind::Stopwatch) => self.hub.stopwatch.reset(),
             WAct::TimerReset(k) => {
                 if let Some(t) = self.hub.timers.get_mut(&k) {
                     let total = match k {

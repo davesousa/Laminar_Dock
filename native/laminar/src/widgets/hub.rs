@@ -88,11 +88,42 @@ impl Countdown {
 pub struct Stopwatch {
     pub acc: Duration,
     pub start: Option<Instant>,
+    /// The last run that was reset, so an idle stopwatch has something to say.
+    pub last: Option<Duration>,
+    /// Finished runs on `day` (see `day_key`), for the Large's "Today" fact.
+    pub today: Duration,
+    pub day: u32,
+}
+
+/// One number per calendar day: 20261116.
+pub fn day_key(n: &super::Now) -> u32 {
+    n.year * 10_000 + n.month * 100 + n.day
 }
 
 impl Stopwatch {
     pub fn elapsed(&self) -> Duration {
         self.acc + self.start.map(|s| s.elapsed()).unwrap_or_default()
+    }
+    /// Finished runs today (zero once the day has changed).
+    pub fn today_total(&self, n: &super::Now) -> Duration {
+        if self.day == day_key(n) {
+            self.today
+        } else {
+            Duration::ZERO
+        }
+    }
+    /// Back to zero, remembering the run as the last one and adding it to today's total.
+    pub fn reset(&mut self) {
+        let e = self.elapsed();
+        let now = super::Now::get();
+        self.today = self.today_total(&now);
+        self.day = day_key(&now);
+        if e.as_secs_f32() >= 0.5 {
+            self.last = Some(e);
+            self.today += e;
+        }
+        self.acc = Duration::ZERO;
+        self.start = None;
     }
     pub fn toggle(&mut self) {
         match self.start.take() {

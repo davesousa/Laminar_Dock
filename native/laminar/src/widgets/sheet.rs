@@ -87,6 +87,10 @@ pub fn run(out: &str, light: bool, filter: Option<&str>, scale: f32, empty: bool
 Oat milk
 Coffee beans
 Call the dentist".into();
+            // An earlier run, so the Stopwatch Large shows its idle facts.
+            hub.stopwatch.last = Some(std::time::Duration::from_secs(12 * 60 + 34));
+            hub.stopwatch.today = std::time::Duration::from_secs(48 * 60);
+            hub.stopwatch.day = super::hub::day_key(&Now::get());
         }
         let hub = hub;
         let weather = sample_weather(&Now::get());
