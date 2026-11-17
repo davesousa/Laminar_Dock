@@ -7023,7 +7023,7 @@ fn source_app(id: &str) -> String {
 /// The progress of the current track (elapsed, length) in seconds, when the source app
 /// reports a timeline. `NowPlaying` doesn't carry one yet, so the Bar face falls back to a
 /// level glyph; this is the one place to wire it up.
-fn timeline(_m: &Track) -> Option<(f32, f32)> {
+fn track_timeline(_m: &Track) -> Option<(f32, f32)> {
     None
 }
 
@@ -7316,7 +7316,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
             }
             let x0 = 56.0 * kk;
             // The slot is only as wide as what it holds, so the title keeps its room.
-            let used = match (k, timeline(&t)) {
+            let used = match (k, track_timeline(&t)) {
                 (MediaKind::Full, _) => pd + style::SP[3] * kk + 14.0 * kk,
                 (MediaKind::Bar, Some(_)) => slot_w,
                 (MediaKind::Bar, None) => pd + style::SP[3] * kk + LEVEL_W * kk,
@@ -7339,7 +7339,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     out.hits.push(((ncx - 14.0 * kk, cy - 14.0 * kk, 28.0 * kk, 28.0 * kk), WAct::MediaNext));
                     play_plate(c, out, ncx - ns / 2.0 - style::SP[3] * kk - pd / 2.0, cy, pd, t.playing);
                 }
-                MediaKind::Bar => match timeline(&t) {
+                MediaKind::Bar => match track_timeline(&t) {
                     Some((pos, len)) => {
                         let f = (pos / len.max(1.0)).clamp(0.0, 1.0);
                         c.text_base(&mmss(pos), c.w - m, 26.0 * kk, style::FOOT.size * kk, 500, c.text2(), Align::Right, slot_w);
@@ -7396,7 +7396,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     art_or_idle(c, x, wic, &t, m, m, s, r);
                     let t2 = if t.idle { Track { artist: "Play in any app".into(), ..t.clone() } } else { t.clone() };
                     card_track_text(c, &t2, m, inner, 66.0, 80.0, style::FOOT.size, None);
-                    if let Some((pos, len)) = timeline(&t) {
+                    if let Some((pos, len)) = track_timeline(&t) {
                         // With a timeline, the capsule's place holds the track's progress.
                         let p = style::BTN_SECONDARY;
                         play_plate(c, out, c.w - m - p / 2.0, m + s / 2.0, p, t.playing);
@@ -7482,7 +7482,7 @@ fn media(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWICImaging
                     out.hits.clear();
                     media_medium(c, out, k, x, wic, &t);
                     separator(c, style::SEP_Y_LARGE);
-                    if timeline(&t).is_none() {
+                    if track_timeline(&t).is_none() {
                         // The Medium already holds the transport: the detail is the volume.
                         bar_volume(c, out, x);
                         return;
@@ -7566,14 +7566,14 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
             round_button(c, out, ncx, cy, p, c.plate(), G_NEXT_FILL, c.text1(), WAct::MediaNext);
         }
         _ => {
-            let s = if timeline(t).is_some() { 40.0 } else { 32.0 };
+            let s = if track_timeline(t).is_some() { 40.0 } else { 32.0 };
             art_or_idle(c, x, wic, t, m, m, s, style::R_MIN + 2.0);
             let tx = m + s + style::SP[5];
             let pd = style::BTN_SECONDARY;
             let right = c.w - m - pd - style::SP[5];
             if t.idle {
                 card_track_text(c, &idle_t(), tx, c.w - m - tx, style::HEADER_BASE, 47.0, style::CAPTION.size, None);
-                if timeline(t).is_none() {
+                if track_timeline(t).is_none() {
                     // The transport capsule stays, dimmed, so the bar keeps its shape.
                     let (by, bh) = (56.0, 24.0);
                     c.rr(m, by, c.w - 2.0 * m, bh, bh / 2.0, alpha(c.plate(), 0.35));
@@ -7582,7 +7582,7 @@ fn media_medium(c: &Canvas, out: &mut Painted, k: MediaKind, x: &Ctx, wic: &IWIC
                 }
                 return;
             }
-            match timeline(t) {
+            match track_timeline(t) {
                 Some((pos, len)) => {
                     // A header row (art, title, artist, play), then the track's progress.
                     play_plate(c, out, c.w - m - pd / 2.0, 36.0, pd, t.playing);
@@ -9114,228 +9114,1197 @@ fn sys_uptime_strip(c: &Canvas, now: &super::Now, days_back: i64, boot_min: i64,
 
 
 // ------------------------------------------------------------------ tools
+// One layout for every single-action tool (docs/widget-design.md §3, §5): a control mark
+// (a circle for on/off toggles, a rounded plate for launchers), its name and state.
+//   Mini   mark 40 centred
+//   Dock   mark 30 at (12, 12), name 13/600 and state 11 at x 52; Dock L adds a switch,
+//          the Windows shortcut or a value in the accessory slot
+//   Small  mark 44 centred at y 22, name baseline 88, state baseline 104
+//   Medium mark 44 at (16, 26), name 17/600 baseline 45, state 12 baseline 63
+//   Large  Medium unchanged, a separator at 96, then up to three fact rows at a 24 pitch
 
-/// Where a tile's plate sits (centre and size), to draw on top of it.
-fn plate_center(c: &Canvas, dense: bool) -> (f32, f32, f32) {
-    if dense {
-        let p = (c.h * 0.62).round();
-        if c.w > c.h * 1.5 {
-            (c.h / 2.0, c.h / 2.0, p)
-        } else {
-            (c.w / 2.0, c.h / 2.0, p)
+const G_OPEN: &str = "\u{E8A7}";
+const G_FOLDER: &str = "\u{E8B7}";
+const G_ADD: &str = "\u{E710}";
+const G_FOCUS: &str = "\u{EC43}";
+const G_PALETTE: &str = "\u{E790}";
+const G_POWER: &str = "\u{E7E8}";
+const G_EYE: &str = "\u{E7B3}";
+const G_CUT: &str = "\u{E8C6}";
+const G_REGION: &str = "\u{F407}";
+const G_WINDOW: &str = "\u{E737}";
+const G_FULL: &str = "\u{E740}";
+const WHATSAPP: Col = hex(0x25D366);
+
+/// Mark sizes per shape (dock sizes are drawn at 54 and scale with the icon size).
+const MARK_MINI: f32 = 40.0;
+const MARK_CARD: f32 = 44.0;
+/// Small: the mark's top, then the name and state baselines.
+const SMALL_MARK_Y: f32 = 22.0;
+const SMALL_NAME_BASE: f32 = 88.0;
+const SMALL_STATE_BASE: f32 = 104.0;
+/// Medium: the mark's top-left, the text column, name and state baselines.
+const MED_MARK_Y: f32 = 26.0;
+const MED_TEXT_X: f32 = 72.0;
+const MED_NAME_BASE: f32 = 45.0;
+const MED_STATE_BASE: f32 = 63.0;
+/// Keycaps and switches.
+const KEY_H: f32 = 20.0;
+const KEY_R: f32 = 6.0;
+const SWITCH_W: f32 = 36.0;
+const SWITCH_H: f32 = 20.0;
+
+/// The dock's scale (its layouts are specified at 54 tall).
+fn dock_k(c: &Canvas) -> f32 {
+    c.h / 54.0
+}
+
+/// A wide dock pill (Dock L), which has room for the accessory slot.
+fn dock_wide(c: &Canvas) -> bool {
+    c.w >= c.h * 3.4
+}
+
+/// The mark's box (x, y, size) for a shape.
+fn mark_box(c: &Canvas, sh: Shape) -> (f32, f32, f32) {
+    match sh {
+        Shape::Mini => {
+            let s = MARK_MINI * dock_k(c);
+            ((c.w - s) / 2.0, (c.h - s) / 2.0, s)
         }
-    } else if c.w >= 180.0 {
-        (18.0 + 24.0, c.h / 2.0, 48.0)
-    } else {
-        let p = 52.0;
-        (c.w / 2.0, (c.h - p - 26.0) / 2.0 + p / 2.0, p)
+        Shape::Dock => {
+            let k = dock_k(c);
+            let s = style::BADGE_DOCK * k;
+            (style::M_DOCK * k, (c.h - s) / 2.0, s)
+        }
+        Shape::Small => ((c.w - MARK_CARD) / 2.0, SMALL_MARK_Y, MARK_CARD),
+        Shape::Medium | Shape::Large => (style::M_CARD, MED_MARK_Y, MARK_CARD),
     }
 }
 
-/// A control tile: a rounded-square plate with an icon (filled with `col` when on), and
-/// its name. Wide cards put the name beside the plate; small ones under it; the dock
-/// shows the plate alone (with the name when it's wider).
+/// Where a tile's plate sits (centre and size), to draw on top of it.
+fn plate_center(c: &Canvas, dense: bool) -> (f32, f32, f32) {
+    let sh = if dense {
+        if c.w > c.h * 1.5 {
+            Shape::Dock
+        } else {
+            Shape::Mini
+        }
+    } else if c.w >= 180.0 {
+        Shape::Medium
+    } else {
+        Shape::Small
+    };
+    let (x, y, s) = mark_box(c, sh);
+    (x + s / 2.0, y + s / 2.0, s)
+}
+
+/// A control mark: a circle (toggles) or a rounded plate (launchers). Filled with `fill`
+/// and a white glyph when given, else the plate token with a text1 glyph.
+fn mark(c: &Canvas, g: &str, x: f32, y: f32, s: f32, round: bool, fill: Option<Col>) {
+    let (bg, ink) = match fill {
+        Some(f) => (f, WHITE),
+        None => (c.plate(), c.text1()),
+    };
+    if round {
+        c.circle(x + s / 2.0, y + s / 2.0, s / 2.0, bg);
+        c.glyph(g, x + s / 2.0, y + s / 2.0, s * style::GLYPH_IN, ink);
+    } else {
+        plate(c, g, x, y, s, bg, ink);
+    }
+}
+
+/// A red attention dot on a mark's top-right corner, ringed in the card colour.
+fn mark_dot(c: &Canvas, x: f32, y: f32, s: f32, d: f32, col: Col) {
+    let (cx, cy) = (x + s - 2.0, y + 2.0);
+    c.circle(cx, cy, d / 2.0 + 1.5, c.halo());
+    c.circle(cx, cy, d / 2.0, col);
+}
+
+/// A keycap ("Win + D") right-aligned at `right`, centred on `cy`. Returns its width.
+fn keycap(c: &Canvas, keys: &str, right: f32, cy: f32, k: f32) -> f32 {
+    let fs = style::MICRO.size * k;
+    let w = c.measure(keys, fs, style::MICRO.weight, Font::Text).0 + 2.0 * style::SP[3] * k;
+    let h = KEY_H * k;
+    c.rr(right - w, cy - h / 2.0, w, h, KEY_R * k, c.plate());
+    c.text_base(keys, right - w / 2.0, cy + c.cap_h(fs) / 2.0, fs, style::MICRO.weight, c.text2(), Align::Center, w);
+    w
+}
+
+/// An on/off switch right-aligned at `right`, centred on `cy`. Returns its width.
+fn switch(c: &Canvas, on: bool, right: f32, cy: f32, k: f32) -> f32 {
+    let (w, h) = (SWITCH_W * k, SWITCH_H * k);
+    let x = right - w;
+    c.rr(x, cy - h / 2.0, w, h, h / 2.0, if on { c.blue() } else { c.track() });
+    let r = h / 2.0 - style::SP[0] * k;
+    let kx = if on { right - h / 2.0 } else { x + h / 2.0 };
+    c.circle(kx, cy, r, WHITE);
+    if c.light {
+        c.circle_stroke(kx, cy, r, c.card_edge(), 1.0);
+    }
+    w
+}
+
+/// A fully round capsule with a white label (Dock L slot): returns its width.
+fn capsule(c: &Canvas, s: &str, right: f32, cy: f32, fill: Col, k: f32) -> f32 {
+    let fs = style::FOOT.size * k;
+    let w = c.measure(s, fs, 600, Font::Text).0 + 2.0 * style::SP[3] * k;
+    let h = KEY_H * k;
+    c.rr(right - w, cy - h / 2.0, w, h, h / 2.0, fill);
+    c.text_base(s, right - w / 2.0, cy + c.cap_h(fs) / 2.0, fs, 600, WHITE, Align::Center, w);
+    w
+}
+
+/// What a tool's Dock L slot (and Medium's right edge) holds.
+enum ToolSlot {
+    None,
+    /// On/off switch (toggles).
+    Switch,
+    /// The Windows shortcut.
+    Key(&'static str),
+    /// A value 17/600.
+    Value(String),
+    /// A white label on a coloured capsule.
+    Capsule(&'static str, Col),
+    /// A quiet note in text3.
+    Note(String),
+}
+
+/// The end of a Large fact row.
+enum Trail {
+    Text(String),
+    Key(&'static str),
+    /// A link: chevron, and the row opens it.
+    Go(WAct),
+    None,
+}
+
+/// A Large fact row: glyph, label and trailing value. A row with no glyph is a footnote.
+struct TRow {
+    g: Option<&'static str>,
+    label: String,
+    trail: Trail,
+}
+
+fn row(g: &'static str, label: &str, trail: Trail) -> TRow {
+    TRow { g: Some(g), label: label.to_string(), trail }
+}
+
+fn note_row(label: &str) -> TRow {
+    TRow { g: None, label: label.to_string(), trail: Trail::None }
+}
+
+/// A single-action tool, described once and drawn at every size.
+struct ToolFace {
+    g: &'static str,
+    /// Name on Small and up.
+    name: &'static str,
+    /// Name on the dock (never ellipsized).
+    short: &'static str,
+    /// Dock second line (empty: one line).
+    state: String,
+    /// Small and Medium captions.
+    small: String,
+    medium: String,
+    /// Toggles are round; launchers are plates.
+    round: bool,
+    /// The mark's fill: blue for an on toggle, the identity colour, or None for the plate.
+    fill: Option<Col>,
+    slot: ToolSlot,
+    /// Show the slot on Medium too (switches only).
+    slot_medium: bool,
+    rows: Vec<TRow>,
+    act: WAct,
+}
+
+impl ToolFace {
+    fn new(g: &'static str, name: &'static str, act: WAct) -> Self {
+        ToolFace { g, name, short: name, state: String::new(), small: String::new(), medium: String::new(), round: false, fill: None, slot: ToolSlot::None, slot_medium: false, rows: Vec::new(), act }
+    }
+}
+
+/// Draw a tool at any shape. Returns the mark's box so callers can badge it.
+fn tool_face(c: &Canvas, out: &mut Painted, f: &ToolFace, sh: Shape) -> (f32, f32, f32) {
+    out.hits.push(((0.0, 0.0, c.w, c.h), f.act.clone()));
+    let (mx, my, ms) = mark_box(c, sh);
+    mark(c, f.g, mx, my, ms, f.round, f.fill);
+    match sh {
+        Shape::Mini => {}
+        Shape::Dock => {
+            let k = dock_k(c);
+            let m = style::M_DOCK * k;
+            let x0 = mx + ms + style::SP[4] * k;
+            let mut right = c.w - m;
+            if dock_wide(c) {
+                if let Some(w) = tool_slot(c, &f.slot, c.w - m, 27.0 * k, k, f.fill.is_some()) {
+                    right = c.w - m - w - style::SP[5] * k;
+                }
+            }
+            let ls = fit(c, f.short, style::TITLE.size * k, style::TITLE.min * k, 600, Font::Text, right - x0);
+            if f.state.is_empty() {
+                c.text_base(f.short, x0, 32.0 * k, ls, 600, c.text1(), Align::Left, c.w);
+            } else {
+                c.text_base(f.short, x0, 26.0 * k, ls, 600, c.text1(), Align::Left, c.w);
+                c.text_base(&f.state, x0, 40.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - x0);
+            }
+        }
+        Shape::Small => {
+            let inner = c.w - 2.0 * style::M_SMALL;
+            let ls = fit(c, f.name, style::TITLE.size, style::TITLE.min, 600, Font::Text, inner);
+            c.text_base(f.name, c.w / 2.0, SMALL_NAME_BASE, ls, 600, c.text1(), Align::Center, c.w);
+            c.text_base(&f.small, c.w / 2.0, SMALL_STATE_BASE, style::FOOT.size, 400, c.text2(), Align::Center, inner);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let mut right = c.w - m;
+            if f.slot_medium {
+                if let Some(w) = tool_slot(c, &f.slot, c.w - m, my + ms / 2.0, 1.0, f.fill.is_some()) {
+                    right -= w + style::SP[5];
+                }
+            }
+            let ls = fit(c, f.name, style::VALUE.size, style::VALUE.min, 600, Font::Text, right - MED_TEXT_X);
+            c.text_base(f.name, MED_TEXT_X, MED_NAME_BASE, ls, 600, c.text1(), Align::Left, c.w);
+            c.text_base(&f.medium, MED_TEXT_X, MED_STATE_BASE, style::CAPTION.size, 400, c.text2(), Align::Left, right - MED_TEXT_X);
+            if sh == Shape::Large {
+                tool_rows(c, out, &f.rows);
+            }
+        }
+    }
+    (mx, my, ms)
+}
+
+/// Draw a slot right-aligned at `right`, centred on `cy`. Returns its width (None if empty).
+fn tool_slot(c: &Canvas, s: &ToolSlot, right: f32, cy: f32, k: f32, on: bool) -> Option<f32> {
+    match s {
+        ToolSlot::None => None,
+        ToolSlot::Switch => Some(switch(c, on, right, cy, k)),
+        ToolSlot::Key(keys) => Some(keycap(c, keys, right, cy, k)),
+        ToolSlot::Capsule(t, col) => Some(capsule(c, t, right, cy, *col, k)),
+        ToolSlot::Value(v) => {
+            let fs = style::VALUE.size * k;
+            Some(c.text_base(v, right, cy + c.cap_h(fs) / 2.0, fs, style::VALUE.weight, c.text1(), Align::Right, c.w))
+        }
+        ToolSlot::Note(t) => {
+            let fs = style::FOOT.size * k;
+            Some(c.text_base(t, right, cy + c.cap_h(fs) / 2.0, fs, 400, c.text3(), Align::Right, c.w))
+        }
+    }
+}
+
+/// The Large detail region: a separator at 96, then up to three rows at a 24 pitch.
+fn tool_rows(c: &Canvas, out: &mut Painted, rows: &[TRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    separator(c, style::SEP_Y_LARGE);
+    let m = style::M_CARD;
+    let gw = 16.0;
+    for (i, r) in rows.iter().take(3).enumerate() {
+        let top = style::DETAIL_TOP + i as f32 * style::ROW_L;
+        let cy = top + style::ROW_L / 2.0;
+        let base = cy + c.cap_h(style::BODY.size) / 2.0;
+        let mut right = c.w - m;
+        match &r.trail {
+            Trail::Text(t) => {
+                let w = c.text_base(t, right, cy + c.cap_h(style::FOOT.size) / 2.0, style::FOOT.size, 500, c.text2(), Align::Right, c.w);
+                right -= w + style::SP[3];
+            }
+            Trail::Key(keys) => {
+                let w = keycap(c, keys, right, cy, 1.0);
+                right -= w + style::SP[3];
+            }
+            Trail::Go(act) => {
+                c.glyph(G_CHEV, right - 4.0, cy, 10.0, c.text3());
+                right -= 8.0 + style::SP[3];
+                out.hits.push(((m, top, c.w - 2.0 * m, style::ROW_L), act.clone()));
+            }
+            Trail::None => {}
+        }
+        match r.g {
+            Some(g) => {
+                c.glyph(g, m + gw / 2.0, cy, 14.0, c.text2());
+                let x = m + gw + style::SP[3];
+                c.text_base(&r.label, x, base, style::BODY.size, style::BODY.weight, c.text1(), Align::Left, right - x);
+            }
+            None => {
+                c.text_base(&r.label, m, cy + c.cap_h(style::FOOT.size) / 2.0, style::FOOT.size, 400, c.text2(), Align::Left, right - m);
+            }
+        }
+    }
+}
+
+/// A control tile: a plate with an icon (filled with `col` when on) and its name.
 #[allow(clippy::too_many_arguments)]
 fn tile(c: &Canvas, out: &mut Painted, g: &str, label: &str, on: bool, col: Col, act: WAct, dense: bool) {
     tile_sub(c, out, g, label, "", on, col, act, dense);
 }
 
+/// A control tile with a state line. The shared tool layout, without Large rows.
 #[allow(clippy::too_many_arguments)]
 fn tile_sub(c: &Canvas, out: &mut Painted, g: &str, label: &str, sub: &str, on: bool, col: Col, act: WAct, dense: bool) {
-    out.hits.push(((0.0, 0.0, c.w, c.h), act));
-    let plate_fill = if on { col } else { c.ink(0.12) };
-    let ink = if on { WHITE } else { c.text1() };
-    let (cx, cy, p) = plate_center(c, dense);
-    plate(c, g, cx - p / 2.0, cy - p / 2.0, p, plate_fill, ink);
-    if dense {
-        if c.w > c.h * 1.5 && !label.is_empty() {
-            let tx = c.h * 0.96;
-            let fs = (c.h * 0.24).max(10.5);
-            let two = !sub.is_empty();
-            c.tw(label, tx, c.h / 2.0 - if two { fs * 1.25 } else { fs * 0.68 }, fs, 600, c.text1(), c.w - tx - 6.0);
-            if two {
-                c.tw(sub, tx, c.h / 2.0 + 1.0, fs * 0.82, 400, c.text2(), c.w - tx - 6.0);
+    let sh = if dense {
+        if c.w > c.h * 1.5 {
+            Shape::Dock
+        } else {
+            Shape::Mini
+        }
+    } else if c.w >= 180.0 {
+        Shape::Medium
+    } else {
+        Shape::Small
+    };
+    out.hits.push(((0.0, 0.0, c.w, c.h), act.clone()));
+    let (mx, my, ms) = mark_box(c, sh);
+    mark(c, g, mx, my, ms, false, on.then_some(col));
+    if label.is_empty() || sh == Shape::Mini {
+        return;
+    }
+    // Labels are runtime strings here, so draw them directly with the face's geometry.
+    match sh {
+        Shape::Dock => {
+            let k = dock_k(c);
+            let x0 = mx + ms + style::SP[4] * k;
+            let tw = c.w - style::M_DOCK * k - x0;
+            let ls = fit(c, label, style::TITLE.size * k, style::TITLE.min * k, 600, Font::Text, tw);
+            if sub.is_empty() {
+                c.text_base(label, x0, 32.0 * k, ls, 600, c.text1(), Align::Left, c.w);
+            } else {
+                c.text_base(label, x0, 26.0 * k, ls, 600, c.text1(), Align::Left, c.w);
+                c.text_base(sub, x0, 40.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, tw);
             }
         }
-        return;
-    }
-    if c.w >= 180.0 {
-        let tx = cx + p / 2.0 + 14.0;
-        let sub = if sub.is_empty() && on { "On" } else { sub };
-        let ty = if sub.is_empty() { c.h / 2.0 - 10.0 } else { c.h / 2.0 - 19.0 };
-        c.tw(label, tx, ty, 14.0, 600, c.text1(), c.w - tx - 14.0);
-        if !sub.is_empty() {
-            c.tw(sub, tx, ty + 21.0, 11.5, 400, c.text2(), c.w - tx - 14.0);
+        Shape::Small => {
+            let inner = c.w - 2.0 * style::M_SMALL;
+            let ls = fit(c, label, style::TITLE.size, style::TITLE.min, 600, Font::Text, inner);
+            c.text_base(label, c.w / 2.0, SMALL_NAME_BASE, ls, 600, c.text1(), Align::Center, c.w);
+            c.text_base(sub, c.w / 2.0, SMALL_STATE_BASE, style::FOOT.size, 400, c.text2(), Align::Center, inner);
         }
-        return;
+        _ => {
+            let tw = c.w - style::M_CARD - MED_TEXT_X;
+            let ls = fit(c, label, style::VALUE.size, style::VALUE.min, 600, Font::Text, tw);
+            c.text_base(label, MED_TEXT_X, MED_NAME_BASE, ls, 600, c.text1(), Align::Left, c.w);
+            c.text_base(sub, MED_TEXT_X, MED_STATE_BASE, style::CAPTION.size, 400, c.text2(), Align::Left, tw);
+        }
     }
-    c.tc(label, c.w / 2.0, cy + p / 2.0 + 9.0, 11.5, 600, c.text2(), c.w - 12.0);
 }
 
-/// The icon plate used by tiles.
+/// The icon plate used by tiles: radius 0.25 × size, glyph 0.45 × size.
 fn plate(c: &Canvas, g: &str, x: f32, y: f32, p: f32, fill: Col, ink: Col) {
-    c.rr(x, y, p, p, p * 0.3, fill);
-    c.glyph(g, x + p / 2.0, y + p / 2.0, p * 0.42, ink);
+    c.rr(x, y, p, p, p * style::BADGE_R, fill);
+    c.glyph(g, x + p / 2.0, y + p / 2.0, p * style::GLYPH_IN, ink);
+}
+
+/// The Recycle Bin's item count and size, queried off the UI thread at most every 15 s.
+fn bin_stats(sample: bool) -> Option<(i64, i64)> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    if sample {
+        return Some((38, 214 * 1024 * 1024));
+    }
+    // (last query, result, a query running)
+    static BIN: Mutex<(Option<Instant>, Option<(i64, i64)>, bool)> = Mutex::new((None, None, false));
+    let mut g = BIN.lock().ok()?;
+    let stale = g.0.map(|t| t.elapsed() > Duration::from_secs(15)).unwrap_or(true);
+    if stale && !g.2 {
+        g.2 = true;
+        std::thread::spawn(|| {
+            let mut info = windows::Win32::UI::Shell::SHQUERYRBINFO { cbSize: std::mem::size_of::<windows::Win32::UI::Shell::SHQUERYRBINFO>() as u32, ..Default::default() };
+            let ok = unsafe { windows::Win32::UI::Shell::SHQueryRecycleBinW(windows::core::PCWSTR::null(), &mut info) }.is_ok();
+            if let Ok(mut g) = BIN.lock() {
+                let (n, size) = (info.i64NumItems, info.i64Size);
+                *g = (Some(Instant::now()), ok.then_some((n, size)), false);
+            }
+        });
+    }
+    g.1
+}
+
+/// Bytes as "820 KB", "214 MB", "1.2 GB".
+fn bytes_str(b: i64) -> String {
+    let b = b.max(0) as f64;
+    let (v, unit) = if b >= 1e9 {
+        (b / 1073741824.0, "GB")
+    } else if b >= 1e6 {
+        (b / 1048576.0, "MB")
+    } else {
+        (b / 1024.0, "KB")
+    };
+    if v < 10.0 && unit == "GB" {
+        format!("{v:.1} {unit}")
+    } else {
+        format!("{} {unit}", v.round().max(if b > 0.0 { 1.0 } else { 0.0 }) as i64)
+    }
+}
+
+/// "1 item" / "38 items".
+fn items_str(n: i64) -> String {
+    if n == 1 {
+        "1 item".into()
+    } else {
+        format!("{n} items")
+    }
+}
+
+/// An app's display name: no ".exe", title-cased when it was a bare process name.
+fn app_display(raw: &str) -> String {
+    let t = raw.trim();
+    let stem = if t.to_ascii_lowercase().ends_with(".exe") { &t[..t.len() - 4] } else { t };
+    // Drop a release channel or edition in brackets: "T3 Code (Nightly)" becomes "T3 Code".
+    let stem = match stem.find(" (") {
+        Some(i) if stem.ends_with(')') && i > 0 => &stem[..i],
+        _ => stem,
+    };
+    match stem.to_ascii_lowercase().as_str() {
+        "explorer" => return "File Explorer".into(),
+        "msedge" => return "Microsoft Edge".into(),
+        "code" => return "VS Code".into(),
+        "windowsterminal" => return "Terminal".into(),
+        _ => {}
+    }
+    if stem.chars().any(|ch| ch.is_uppercase()) {
+        return stem.to_string();
+    }
+    stem.split(' ')
+        .map(|w| {
+            let mut ch = w.chars();
+            match ch.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Today's apps by time, display names merged, longest first.
+fn screen_apps(x: &Ctx) -> Vec<(String, u64)> {
+    let mut v: Vec<(String, u64)> = Vec::new();
+    for (name, secs) in &x.hub.screen.apps {
+        let n = app_display(name);
+        match v.iter_mut().find(|(k, _)| *k == n) {
+            Some(e) => e.1 += secs,
+            None => v.push((n, *secs)),
+        }
+    }
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v
+}
+
+/// Category colours for the top apps; everything else is "other" (neutral).
+const APP_COLS: [Col; 3] = [BLUE, PURPLE, ORANGE];
+
+/// A stacked share bar: the top apps in their colours, the rest neutral, over a track.
+fn share_bar(c: &Canvas, apps: &[(String, u64)], total: u64, x: f32, y: f32, w: f32, h: f32) {
+    c.rr(x, y, w, h, h / 2.0, c.track());
+    if total == 0 {
+        return;
+    }
+    let mut segs: Vec<(f32, Col)> = Vec::new();
+    let mut acc = 0u64;
+    for (i, (_, s)) in apps.iter().take(APP_COLS.len()).enumerate() {
+        acc += s;
+        segs.push((acc as f32 / total as f32, APP_COLS[i]));
+    }
+    if acc < total {
+        segs.push((1.0, c.ink(0.32)));
+    }
+    // Longest first, each shorter one on top: every segment keeps a round end.
+    for (end, col) in segs.iter().rev() {
+        c.rr(x, y, (w * end).max(h), h, h / 2.0, *col);
+    }
+}
+
+/// Hour-by-hour bars on a baseline: no bar for empty hours, the current hour solid, the
+/// rest lighter. One hour of use (`full`) fills 86% of the height.
+#[allow(clippy::too_many_arguments)]
+fn hour_bars(c: &Canvas, vals: &[f64], now: usize, full: f64, x: f32, y: f32, w: f32, h: f32, bw: f32) {
+    let n = vals.len().max(1);
+    let slot = w / n as f32;
+    let hi = vals.iter().cloned().fold(full, f64::max);
+    let past = alpha(BLUE, if c.light { 0.5 } else { 0.6 });
+    let r = (bw / 2.0).min(1.5);
+    for (i, v) in vals.iter().enumerate() {
+        if *v <= 0.0 {
+            continue;
+        }
+        let ht = ((v / hi) as f32 * h * 0.86).max(2.0);
+        let bx = x + slot * i as f32 + (slot - bw) / 2.0;
+        c.rr(bx, y + h - ht, bw, ht, r, if i == now { BLUE } else { past });
+    }
+    c.line(x, y + h + 0.5, x + w, y + h + 0.5, 1.0, c.sep());
+}
+
+/// Hour ticks under hour bars: Micro text3, each left-aligned to its hour's bar.
+fn hour_ticks(c: &Canvas, marks: &[(usize, &str)], x: f32, w: f32, bw: f32, base: f32) {
+    let slot = w / 24.0;
+    for (h, l) in marks {
+        let bx = x + slot * *h as f32 + (slot - bw) / 2.0;
+        c.text_base(l, bx, base, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, 40.0);
+    }
+}
+
+/// The 24 hourly values (seconds), today.
+fn hours_of(x: &Ctx) -> Vec<f64> {
+    (0..24).map(|h| *x.hub.screen.hours.get(h).unwrap_or(&0) as f64).collect()
+}
+
+/// A time like "8 AM".
+fn hour_str(h: usize) -> String {
+    let h = h as u32;
+    format!("{} {}", h12(h), ampm(h))
+}
+
+/// Compact duration for a Mini: "46m", "6.8h", "12h".
+fn dur_mini(secs: u64) -> String {
+    let h = secs as f64 / 3600.0;
+    if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if h < 10.0 {
+        let s = format!("{h:.1}");
+        format!("{}h", s.strip_suffix(".0").unwrap_or(&s))
+    } else {
+        format!("{}h", h.round() as i64)
+    }
 }
 
 fn tool(c: &Canvas, out: &mut Painted, k: ToolKind, x: &Ctx, sh: Shape) {
-    let dense = matches!(sh, Shape::Mini | Shape::Dock);
+    let open = |s: &str| WAct::Open(s.to_string());
     match k {
         ToolKind::Tray => tray(c, out, x, sh),
         ToolKind::Connectivity => connectivity(c, out, x, sh),
         ToolKind::ControlTiles => control_tiles(c, out, x, sh),
         ToolKind::Toggles => toggles(c, out, x, sh),
-        ToolKind::WinSettings => tile(c, out, G_SETTINGS, "Windows Settings", false, BLUE, WAct::Open("ms-settings:".into()), dense),
         ToolKind::WinUpdate => win_update(c, out, x, sh),
-        ToolKind::DarkMode => tile_sub(c, out, G_MOON, "Dark mode", if x.control.dark { "On" } else { "Off" }, x.control.dark, hex(0x5E5CE6), WAct::Dark, dense),
-        ToolKind::Focus => tile(c, out, G_DND, "Focus", false, hex(0x5E5CE6), WAct::Open("ms-settings:quiethours".into()), dense),
-        ToolKind::Notifications => tile(c, out, G_BELL, "Notifications", false, BLUE, WAct::Open("ms-actioncenter:".into()), dense),
-        ToolKind::ShowDesktop => tile(c, out, G_DESKTOP, "Show desktop", x.hub.desktop_shown, BLUE, WAct::ShowDesktop, dense),
-        ToolKind::KeepAwake => tile_sub(c, out, G_COFFEE, "Keep awake", if x.hub.keep_awake { "PC stays awake" } else { "Off" }, x.hub.keep_awake, ORANGE, WAct::KeepAwake, dense),
-        ToolKind::Search if !matches!(sh, Shape::Medium | Shape::Large) => tile(c, out, G_SEARCH, "Search", false, BLUE, WAct::Search, dense),
-        ToolKind::Search => {
-            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Search));
-            c.rr(16.0, c.h / 2.0 - 20.0, c.w - 32.0, 40.0, 20.0, c.ink(0.10));
-            c.glyph(G_SEARCH, 38.0, c.h / 2.0, 14.0, c.text2());
-            c.tw("Search apps, files and settings", 58.0, c.h / 2.0 - 9.0, 13.0, 400, c.text3(), c.w - 80.0);
+        ToolKind::WinSettings => {
+            let mut f = ToolFace::new(G_SETTINGS, "Windows Settings", open("ms-settings:"));
+            f.short = "Settings";
+            f.small = "System and apps".into();
+            f.medium = "System, apps, network and more".into();
+            f.slot = ToolSlot::Key("Win + I");
+            f.rows = vec![
+                row(G_KEYBOARD, "Shortcut", Trail::Key("Win + I")),
+                row(G_UPDATE, "Windows Update", Trail::Go(open("ms-settings:windowsupdate"))),
+                row(G_PALETTE, "Personalisation", Trail::Go(open("ms-settings:personalization"))),
+            ];
+            tool_face(c, out, &f, sh);
         }
-        ToolKind::Run => tile(c, out, G_RUN, "Run", false, BLUE, WAct::Open("shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}".into()), dense),
-        ToolKind::Trash => tile(c, out, G_TRASH, "Recycle Bin", false, BLUE, WAct::Open("shell:RecycleBinFolder".into()), dense),
+        ToolKind::DarkMode => {
+            let on = x.control.dark;
+            let mut f = ToolFace::new(G_MOON, "Dark mode", WAct::Dark);
+            let st = if on { "On" } else { "Off" };
+            f.state = st.into();
+            f.small = st.into();
+            f.medium = st.into();
+            f.round = true;
+            f.fill = on.then(|| c.blue());
+            f.slot = ToolSlot::Switch;
+            f.slot_medium = true;
+            f.rows = vec![
+                row(G_MOON, "Apps and Windows", Trail::Text(if on { "Dark" } else { "Light" }.into())),
+                row(G_PALETTE, "Colours", Trail::Go(open("ms-settings:colors"))),
+                note_row("Switches apps and Windows together"),
+            ];
+            tool_face(c, out, &f, sh);
+        }
+        ToolKind::Focus => {
+            let mut f = ToolFace::new(G_FOCUS, "Focus", open("ms-settings:quiethours"));
+            f.small = "Do not disturb".into();
+            f.medium = "Do not disturb settings".into();
+            f.slot = ToolSlot::Key("Win + N");
+            f.rows = vec![
+                row(G_DND, "Do not disturb", Trail::Go(open("ms-settings:quiethours"))),
+                row(G_SETTINGS, "Notification settings", Trail::Go(open("ms-settings:notifications"))),
+                row(G_KEYBOARD, "Notification centre", Trail::Key("Win + N")),
+            ];
+            tool_face(c, out, &f, sh);
+        }
+        ToolKind::Notifications => {
+            let mut f = ToolFace::new(G_BELL, "Notifications", open("ms-actioncenter:"));
+            f.small = "Open centre".into();
+            f.medium = "Open notification centre".into();
+            f.slot = ToolSlot::Key("Win + N");
+            f.rows = vec![
+                row(G_KEYBOARD, "Shortcut", Trail::Key("Win + N")),
+                row(G_DND, "Do not disturb", Trail::Go(open("ms-settings:quiethours"))),
+                row(G_SETTINGS, "Notification settings", Trail::Go(open("ms-settings:notifications"))),
+            ];
+            tool_face(c, out, &f, sh);
+        }
+        ToolKind::ShowDesktop => {
+            let on = x.hub.desktop_shown;
+            let mut f = ToolFace::new(G_DESKTOP, "Show desktop", WAct::ShowDesktop);
+            f.short = "Desktop";
+            f.state = if on { "Shown".into() } else { String::new() };
+            f.small = if on { "Restore windows" } else { "Hide windows" }.into();
+            f.medium = if on { "Bring windows back" } else { "Hide all windows" }.into();
+            f.round = true;
+            f.fill = on.then(|| c.blue());
+            f.slot = ToolSlot::Key("Win + D");
+            f.rows = vec![
+                row(G_KEYBOARD, "Shortcut", Trail::Key("Win + D")),
+                row(G_EYE, "Peek at the desktop", Trail::Key("Win + ,")),
+                note_row("Click again to bring your windows back"),
+            ];
+            tool_face(c, out, &f, sh);
+        }
+        ToolKind::KeepAwake => {
+            let on = x.hub.keep_awake;
+            let mut f = ToolFace::new(G_COFFEE, "Keep awake", WAct::KeepAwake);
+            f.state = if on { "On" } else { "Off" }.into();
+            f.small = if on { "PC stays awake" } else { "Off" }.into();
+            f.medium = f.small.clone();
+            f.round = true;
+            f.fill = on.then(|| c.blue());
+            f.slot = ToolSlot::Switch;
+            f.slot_medium = true;
+            f.rows = vec![
+                row(G_SCREEN, "Screen", Trail::Text(if on { "Stays on" } else { "Can sleep" }.into())),
+                row(G_POWER, "System sleep", Trail::Text(if on { "Paused" } else { "Normal" }.into())),
+                row(G_SETTINGS, "Power settings", Trail::Go(open("ms-settings:powersleep"))),
+            ];
+            tool_face(c, out, &f, sh);
+        }
+        ToolKind::Search => search(c, out, x, sh),
+        ToolKind::Run => {
+            let mut f = ToolFace::new(G_OPEN, "Run", open("shell:::{2559a1f3-21d7-11d4-bdaf-00c04f60b9f0}"));
+            f.small = "Open a command".into();
+            f.medium = "Open a program, folder or file".into();
+            f.slot = ToolSlot::Key("Win + R");
+            f.rows = vec![
+                row(G_KEYBOARD, "Shortcut", Trail::Key("Win + R")),
+                row(G_RUN, "Run as admin", Trail::Key("Ctrl + Shift + Enter")),
+                note_row("Type a program, folder or web address"),
+            ];
+            tool_face(c, out, &f, sh);
+        }
+        ToolKind::Trash => {
+            let stats = bin_stats(x.sample);
+            let mut f = ToolFace::new(G_TRASH, "Recycle Bin", open("shell:RecycleBinFolder"));
+            match stats {
+                Some((0, _)) => {
+                    f.state = "Empty".into();
+                    f.small = "Empty".into();
+                    f.medium = "Empty".into();
+                    f.slot = ToolSlot::Note("Nothing deleted".into());
+                    f.rows = vec![row(G_TRASH, "Items", Trail::Text("None".into())), note_row("Deleted files wait here until you empty it")];
+                }
+                Some((n, b)) => {
+                    f.state = items_str(n);
+                    f.small = items_str(n);
+                    f.medium = format!("{} \u{00B7} {}", items_str(n), bytes_str(b));
+                    f.slot = ToolSlot::Value(bytes_str(b));
+                    f.rows = vec![
+                        row(G_TRASH, "Items", Trail::Text(n.to_string())),
+                        row(G_DRIVE, "Size on disk", Trail::Text(bytes_str(b))),
+                        note_row("Click to open; empty it from File Explorer"),
+                    ];
+                }
+                None => {
+                    f.small = "Click to open".into();
+                    f.medium = "Click to open".into();
+                    f.slot = ToolSlot::Note("Open".into());
+                    f.rows = vec![row(G_TRASH, "Open Recycle Bin", Trail::Go(open("shell:RecycleBinFolder"))), note_row("Deleted files wait here until you empty it")];
+                }
+            }
+            let (mx, my, ms) = tool_face(c, out, &f, sh);
+            if sh == Shape::Mini && stats.map(|s| s.0 > 0).unwrap_or(false) {
+                mark_dot(c, mx, my, ms, 6.0 * dock_k(c), c.text2());
+            }
+        }
         ToolKind::WhatsApp => {
-            let att = x.whatsapp == Some(true);
-            tile_sub(c, out, G_CHAT, "WhatsApp", if att { "New messages" } else if x.whatsapp.is_some() { "Open" } else { "Not running" }, true, hex(0x25D366), WAct::WhatsApp, dense);
-            if att {
-                let (cx, cy, p) = plate_center(c, dense);
-                c.circle(cx + p * 0.42, cy - p * 0.42, (p * 0.13).max(4.0), RED);
-            }
-        }
-        ToolKind::Screenshot => {
-            let items = [("\u{F407}", "Region", "ms-screenclip:?clippingMode=Rectangle", BLUE), ("\u{E737}", "Window", "ms-screenclip:?clippingMode=Window", GREEN), ("\u{E740}", "Screen", "ms-screenclip:?clippingMode=Fullscreen", PURPLE)];
-            let n = if sh == Shape::Mini { 1 } else { 3 };
-            let slot = c.w / n as f32;
-            for (i, (g, l, uri, col)) in items.into_iter().take(n).enumerate() {
-                let cx = slot * (i as f32 + 0.5);
-                let s = if dense { (c.h * 0.62).min(slot - 6.0) } else { (slot - 14.0).min(42.0) };
-                let cy = if dense { c.h / 2.0 } else { c.h / 2.0 - 8.0 };
-                c.rr(cx - s / 2.0, cy - s / 2.0, s, s, s * 0.28, alpha(col, 0.22));
-                c.glyph(g, cx, cy, s * 0.42, col);
-                if !dense {
-                    c.tc(l, cx, cy + s / 2.0 + 6.0, 10.5, 500, c.text2(), slot);
-                }
-                out.hits.push(((cx - slot / 2.0, 0.0, slot, c.h), WAct::Open(uri.into())));
-            }
-        }
-        ToolKind::Apps => {
-            let max = match sh {
-                Shape::Mini => 1,
-                Shape::Dock => ((c.w - 8.0) / (c.h - 8.0)).floor().max(1.0) as usize,
-                Shape::Small => 4,
-                Shape::Medium => 6,
-                Shape::Large => 12,
+            let (state, rows): (&str, Vec<TRow>) = match x.whatsapp {
+                Some(true) => ("New messages", vec![row(G_POWER, "Status", Trail::Text("Running".into())), row(G_CHAT, "Messages", Trail::Text("New".into())), note_row("Click to open your chats")]),
+                Some(false) => ("No new messages", vec![row(G_POWER, "Status", Trail::Text("Running".into())), row(G_CHAT, "Messages", Trail::Text("All read".into())), note_row("Click to open your chats")]),
+                None => ("Not running", vec![row(G_POWER, "Status", Trail::Text("Not running".into())), note_row("Click to start WhatsApp")]),
             };
-            let ids: Vec<&String> = x.pinned.iter().take(max).collect();
-            if ids.is_empty() {
-                c.text("Pin apps in Launchpad to see them here", 14.0, c.h / 2.0 - 8.0, 11.5, 400, c.text3(), Align::Left, c.w - 28.0, Font::Text);
-                return;
-            }
-            let cols = match sh {
-                Shape::Small => 2,
-                Shape::Large => 4,
-                _ => ids.len(),
+            let mut f = ToolFace::new(G_CHAT, "WhatsApp", WAct::WhatsApp);
+            // The dock has room for a shorter state only.
+            f.state = if x.whatsapp == Some(false) { "All read".into() } else { state.into() };
+            f.small = state.into();
+            f.medium = state.into();
+            f.fill = Some(WHATSAPP);
+            f.slot = match x.whatsapp {
+                Some(true) => ToolSlot::Capsule("New", WHATSAPP),
+                Some(false) => ToolSlot::Note("Running".into()),
+                None => ToolSlot::Note("Click to open".into()),
             };
-            let rows = ids.len().div_ceil(cols);
-            let labels = matches!(sh, Shape::Medium | Shape::Large);
-            let cw = (c.w - 12.0) / cols as f32;
-            let ch = (c.h - 8.0) / rows as f32;
-            let s = if dense { c.h - 12.0 } else { (cw - 14.0).min(ch - if labels { 22.0 } else { 10.0 }).min(46.0) };
-            for (i, id) in ids.iter().enumerate() {
-                let (col, row) = (i % cols, i / cols);
-                let cx = 6.0 + cw * (col as f32 + 0.5);
-                let cy = 4.0 + ch * row as f32 + (ch - s - if labels { 16.0 } else { 0.0 }) / 2.0;
-                out.icons.push((cx - s / 2.0, cy, s, (*id).clone()));
-                out.hits.push(((cx - cw / 2.0, 4.0 + ch * row as f32, cw, ch), WAct::App((*id).clone())));
-                if labels {
-                    let name = x.names.get(*id).cloned().unwrap_or_default();
-                    c.tc(&name, cx, cy + s + 4.0, 9.5, 400, c.text2(), cw - 2.0);
-                }
+            f.rows = rows;
+            let (mx, my, ms) = tool_face(c, out, &f, sh);
+            if x.whatsapp == Some(true) {
+                let d = if matches!(sh, Shape::Mini | Shape::Dock) { 7.0 * dock_k(c) } else { 8.0 };
+                mark_dot(c, mx, my, ms, d, RED);
             }
         }
-        ToolKind::Notes => {
-            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Notes));
-            let lines: Vec<&str> = x.hub.notes.lines().filter(|l| !l.trim().is_empty()).collect();
-            if dense {
-                let s = Sum::new(Vis::Glyph(G_NOTE, YELLOW), if sh == Shape::Mini { String::new() } else { lines.first().copied().unwrap_or("Notes").to_string() }, if lines.is_empty() { "Click to write".to_string() } else { format!("{} lines", lines.len()) });
-                compact_sum(c, &s, sh);
-                return;
+        ToolKind::Screenshot => screenshot(c, out, sh),
+        ToolKind::Apps => apps_grid(c, out, x, sh),
+        ToolKind::Notes => notes(c, out, x, sh),
+        ToolKind::ScreenTime => screen_time(c, x, sh),
+        ToolKind::Timeline => timeline(c, x, sh),
+    }
+}
+
+/// Search: a plate on the dock and Small; a search field on Medium; Large adds pinned apps.
+fn search(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    if !matches!(sh, Shape::Medium | Shape::Large) {
+        let mut f = ToolFace::new(G_SEARCH, "Search", WAct::Search);
+        f.small = "Apps and files".into();
+        f.slot = ToolSlot::Key("Win + S");
+        tool_face(c, out, &f, sh);
+        return;
+    }
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Search));
+    let m = style::M_CARD;
+    let (py, ph) = (28.0, 40.0);
+    c.rr(m, py, c.w - 2.0 * m, ph, ph / 2.0, c.plate());
+    let cy = py + ph / 2.0;
+    c.glyph(G_SEARCH, 38.0, cy, 14.0, c.text2());
+    let kw = keycap(c, "Win + S", c.w - m - style::SP[4], cy, 1.0);
+    let tx = 58.0;
+    let tmax = c.w - m - style::SP[4] - kw - style::SP[3] - tx;
+    // The longest prompt that fits whole.
+    let prompts = ["Search apps, files and settings", "Search apps and files", "Search"];
+    let p = prompts.iter().find(|p| c.measure(p, style::BODY.size, 400, Font::Text).0 <= tmax).unwrap_or(&"Search");
+    c.text_base(p, tx, cy + c.cap_h(style::BODY.size) / 2.0, style::BODY.size, 400, c.text2(), Align::Left, tmax);
+    if sh != Shape::Large {
+        return;
+    }
+    separator(c, style::SEP_Y_LARGE);
+    c.text_base("PINNED", m, 116.0, style::MICRO.size, style::MICRO.weight, c.text3(), Align::Left, c.w);
+    let cw = (c.w - 2.0 * m) / 4.0;
+    let s = MARK_CARD;
+    let top = 124.0;
+    if x.pinned.is_empty() {
+        c.text_base("Pin apps in Launchpad to see them here", m, top + 26.0, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+        return;
+    }
+    for (i, id) in x.pinned.iter().take(4).enumerate() {
+        let cx = m + cw * (i as f32 + 0.5);
+        out.icons.push((cx - s / 2.0, top, s, id.clone()));
+        out.hits.push(((cx - cw / 2.0, top - 4.0, cw, c.h - style::M_CARD - top + 8.0), WAct::App(id.clone())));
+        let name = x.names.get(id).cloned().unwrap_or_default();
+        c.text_base(&name, cx, 184.0, style::FOOT.size, 400, c.text2(), Align::Center, cw - 4.0);
+    }
+}
+
+/// Screenshot: Region (the primary action, blue), Window and Full screen.
+fn screenshot(c: &Canvas, out: &mut Painted, sh: Shape) {
+    let items: [(&str, &str, &str); 4] = [
+        (G_REGION, "Region", "ms-screenclip:?clippingMode=Rectangle"),
+        (G_WINDOW, "Window", "ms-screenclip:?clippingMode=Window"),
+        (G_FULL, "Full screen", "ms-screenclip:?clippingMode=Fullscreen"),
+        (G_FOLDER, "Screenshots", "shell:Screenshots"),
+    ];
+    let fill = |i: usize| (i == 0).then(|| c.blue());
+    match sh {
+        Shape::Mini => {
+            let (mx, my, ms) = mark_box(c, sh);
+            mark(c, items[0].0, mx, my, ms, false, fill(0));
+            out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Open(items[0].2.into())));
+        }
+        Shape::Dock => {
+            let k = dock_k(c);
+            let m = style::M_DOCK * k;
+            let s = style::BADGE_DOCK * k;
+            let n = if dock_wide(c) { 4 } else { 3 };
+            let gap = (c.w - 2.0 * m - n as f32 * s) / (n - 1) as f32;
+            for (i, (g, _, uri)) in items.iter().take(n).enumerate() {
+                let x0 = m + i as f32 * (s + gap);
+                mark(c, g, x0, (c.h - s) / 2.0, s, false, fill(i));
+                out.hits.push(((x0 - gap / 2.0, 0.0, s + gap, c.h), WAct::Open((*uri).into())));
             }
-            c.rr(14.0, 14.0, 28.0, 28.0, 8.0, YELLOW);
-            c.glyph(G_NOTE, 28.0, 28.0, 13.0, (0.2, 0.2, 0.2, 1.0));
-            let (tx, top) = if sh == Shape::Small { (14.0, 52.0) } else { (52.0, 14.0) };
-            let n = (((c.h - top - 8.0) / 17.0).floor() as usize).max(1);
-            if lines.is_empty() {
-                c.tw("Notes", tx, top, 13.0, 600, c.text1(), c.w - tx - 14.0);
-                c.text("Click to write a note.", tx, top + 20.0, 11.0, 400, c.text2(), Align::Left, c.w - tx - 14.0, Font::Text);
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let (rh, ps) = (28.0, 24.0);
+            for (i, (g, l, uri)) in items.iter().take(3).enumerate() {
+                let y = m + i as f32 * (rh + style::SP[1]);
+                let cy = y + rh / 2.0;
+                mark(c, g, m, cy - ps / 2.0, ps, false, fill(i));
+                let tx = m + ps + style::SP[3];
+                c.text_base(l, tx, cy + c.cap_h(style::BODY.size) / 2.0, style::BODY.size, 500, c.text1(), Align::Left, c.w - m - tx);
+                out.hits.push(((0.0, y - style::SP[0], c.w, rh + style::SP[1]), WAct::Open((*uri).into())));
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let cw = (c.w - 2.0 * m) / 3.0;
+            let s = MARK_CARD;
+            for (i, (g, l, uri)) in items.iter().take(3).enumerate() {
+                let cx = m + cw * (i as f32 + 0.5);
+                mark(c, g, cx - s / 2.0, m, s, false, fill(i));
+                c.text_base(l, cx, 76.0, style::FOOT.size, 500, c.text2(), Align::Center, cw);
+                out.hits.push(((cx - cw / 2.0, 0.0, cw, style::SEP_Y_LARGE), WAct::Open((*uri).into())));
+            }
+            if sh == Shape::Large {
+                tool_rows(
+                    c,
+                    out,
+                    &[
+                        row(G_FOLDER, "Screenshots folder", Trail::Go(WAct::Open("shell:Screenshots".into()))),
+                        row(G_CUT, "Snipping Tool", Trail::Go(WAct::Open("Microsoft.ScreenSketch_8wekyb3d8bbwe!App".into()))),
+                        row(G_KEYBOARD, "Snip from anywhere", Trail::Key("Win + Shift + S")),
+                    ],
+                );
+            }
+        }
+    }
+}
+
+/// A placeholder app tile; the first one carries a "+" that opens Launchpad to pin apps.
+fn app_slot(c: &Canvas, out: &mut Painted, x: f32, y: f32, s: f32, plus: bool) {
+    c.rr(x, y, s, s, s * 10.0 / MARK_CARD, c.plate());
+    if plus {
+        c.glyph(G_ADD, x + s / 2.0, y + s / 2.0, s * 16.0 / MARK_CARD, c.text3());
+        out.hits.push(((x, y, s, s), WAct::Search));
+    }
+}
+
+/// Apps: the Launchpad pins on a 44 / 12 grid; empty slots are placeholders.
+fn apps_grid(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    let pins = x.pinned;
+    let gap = 12.0;
+    // (cols, rows, s, left, top) of the grid; Medium is one row of four 59-wide columns.
+    let (cols, rows, s, left, top) = match sh {
+        Shape::Mini => {
+            let s = MARK_MINI * dock_k(c);
+            (1, 1, s, (c.w - s) / 2.0, (c.h - s) / 2.0)
+        }
+        Shape::Dock => {
+            let k = dock_k(c);
+            let s = MARK_MINI * k;
+            let g = style::SP[3] * k;
+            let n = (((c.w - 2.0 * style::M_MINI * k + g) / (s + g)).floor() as usize).max(1);
+            // The pins and one "+" at most: the dock never shows a run of empty tiles.
+            let n = n.min(pins.len() + 1);
+            let w = n as f32 * s + (n - 1) as f32 * g;
+            let left = if pins.is_empty() { style::M_MINI * k } else { (c.w - w) / 2.0 };
+            for i in 0..n {
+                let ix = left + i as f32 * (s + g);
+                match pins.get(i) {
+                    Some(id) => {
+                        out.icons.push((ix, (c.h - s) / 2.0, s, id.clone()));
+                        out.hits.push(((ix - g / 2.0, 0.0, s + g, c.h), WAct::App(id.clone())));
+                    }
+                    None => app_slot(c, out, ix, (c.h - s) / 2.0, s, i == pins.len()),
+                }
+            }
+            if pins.is_empty() {
+                let x0 = left + s + style::SP[4] * k;
+                c.text_base("Pin apps", x0, 26.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, c.w - x0 - style::M_DOCK * k);
+                c.text_base("In Launchpad", x0, 40.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, c.w - x0 - style::M_DOCK * k);
+            }
+            return;
+        }
+        Shape::Small => {
+            if pins.is_empty() {
+                (2, 1, MARK_CARD, style::M_SMALL, SMALL_MARK_Y)
             } else {
-                c.tw(lines[0], tx, top, 13.0, 600, c.text1(), c.w - tx - 14.0);
-                for (i, l) in lines.iter().skip(1).take(n.saturating_sub(1)).enumerate() {
-                    c.tw(l, tx, top + 20.0 + i as f32 * 17.0, 11.0, 400, c.text2(), c.w - tx - 14.0);
+                (2, 2, MARK_CARD, style::M_SMALL, 10.0)
+            }
+        }
+        Shape::Medium => {
+            if pins.is_empty() {
+                (2, 1, MARK_CARD, style::M_CARD, MED_MARK_Y)
+            } else {
+                // Four columns, each tile centred in its 59-wide column, with names.
+                let m = style::M_CARD;
+                let cw = (c.w - 2.0 * m) / 4.0;
+                for i in 0..4 {
+                    let cx = m + cw * (i as f32 + 0.5);
+                    let ix = cx - MARK_CARD / 2.0;
+                    match pins.get(i) {
+                        Some(id) => {
+                            out.icons.push((ix, m, MARK_CARD, id.clone()));
+                            out.hits.push(((cx - cw / 2.0, 0.0, cw, c.h), WAct::App(id.clone())));
+                            let name = x.names.get(id).cloned().unwrap_or_default();
+                            c.text_base(&name, cx, 76.0, style::FOOT.size, 400, c.text2(), Align::Center, cw - 4.0);
+                        }
+                        None => app_slot(c, out, ix, m, MARK_CARD, i == pins.len()),
+                    }
+                }
+                return;
+            }
+        }
+        Shape::Large => {
+            let rows = if pins.is_empty() { 2 } else { 3 };
+            let w = 4.0 * MARK_CARD + 3.0 * gap;
+            let h = rows as f32 * MARK_CARD + (rows - 1) as f32 * gap;
+            let top = if pins.is_empty() { 24.0 } else { (c.h - h) / 2.0 };
+            (4, rows, MARK_CARD, (c.w - w) / 2.0, top)
+        }
+    };
+    for i in 0..cols * rows {
+        let (ix, iy) = (left + (i % cols) as f32 * (s + gap), top + (i / cols) as f32 * (s + gap));
+        match pins.get(i) {
+            Some(id) => {
+                out.icons.push((ix, iy, s, id.clone()));
+                out.hits.push(((ix - gap / 2.0, iy - gap / 2.0, s + gap, s + gap), WAct::App(id.clone())));
+            }
+            None => app_slot(c, out, ix, iy, s, i == pins.len()),
+        }
+    }
+    if !pins.is_empty() {
+        return;
+    }
+    // No pins: say how to add them, under (or beside) the placeholders.
+    match sh {
+        Shape::Small => {
+            c.text_base("Pin apps", c.w / 2.0, SMALL_NAME_BASE, style::TITLE.size, 600, c.text1(), Align::Center, c.w);
+            c.text_base("In Launchpad", c.w / 2.0, SMALL_STATE_BASE, style::FOOT.size, 400, c.text2(), Align::Center, c.w);
+        }
+        Shape::Medium => {
+            let tx = left + 2.0 * s + gap + style::SP[6];
+            c.text_base("Pin apps", tx, MED_NAME_BASE, style::VALUE.size, 600, c.text1(), Align::Left, c.w - style::M_CARD - tx);
+            c.text_base("In Launchpad", tx, MED_STATE_BASE, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - style::M_CARD - tx);
+        }
+        Shape::Large => {
+            c.text_base("No apps pinned", c.w / 2.0, 154.0, style::TITLE.size, 600, c.text1(), Align::Center, c.w);
+            c.text_base("Pin apps in Launchpad to see them here", c.w / 2.0, 172.0, style::CAPTION.size, 400, c.text2(), Align::Center, c.w - 2.0 * style::M_CARD);
+        }
+        _ => {}
+    }
+}
+
+/// The Notes tile: yellow, with a dark glyph, the same in both themes.
+fn note_tile(c: &Canvas, x: f32, y: f32, s: f32) {
+    c.rr(x, y, s, s, s * style::BADGE_R, c.yellow());
+    c.glyph(G_NOTE, x + s / 2.0, y + s / 2.0, s * 0.5, alpha(hex(0x1C1C1E), 0.85));
+}
+
+/// Notes: the first line of your notes file and what follows it.
+fn notes(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
+    out.hits.push(((0.0, 0.0, c.w, c.h), WAct::Notes));
+    let lines: Vec<&str> = x.hub.notes.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let empty = lines.is_empty();
+    match sh {
+        Shape::Mini => {
+            let (mx, my, ms) = mark_box(c, sh);
+            note_tile(c, mx, my, ms);
+        }
+        Shape::Dock => {
+            let k = dock_k(c);
+            let (mx, my, ms) = mark_box(c, sh);
+            note_tile(c, mx, my, ms);
+            let m = style::M_DOCK * k;
+            let x0 = mx + ms + style::SP[4] * k;
+            let mut right = c.w - m;
+            if dock_wide(c) {
+                let slot = if empty { ToolSlot::Note("New note".into()) } else { ToolSlot::Note(if lines.len() == 1 { "1 line".into() } else { format!("{} lines", lines.len()) }) };
+                if let Some(w) = tool_slot(c, &slot, c.w - m, 27.0 * k, k, false) {
+                    right -= w + style::SP[5] * k;
                 }
             }
+            let (first, second) = if empty { ("Notes", "Click to write") } else { (lines[0], lines.get(1).copied().unwrap_or("Notes")) };
+            c.text_base(first, x0, 26.0 * k, style::TITLE.size * k, 600, c.text1(), Align::Left, right - x0);
+            c.text_base(second, x0, 40.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - x0);
         }
-        ToolKind::ScreenTime => {
-            let total = x.hub.screen.total();
-            let mut apps: Vec<(&String, &u64)> = x.hub.screen.apps.iter().collect();
-            apps.sort_by(|a, b| b.1.cmp(a.1));
-            if dense {
-                compact_sum(c, &Sum::new(Vis::Glyph(G_SCREEN, BLUE), dur(total), apps.first().map(|a| a.0.as_str()).unwrap_or("Screen time")), sh);
+        Shape::Small => {
+            let m = style::M_SMALL;
+            note_tile(c, m, m, style::BADGE_SMALL);
+            let inner = c.w - 2.0 * m;
+            if empty {
+                c.text_base("No notes", m, SMALL_NAME_BASE, style::TITLE.size, 600, c.text1(), Align::Left, inner);
+                c.text_base("Click to write", m, SMALL_STATE_BASE, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
                 return;
             }
-            c.tw("Screen Time", 14.0, 12.0, 11.5, 600, c.text2(), 120.0);
-            c.num(&dur(total), 14.0, 28.0, 26.0, 600, c.text1());
-            let cols = [BLUE, PURPLE, ORANGE, GREEN, YELLOW, RED];
-            let (x0, y0, n) = match sh {
-                Shape::Small => (14.0, 66.0, 2),
-                Shape::Large => (14.0, 76.0, 5),
-                _ => (c.w * 0.45, 16.0, 3),
-            };
-            for (i, (name, secs)) in apps.iter().take(n).enumerate() {
-                let y = y0 + i as f32 * 24.0;
-                c.tw(name, x0, y, 11.0, 500, c.text1(), c.w - x0 - 60.0);
-                c.tr(&dur(**secs), c.w - 14.0, y, 11.0, 400, c.text2());
-                c.bar(x0, y + 16.0, c.w - x0 - 14.0, 3.0, if total > 0 { **secs as f32 / total as f32 } else { 0.0 }, cols[i % cols.len()]);
+            c.text_cap(lines[0], m, 52.0, style::TITLE.size, 600, c.text1(), Align::Left, inner);
+            let first = 52.0 + c.cap_h(style::TITLE.size) + style::ROW_S - 2.0;
+            if lines.len() == 1 {
+                c.text_base("Click to add more", m, first, style::CAPTION.size, 400, c.text3(), Align::Left, inner);
             }
-            if apps.is_empty() && sh != Shape::Small {
-                c.tw("Counting from now", 14.0, 66.0, 11.0, 400, c.text3(), c.w);
+            for (i, l) in lines.iter().skip(1).enumerate() {
+                let base = first + i as f32 * 16.0;
+                if base > c.h - m {
+                    break;
+                }
+                c.text_base(l, m, base, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
             }
         }
-        ToolKind::Timeline => {
-            let hours = &x.hub.screen.hours;
-            let vals: Vec<f64> = (0..24).map(|h| *hours.get(h).unwrap_or(&0) as f64).collect();
-            if sh == Shape::Mini {
-                compact_sum(c, &Sum::new(Vis::Glyph(G_CLOCK, BLUE), dur(x.hub.screen.total()), ""), sh);
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            if empty && sh == Shape::Large {
+                let s = 48.0;
+                note_tile(c, (c.w - s) / 2.0, 36.0, s);
+                c.text_base("No notes yet", c.w / 2.0, 108.0, 15.0, 600, c.text1(), Align::Center, c.w);
+                c.text_base("Click to write a note", c.w / 2.0, 128.0, style::CAPTION.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                let (bw, bh) = (132.0, 30.0);
+                pill_button(c, out, (c.w - bw) / 2.0, 150.0, bw, bh, "New note", WAct::Notes);
                 return;
             }
-            let (top, bot) = if dense { (6.0, 6.0) } else { (32.0, 22.0) };
-            if !dense {
-                // The total first; the title takes what's left (just "Today" on small cards).
-                let total = dur(x.hub.screen.total());
-                let vw = c.measure(&total, 11.5, 500, Font::Text).0;
-                c.tr(&total, c.w - 14.0, 10.0, 11.5, 500, c.text1());
-                let title = if sh == Shape::Small { "Today" } else { "Day Timeline" };
-                c.tw(title, 14.0, 10.0, 11.5, 600, c.text2(), c.w - 28.0 - vw - 8.0);
+            if empty {
+                note_tile(c, m, m, style::BADGE_GLANCE);
+                c.text_cap("No notes", m, 50.0, 15.0, 600, c.text1(), Align::Left, c.w - 2.0 * m);
+                c.text_base("Click to write a note", m, 76.0, style::CAPTION.size, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+                return;
             }
-            let w = c.w - 28.0;
-            let slot = w / 24.0;
-            let hi = vals.iter().cloned().fold(60.0, f64::max);
-            for (h, v) in vals.iter().enumerate() {
-                let ht = ((v / hi) as f32 * (c.h - top - bot)).max(2.0);
-                let col = if h as u32 == x.now.hour { BLUE } else if *v > 0.0 { alpha(BLUE, 0.55) } else { c.ink(0.1) };
-                c.rr(14.0 + slot * h as f32 + slot * 0.15, c.h - bot - ht, slot * 0.7, ht, 1.5, col);
+            let bs = style::BADGE_HEADER;
+            note_tile(c, m, m, bs);
+            let tx = m + bs + style::SP[3];
+            c.text_base(lines[0], tx, style::HEADER_BASE, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tx);
+            let (pitch, last) = if sh == Shape::Large { (18.0, c.h - m) } else { (18.0, 80.0) };
+            let fits = (((last - 56.0) / pitch).floor() as usize) + 1;
+            let body: Vec<&&str> = lines.iter().skip(1).collect();
+            if body.is_empty() {
+                c.text_base("Click to add more", m, 56.0, style::BODY.size, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
-            if !dense {
-                let marks: &[(usize, &str)] = if sh == Shape::Small { &[(0, "12a"), (12, "12p")] } else { &[(0, "12a"), (6, "6a"), (12, "12p"), (18, "6p")] };
-                for (h, l) in marks {
-                    c.tw(l, 14.0 + slot * *h as f32, c.h - 18.0, 9.5, 400, c.text3(), 40.0);
+            for (i, l) in body.iter().take(fits).enumerate() {
+                // More lines than fit: the last one fades instead of stopping short.
+                let col = if i + 1 == fits && body.len() > fits { c.text3() } else { c.text2() };
+                c.text_base(l, m, 56.0 + i as f32 * pitch, style::BODY.size, 400, col, Align::Left, c.w - 2.0 * m);
+            }
+        }
+    }
+}
+
+/// Screen Time: today's total and the apps it went to (Large adds when).
+fn screen_time(c: &Canvas, x: &Ctx, sh: Shape) {
+    let apps = screen_apps(x);
+    let total: u64 = apps.iter().map(|a| a.1).sum();
+    let none = total == 0;
+    let value = if none { "0m".to_string() } else { dur(total) };
+    match sh {
+        Shape::Mini => {
+            let k = dock_k(c);
+            c.glyph(G_SCREEN, c.w / 2.0, (8.0 + 9.0) * k, 18.0 * k, BLUE);
+            let role = Type { size: style::MINI_VALUE.size * k, ..style::MINI_VALUE };
+            let (v, fs) = fit_value(c, &dur_mini(total), role, c.w - 2.0 * style::M_MINI * k);
+            c.text_base(&v, c.w / 2.0, 45.0 * k, fs, role.weight, c.text1(), Align::Center, c.w * 2.0);
+        }
+        Shape::Dock => {
+            let k = dock_k(c);
+            let m = style::M_DOCK * k;
+            let (mx, my, ms) = mark_box(c, sh);
+            plate(c, G_SCREEN, mx, my, ms, c.plate(), BLUE);
+            let x0 = mx + ms + style::SP[4] * k;
+            let mut right = c.w - m;
+            if dock_wide(c) {
+                let sw = (c.w * 0.34).round();
+                let sx = c.w - m - sw;
+                if let Some((name, secs)) = apps.first() {
+                    let pct = format!("{:.0}%", *secs as f64 * 100.0 / total.max(1) as f64);
+                    let pw = c.text_base(&pct, c.w - m, 23.0 * k, style::FOOT.size * k, 500, c.text3(), Align::Right, sw);
+                    c.text_base(name, sx, 23.0 * k, style::FOOT.size * k, 500, c.text2(), Align::Left, sw - pw - style::SP[1] * k);
+                }
+                share_bar(c, &apps, total, sx, 29.0 * k, sw, style::METER_H_COMPACT * k);
+                right = sx - style::SP[5] * k;
+            }
+            let role = Type { size: style::VALUE.size * k, ..style::VALUE };
+            let (v, fs) = fit_value(c, &value, role, right - x0);
+            c.text_base(&v, x0, 30.0 * k, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base("Today", x0, 44.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - x0);
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let inner = c.w - 2.0 * m;
+            let (v, fs) = fit_value(c, &value, style::HERO_S, inner);
+            c.text_cap(&v, m, m, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(if none { "Starting now" } else { "Today" }, m, 54.0, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
+            share_bar(c, &apps, total, m, 64.0, inner, style::METER_H);
+            for (i, (name, secs)) in apps.iter().take(2).enumerate() {
+                let base = 88.0 + i as f32 * style::ROW_S;
+                let cy = base - c.cap_h(style::FOOT.size) / 2.0;
+                c.circle(m + 3.0, cy, 3.0, APP_COLS[i]);
+                let tw = c.text_base(&dur(*secs), c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, inner);
+                let nx = m + 10.0;
+                c.text_base(name, nx, base, style::FOOT.size, 500, c.text1(), Align::Left, c.w - m - tw - style::SP[2] - nx);
+            }
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let lw = 132.0 - m;
+            let (v, fs) = fit_value(c, &value, style::HERO, lw);
+            c.text_cap(&v, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base(if none { "Counting from now" } else { "Screen time today" }, m, 58.0, style::CAPTION.size, 400, c.text2(), Align::Left, lw);
+            share_bar(c, &apps, total, m, 70.0, lw, style::METER_H);
+            let (rx, rw) = (148.0, c.w - m - 148.0);
+            let first = m + c.cap_h(style::FOOT.size);
+            if apps.is_empty() {
+                c.text_base("No apps yet", rx, first, style::FOOT.size, 400, c.text3(), Align::Left, rw);
+            }
+            for (i, (name, secs)) in apps.iter().take(3).enumerate() {
+                let base = first + i as f32 * style::ROW_L;
+                let tw = c.text_base(&dur(*secs), c.w - m, base, style::FOOT.size, 500, c.text2(), Align::Right, rw);
+                c.text_base(name, rx, base, style::FOOT.size, 500, c.text1(), Align::Left, rw - tw - style::SP[2]);
+                c.bar(rx, base + 5.0, rw, 3.0, *secs as f32 / total.max(1) as f32, APP_COLS[i]);
+            }
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let vals = hours_of(x);
+                let w = c.w - 2.0 * m;
+                let bw = (w / 24.0 * 0.6).round();
+                hour_bars(c, &vals, x.now.hour as usize, 3600.0, m, style::DETAIL_TOP, w, 64.0, bw);
+                hour_ticks(c, &[(0, "12a"), (6, "6a"), (12, "12p"), (18, "6p")], m, w, bw, 186.0);
+            }
+        }
+    }
+}
+
+/// Day Timeline: when you used the PC today, hour by hour.
+fn timeline(c: &Canvas, x: &Ctx, sh: Shape) {
+    let vals = hours_of(x);
+    let total = x.hub.screen.total();
+    let now = x.now.hour as usize;
+    let value = if total == 0 { "0m".to_string() } else { dur(total) };
+    let ticks4: [(usize, &str); 4] = [(0, "12a"), (6, "6a"), (12, "12p"), (18, "6p")];
+    match sh {
+        Shape::Mini => {
+            // Twelve two-hour buckets, drawn as the icon.
+            let k = dock_k(c);
+            let b: Vec<f64> = (0..12).map(|i| vals[2 * i] + vals[2 * i + 1]).collect();
+            let (w, h) = (40.0 * k, 24.0 * k);
+            if total == 0 {
+                c.glyph(G_CLOCK, c.w / 2.0, c.h / 2.0, 22.0 * k, BLUE);
+                return;
+            }
+            hour_bars(c, &b, now / 2, 7200.0, (c.w - w) / 2.0, (c.h - h) / 2.0, w, h, 2.5 * k);
+        }
+        Shape::Dock => {
+            let k = dock_k(c);
+            let m = style::M_DOCK * k;
+            let (mx, my, ms) = mark_box(c, sh);
+            plate(c, G_CLOCK, mx, my, ms, c.plate(), BLUE);
+            let x0 = mx + ms + style::SP[4] * k;
+            let mut right = c.w - m;
+            if dock_wide(c) {
+                let sw = (c.w * 0.34).round();
+                let sx = c.w - m - sw;
+                hour_bars(c, &vals, now, 3600.0, sx, 14.0 * k, sw, 26.0 * k, (sw / 24.0 * 0.7).max(1.0));
+                right = sx - style::SP[5] * k;
+            }
+            let role = Type { size: style::VALUE.size * k, ..style::VALUE };
+            let (v, fs) = fit_value(c, &value, role, right - x0);
+            c.text_base(&v, x0, 30.0 * k, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base("Today", x0, 44.0 * k, style::FOOT.size * k, 400, c.text2(), Align::Left, right - x0);
+        }
+        Shape::Small => {
+            let m = style::M_SMALL;
+            let inner = c.w - 2.0 * m;
+            let (v, fs) = fit_value(c, &value, style::HERO_S, inner);
+            c.text_cap(&v, m, m, fs, style::HERO_S.weight, c.text1(), Align::Left, c.w * 2.0);
+            c.text_base("Today", m, 54.0, style::CAPTION.size, 400, c.text2(), Align::Left, inner);
+            let bw = 3.0;
+            hour_bars(c, &vals, now, 3600.0, m, 64.0, inner, 28.0, bw);
+            hour_ticks(c, &[(0, "12a"), (12, "12p")], m, inner, bw, 106.0);
+        }
+        Shape::Medium | Shape::Large => {
+            let m = style::M_CARD;
+            let badge = super::canvas::gly(G_CLOCK, 0x0A84FF, 0xFFFFFF);
+            header(c, &badge, "Today", Some((value.as_str(), c.text1())));
+            let w = c.w - 2.0 * m;
+            let bw = (w / 24.0 * 0.6).round();
+            hour_bars(c, &vals, now, 3600.0, m, style::CONTENT_TOP, w, 22.0, bw);
+            hour_ticks(c, &ticks4, m, w, bw, 79.0);
+            if sh == Shape::Large {
+                separator(c, style::SEP_Y_LARGE);
+                let used: Vec<usize> = (0..24).filter(|h| vals[*h] > 0.0).collect();
+                match (used.first(), used.is_empty()) {
+                    (Some(first), false) => {
+                        let busiest = (0..24).max_by(|a, b| vals[*a].partial_cmp(&vals[*b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(0);
+                        let (a, b, n) = (hour_str(*first), hour_str(busiest), format!("{}h", used.len()));
+                        stat_footer(c, [(&a, "First use"), (&b, "Busiest hour"), (&n, "Active hours")], 132.0);
+                    }
+                    _ => {
+                        c.text_base("Counting from now", c.w / 2.0, 152.0, style::CAPTION.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
+                    }
                 }
             }
         }
