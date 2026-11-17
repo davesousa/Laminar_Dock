@@ -40,7 +40,6 @@ const G_SUN: &str = "\u{E706}";
 const G_VOL: &str = "\u{E767}";
 const G_MUTE: &str = "\u{E74F}";
 const G_MIC: &str = "\u{E720}";
-const G_UP: &str = "\u{E70E}";
 const G_BELL: &str = "\u{EA8F}";
 const G_DESKTOP: &str = "\u{E7F4}";
 const G_SEARCH: &str = "\u{E721}";
@@ -10772,6 +10771,8 @@ fn timeline(c: &Canvas, x: &Ctx, sh: Shape) {
 
 const G_CHECK: &str = "\u{E73E}";
 const G_APPS: &str = "\u{E71D}";
+const G_PLANE: &str = "\u{E709}";
+const G_HISTORY: &str = "\u{E81C}";
 
 /// Is a dock pill the wide one (Dock L), which adds an accessory slot? Same rule as `compact_sum`.
 fn cc_wide(c: &Canvas) -> bool {
@@ -10831,23 +10832,27 @@ fn chevron(c: &Canvas, right: f32, cy: f32) {
     c.glyph(G_CHEV, right - 3.0, cy, 10.0, c.text3());
 }
 
-/// Large detail rows at the 24 pitch from `top`: Body label at the left, then either a
-/// trailing footnote (shortcuts) or a chevron (links). Each row is a hit area.
-fn link_rows(c: &Canvas, out: &mut Painted, items: Vec<(&str, &str, WAct)>, top: f32) {
+/// Large detail rows at the 24 pitch from `top`, in the shared glyph-led style (as
+/// `tool_rows`): a leading 16 glyph in text2, the Body label, then the shortcut as a
+/// keycap pill (`keys`) or, for a link (empty `keys`), a chevron. Each row is a hit area.
+fn link_rows(c: &Canvas, out: &mut Painted, items: Vec<(&'static str, &str, &'static str, WAct)>, top: f32) {
     let m = style::M_CARD;
     let ls = style::BODY.size;
-    for (i, (label, trailing, act)) in items.into_iter().enumerate() {
+    let gw = 16.0;
+    for (i, (g, label, keys, act)) in items.into_iter().enumerate() {
         let y = top + i as f32 * style::ROW_L;
-        let base = y + (style::ROW_L + c.cap_h(ls)) / 2.0;
+        let cy = y + style::ROW_L / 2.0;
+        let base = cy + c.cap_h(ls) / 2.0;
         let mut right = c.w - m;
-        if trailing.is_empty() {
-            chevron(c, right, base - c.cap_h(ls) / 2.0);
-            right -= 10.0 + style::SP[3];
+        if keys.is_empty() {
+            c.glyph(G_CHEV, right - 4.0, cy, 10.0, c.text3());
+            right -= 8.0 + style::SP[3];
         } else {
-            let tw = c.text_base(trailing, right, base, style::FOOT.size, 500, c.text2(), Align::Right, c.w * 0.5);
-            right -= tw + style::SP[3];
+            right -= keycap(c, keys, right, cy, 1.0) + style::SP[3];
         }
-        c.text_base(label, m, base, ls, style::BODY.weight, c.text1(), Align::Left, right - m);
+        c.glyph(g, m + gw / 2.0, cy, 14.0, c.text2());
+        let x = m + gw + style::SP[3];
+        c.text_base(label, x, base, ls, style::BODY.weight, c.text1(), Align::Left, right - x);
         out.hits.push(((style::SP[3], y, c.w - 2.0 * style::SP[3], style::ROW_L), act));
     }
 }
@@ -10912,6 +10917,16 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let d = style::BADGE_DOCK * k;
             let half = c.w / 2.0;
             let wide = cc_wide(c);
+            // Dock L text column for half i (a 28 button leaves the names room).
+            let dl = 28.0 * k;
+            let col = |i: usize| {
+                let x0 = half * i as f32;
+                let tx = x0 + m + dl + style::SP[3] * k;
+                // The right half keeps the full dock margin; the left keeps a gap to the right half.
+                (tx, x0 + half - tx - if i == 0 { style::SP[2] * k } else { m })
+            };
+            // One state size for both halves: the smaller of the two fitted sizes.
+            let ss = rows.iter().enumerate().map(|(i, r)| fit(c, state(r.2), style::FOOT.size * k, style::MICRO.size * k, 400, Font::Text, col(i).1)).fold(style::FOOT.size * k, f32::min);
             for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
                 let x0 = half * i as f32;
                 if !wide {
@@ -10923,13 +10938,11 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     continue;
                 }
                 // Dock L: each half gains its name and state.
-                let cx = x0 + m + d / 2.0;
-                round_toggle(c, cx, c.h / 2.0, d, g, on);
-                let tx = x0 + m + d + style::SP[3] * k;
-                let tw = x0 + half - tx - style::SP[2] * k;
-                let ns = fit(c, name, style::TITLE.size * 12.0 / 13.0 * k, style::FOOT.size * k, 600, Font::Text, tw);
-                c.text_base(name, tx, 29.0 * k, ns, 600, c.text1(), Align::Left, tw);
-                let ss = fit(c, state(on), style::FOOT.size * k, style::MICRO.size * k, 400, Font::Text, tw);
+                round_toggle(c, x0 + m + dl / 2.0, c.h / 2.0, dl, g, on);
+                let (tx, tw) = col(i);
+                // Fit a hair narrower than the room so layout rounding never ellipsizes the name.
+                let ns = fit(c, name, style::TITLE.size * 12.0 / 13.0 * k, style::FOOT.size * k, 600, Font::Text, tw - 1.0);
+                c.text_base(name, tx, 29.0 * k, ns, 600, c.text1(), Align::Left, tw + 2.0);
                 c.text_base(state(on), tx, 43.0 * k, ss, 400, c.text2(), Align::Left, tw + 2.0);
                 out.hits.push(((tx - style::SP[1] * k, 0.0, x0 + half - tx + style::SP[1] * k, c.h), more));
                 if on.is_some() {
@@ -10965,6 +10978,13 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let cy = 48.0;
             // Column B starts just right of centre, so the two read as a pair.
             let xs = [m, c.w / 2.0 + style::SP[3]];
+            // A missing radio has nothing to list, so "Unavailable" drops the chevron; one
+            // state size serves both columns, shrunk (to Footnote) only if a state won't fit.
+            let state_room = |i: usize, on: Option<bool>| {
+                let col_w = if i == 0 { xs[1] - m } else { c.w - m - xs[1] };
+                xs[i] + col_w - (xs[i] + d + style::SP[3]) - if i == 0 { style::SP[3] } else { 0.0 } - if on.is_some() { 12.0 } else { 0.0 }
+            };
+            let cs = rows.iter().enumerate().map(|(i, r)| fit(c, state(r.2), style::CAPTION.size, style::FOOT.size, 400, Font::Text, state_room(i, r.2) - 1.0)).fold(style::CAPTION.size, f32::min);
             for (i, (g, name, on, act, more)) in rows.into_iter().enumerate() {
                 let x0 = xs[i];
                 let col_w = if i == 0 { xs[1] - m } else { c.w - m - xs[1] };
@@ -10973,9 +10993,10 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 let tw = x0 + col_w - tx - if i == 0 { style::SP[3] } else { 0.0 };
                 c.text_base(name, tx, 46.0, style::TITLE.size, 600, c.text1(), Align::Left, tw);
                 let st = state(on);
-                let cs = style::CAPTION.size;
-                let sw = c.text_base(st, tx, 62.0, cs, 400, c.text2(), Align::Left, tw - 12.0);
-                chevron(c, tx + sw + style::SP[1] + 6.0, 62.0 - c.cap_h(cs) / 2.0);
+                let sw = c.text_base(st, tx, 62.0, cs, 400, c.text2(), Align::Left, if on.is_some() { tw - 10.0 } else { tw + 1.0 });
+                if on.is_some() {
+                    chevron(c, tx + sw + style::SP[1] + 6.0, 62.0 - c.cap_h(cs) / 2.0);
+                }
                 out.hits.push(((tx - style::SP[1], cy - 24.0, x0 + col_w - tx + style::SP[1], 48.0), more));
                 if on.is_some() {
                     out.hits.push(((x0 - style::SP[1], cy - d / 2.0 - style::SP[1], d + style::SP[3], d + style::SP[3]), act));
@@ -10987,9 +11008,9 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     c,
                     out,
                     vec![
-                        ("Network & internet", "", WAct::Open("ms-settings:network".into())),
-                        ("Bluetooth & devices", "", WAct::Open("ms-settings:bluetooth".into())),
-                        ("Airplane mode", "", WAct::Open("ms-settings:network-airplanemode".into())),
+                        (G_WIFI, "Network & internet", "", WAct::Open("ms-settings:network".into())),
+                        (G_BT, "Bluetooth & devices", "", WAct::Open("ms-settings:bluetooth".into())),
+                        (G_PLANE, "Airplane mode", "", WAct::Open("ms-settings:network-airplanemode".into())),
                     ],
                     style::DETAIL_TOP,
                 );
@@ -11001,7 +11022,7 @@ fn connectivity(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
 /// Control tiles (Quick Toggles, Quick Controls): one tile on the Mini, a row of glyph
 /// tiles in the dock (plus volume on Dock L), 2×2 on Small, a labelled row on Medium, and
 /// on Large that row with a volume slider and `extra` rows under it.
-fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str, &'static str, bool, WAct)>, extra: Vec<(&str, &str, WAct)>, sh: Shape) {
+fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str, &'static str, bool, WAct)>, extra: Vec<(&'static str, &str, &'static str, WAct)>, sh: Shape) {
     let k = c.h / 54.0;
     let tile = |tx: f32, ty: f32, tw: f32, th: f32, r: f32, g: &str, gs: f32, gy: f32, on: bool| {
         let (fill, ink) = cc_fill(c, on);
@@ -11063,7 +11084,14 @@ fn button_grid(c: &Canvas, out: &mut Painted, x: &Ctx, items: Vec<(&'static str,
             let th = style::SEP_Y_LARGE - 2.0 * inset;
             // Every label keeps 6 px of air to each tile edge.
             let room = tw - 2.0 * style::SP[2];
-            let labels: Vec<TileLabel> = items.iter().map(|it| tile_label(c, it.1, room)).collect();
+            let mut labels: Vec<TileLabel> = items.iter().map(|it| tile_label(c, it.1, room)).collect();
+            // One type size for the whole row: a label shrunk to fit sets it for every tile.
+            if labels.iter().all(|l| l.lines.len() == 1 && l.weight == 500) {
+                let size = labels.iter().map(|l| l.size).fold(f32::MAX, f32::min);
+                for l in &mut labels {
+                    l.size = size;
+                }
+            }
             // One vertical rhythm per row, so glyphs and first lines align across tiles:
             // a two-line row lifts the glyph to make room for the second line.
             let two = labels.iter().any(|l| l.lines.len() > 1);
@@ -11095,14 +11123,14 @@ struct TileLabel {
     weight: u32,
 }
 
-/// One line at Footnote 11/500 when it fits; otherwise two lines split at the space
-/// nearest the middle ("Dark" / "mode"); a single long word shrinks to 10, then drops to
-/// weight 400. The ink always stays inside `room`.
+/// One line at Footnote 11/500, shrinking towards Micro 10/500 to stay on one line; only a
+/// label too wide even at 10/500 splits into two lines at the space nearest the middle,
+/// and a single long word then drops to weight 400. The ink always stays inside `room`.
 fn tile_label(c: &Canvas, s: &str, room: f32) -> TileLabel {
     let wide = |t: &str, size: f32, weight: u32| c.measure(t, size, weight, Font::Text).0;
     let top = style::FOOT.size;
     let min = style::MICRO.size;
-    let lines: Vec<String> = if wide(s, top, 500) <= room {
+    let lines: Vec<String> = if wide(s, min, 500) <= room {
         vec![s.to_string()]
     } else {
         let mid = s.len() / 2;
@@ -11116,9 +11144,11 @@ fn tile_label(c: &Canvas, s: &str, room: f32) -> TileLabel {
     if w <= room {
         return TileLabel { lines, size: top, weight: 500 };
     }
-    let size = (top * room / w).max(min);
-    if widest(size, 500) <= room {
-        return TileLabel { lines, size, weight: 500 };
+    // Proportional first, then rounded down a step, then the 10 floor.
+    for size in [(top * room / w).max(min), ((top * room / w) - 0.25).max(min), min] {
+        if widest(size, 500) <= room {
+            return TileLabel { lines, size, weight: 500 };
+        }
     }
     let w4 = widest(top, 400);
     let size = (top * room / w4).clamp(min, top);
@@ -11129,12 +11159,12 @@ fn tile_label(c: &Canvas, s: &str, room: f32) -> TileLabel {
 fn control_tiles(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let ctl = x.control;
     let items = vec![
-        (G_MOON, "Dark mode", ctl.dark, WAct::Dark),
+        (G_MOON, "Dark", ctl.dark, WAct::Dark),
         (if ctl.muted == Some(true) { G_MUTE } else { G_VOL }, "Mute", ctl.muted == Some(true), WAct::Mute),
         (G_SNIP, "Snip", false, WAct::Snip),
         (G_LOCK, "Lock", false, WAct::Lock),
     ];
-    let extra = vec![("Snip", "Win + Shift + S", WAct::Snip), ("Lock", "Win + L", WAct::Lock)];
+    let extra = vec![(G_SNIP, "Snip", "Win + Shift + S", WAct::Snip), (G_LOCK, "Lock", "Win + L", WAct::Lock)];
     button_grid(c, out, x, items, extra, sh);
 }
 
@@ -11144,12 +11174,12 @@ fn toggles(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     let items = vec![
         (G_WIFI, "Wi-Fi", ctl.wifi == Some(true), WAct::Wifi),
         (G_BT, "Bluetooth", ctl.bluetooth == Some(true), WAct::Bluetooth),
-        (G_MOON, "Dark mode", ctl.dark, WAct::Dark),
+        (G_MOON, "Dark", ctl.dark, WAct::Dark),
         (if ctl.muted == Some(true) { G_MUTE } else { G_VOL }, "Mute", ctl.muted == Some(true), WAct::Mute),
     ];
     let extra = vec![
-        ("Network & internet", "", WAct::Open("ms-settings:network".into())),
-        ("Bluetooth & devices", "", WAct::Open("ms-settings:bluetooth".into())),
+        (G_WIFI, "Network & internet", "", WAct::Open("ms-settings:network".into())),
+        (G_BT, "Bluetooth & devices", "", WAct::Open("ms-settings:bluetooth".into())),
     ];
     button_grid(c, out, x, items, extra, sh);
 }
@@ -11178,7 +11208,7 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
     };
     // How many icons to draw in `slots` cells, and how many the "+N" chip stands for.
     let split = |slots: usize| if n > slots { (slots - 1, n - (slots - 1)) } else { (n, 0) };
-    let empty_tile = |x0: f32, y0: f32, s: f32| cc_plate(c, G_UP, x0, y0, s, c.plate(), c.text2());
+    let empty_tile = |x0: f32, y0: f32, s: f32| cc_plate(c, G_APPS, x0, y0, s, c.plate(), c.text2());
     let apps = |n: usize| if n == 1 { "1 app".to_string() } else { format!("{n} apps") };
     match sh {
         Shape::Mini => {
@@ -11210,6 +11240,8 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             }
             let slots = (((c.w - 2.0 * m + pitch - s) / pitch).floor() as usize).max(1);
             let (show, more) = split(slots);
+            // A full run spreads so its last slot ends at the right margin (equal side gaps).
+            let pitch = if n >= slots && slots > 1 { (c.w - 2.0 * m - s) / (slots - 1) as f32 } else { pitch };
             for i in 0..show {
                 let ix = m + i as f32 * pitch;
                 place(out, i, ix, y, s, (ix - (pitch - s) / 2.0, 0.0, pitch, c.h));
@@ -11245,19 +11277,19 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
             let m = style::M_CARD;
             // Header: glyph plate, title, the count (or the app under the pointer).
             let bs = style::BADGE_HEADER;
-            cc_plate(c, G_UP, m, m, bs, c.plate(), c.text1());
+            cc_plate(c, G_APPS, m, m, bs, c.plate(), BLUE);
             let fs = style::FOOT.size;
             let trailing = hover_name.unwrap_or_else(|| if n == 0 { String::new() } else { n.to_string() });
             let tw = c.text_base(&trailing, c.w - m, style::HEADER_BASE, fs, 500, c.text2(), Align::Right, (c.w - 2.0 * m) * 0.45);
             let tx = m + bs + style::SP[3];
-            c.text_base("Background Apps", tx, style::HEADER_BASE, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tw - style::SP[3] - tx);
+            c.text_base("Background apps", tx, style::HEADER_BASE, style::TITLE.size, 600, c.text1(), Align::Left, c.w - m - tw - style::SP[3] - tx);
             if n == 0 {
                 let cs = style::CAPTION.size;
                 if sh == Shape::Large {
                     // A centred empty state: a plate, the message and what will appear here.
                     let p = 40.0;
                     let py = 72.0;
-                    cc_plate(c, G_UP, (c.w - p) / 2.0, py, p, c.plate(), c.text2());
+                    cc_plate(c, G_APPS, (c.w - p) / 2.0, py, p, c.plate(), c.text2());
                     c.text_base("No background apps", c.w / 2.0, py + p + 24.0, style::TITLE.size, 600, c.text1(), Align::Center, c.w - 2.0 * m);
                     c.text_base("Apps that run beside the clock show here", c.w / 2.0, py + p + 42.0, style::FOOT.size, 400, c.text2(), Align::Center, c.w - 2.0 * m);
                 } else {
@@ -11265,11 +11297,12 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 }
                 return;
             }
-            let (cols, rows, s) = if sh == Shape::Large { (6usize, 4usize, 24.0) } else { (7, 1, 22.0) };
-            // First row centred on y 62 (as Medium); Large spreads its rows to the bottom margin.
+            let (cols, rows, s) = if sh == Shape::Large { (7usize, 3usize, 24.0) } else { (7, 1, 22.0) };
+            // First row centred on y 62 (as Medium); Large packs its rows under it at the
+            // column pitch, so row and column gaps match and the grid reads as one block.
             let y0 = 62.0 - s / 2.0;
             let px = (c.w - 2.0 * m - s) / (cols - 1) as f32;
-            let py = if rows > 1 { (c.h - m - s - y0) / (rows - 1) as f32 } else { 0.0 };
+            let py = px;
             let (show, more) = split(cols * rows);
             for i in 0..show {
                 let (ix, iy) = (m + (i % cols) as f32 * px, y0 + (i / cols) as f32 * py);
@@ -11281,11 +11314,10 @@ fn tray(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 let (ix, iy) = (m + (i % cols) as f32 * px, y0 + (i / cols) as f32 * py);
                 more_chip(c, ix + s / 2.0, iy + s / 2.0, s, more, fs);
             }
-            // Large with rows to spare: a summary in the next row.
-            let used = (show + usize::from(more > 0)).div_ceil(cols);
-            if sh == Shape::Large && used < rows {
-                let cy = y0 + used as f32 * py + s / 2.0;
-                c.text_base(&format!("{} running", apps(n)), m, cy + c.cap_h(fs) / 2.0, fs, 400, c.text2(), Align::Left, c.w - 2.0 * m);
+            // Large: how to use the icons, pinned to the bottom margin (the header already
+            // counts them); any spare room falls between the grid and this hint.
+            if sh == Shape::Large {
+                c.text_base("Click to open, right-click for its menu", m, c.h - m, fs, 400, c.text3(), Align::Left, c.w - 2.0 * m);
             }
         }
     }
@@ -11315,7 +11347,7 @@ fn upd_view(x: &Ctx) -> Option<UpdView> {
     use laminar_sys::update::UpdateStatus as U;
     let v = |hero: String, dock: String, caption, dock_caption, third, attention, badge| UpdView { hero, dock, caption, dock_caption, third, attention, restart: false, badge, warn: false, ok: false };
     Some(match x.update? {
-        U::RestartRequired => UpdView { restart: true, ..v("Restart".into(), "Restart".into(), "to finish installing", "to finish", Some("Windows Update"), true, Some(None)) },
+        U::RestartRequired => UpdView { restart: true, ..v("Ready".into(), "Ready".into(), "to restart", "to restart", Some("Windows Update"), true, Some(None)) },
         U::Pending(n) => {
             let one = *n == 1;
             v(n.to_string(), n.to_string(), if one { "Update waiting" } else { "Updates waiting" }, if one { "update" } else { "updates" }, Some("Windows Update"), true, Some(Some(*n)))
@@ -11374,8 +11406,8 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                 skeleton(c, tx, (c.h - 10.0 * k) / 2.0, (60.0 * k).min(right - tx), 10.0 * k);
                 return;
             };
-            // Beside a Restart button the value says "Ready", so "Restart" isn't said twice.
-            let (dock, dcap) = if wide && restart { ("Ready", "to restart") } else { (v.dock.as_str(), v.dock_caption) };
+            // One wording at every size: "Ready / to restart".
+            let (dock, dcap) = (v.dock.as_str(), v.dock_caption);
             let role = Type { size: style::VALUE.size * k, ..style::VALUE };
             let (val, fs) = fit_value(c, dock, role, right - tx);
             c.text_base(&val, tx, 30.0 * k, fs, role.weight, c.text1(), Align::Left, c.w * 2.0);
@@ -11423,8 +11455,8 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     if v.badge.is_some() {
                         count_badge(c, bx + bs - 1.0, by + 1.0, 8.0, None);
                     }
-                    // Beside the Restart button the hero says "Ready", so "Restart" isn't said twice.
-                    let (hero, cap) = if restart { ("Ready", "Restart to finish") } else { (v.hero.as_str(), v.caption) };
+                    // One wording at every size: "Ready / to restart".
+                    let (hero, cap) = (v.hero.as_str(), v.caption);
                     let (val, fs) = fit_value(c, hero, style::HERO, c.w - 2.0 * m - bs - style::SP[3]);
                     c.text_cap(&val, m, m, fs, style::HERO.weight, c.text1(), Align::Left, c.w * 2.0);
                     let bw = if restart { 88.0 } else { 0.0 };
@@ -11445,9 +11477,9 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
                     c,
                     out,
                     vec![
-                        ("Open Windows Update", "", open),
-                        ("Update history", "", WAct::Open("ms-settings:windowsupdate-history".into())),
-                        ("Advanced options", "", WAct::Open("ms-settings:windowsupdate-options".into())),
+                        (G_UPDATE, "Open Windows Update", "", open),
+                        (G_HISTORY, "Update history", "", WAct::Open("ms-settings:windowsupdate-history".into())),
+                        (G_SETTINGS, "Advanced options", "", WAct::Open("ms-settings:windowsupdate-options".into())),
                     ],
                     style::DETAIL_TOP,
                 );
@@ -11461,7 +11493,9 @@ fn win_update(c: &Canvas, out: &mut Painted, x: &Ctx, sh: Shape) {
 fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
     let open = |p: &str| WAct::Open(format!("ms-settings:{p}"));
     out.hits.push(((0.0, 0.0, c.w, c.h), open("")));
-    let shortcuts = [(G_SCREEN, "display"), (G_VOL, "sound"), (G_WIFI, "network"), (G_BT, "bluetooth")];
+    // One ordered list of pages: the buttons take the first three, Large's rows the rest
+    // (Bluetooth, Apps), so every bigger size is a superset of the smaller one.
+    let shortcuts = [(G_SCREEN, "display"), (G_VOL, "sound"), (G_WIFI, "network")];
     let (pf, pi) = (c.plate(), c.text1());
     // Round secondary buttons from the right edge `right`, centred on `cy`.
     let buttons = |out: &mut Painted, n: usize, right: f32, cy: f32, d: f32, gap: f32, hit: f32| {
@@ -11517,8 +11551,8 @@ fn win_settings(c: &Canvas, out: &mut Painted, sh: Shape) {
                     c,
                     out,
                     &[
-                        row(G_APPS, "Apps", Trail::Go(open("appsfeatures"))),
                         row(G_BT, "Bluetooth & devices", Trail::Go(open("bluetooth"))),
+                        row(G_APPS, "Apps", Trail::Go(open("appsfeatures"))),
                         row(G_PALETTE, "Personalisation", Trail::Go(open("personalization"))),
                     ],
                 );
