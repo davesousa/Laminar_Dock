@@ -529,3 +529,77 @@ Dave asked for a showcase README with screenshots and animation that "sells" the
 Found while capturing (not fixed): a running app that isn't pinned can show its file name as the hover label (`slack.exe` instead of Slack).
 
 ⚠️ Not checked on github.com itself until pushed: rendering was previewed locally with GitHub's stylesheet, marked and Mermaid. Badges were live (v0.2.5, download count).
+
+### Landing page website (2026-11-16, `site/`, not published)
+
+A one-page scroll site that sells Laminar on its four headline facts: free, open source, 100+ widgets, and 0% idle CPU with under 30 MB of memory. It has no build step. Maintenance notes are in [`site/README.md`](../site/README.md).
+
+| Decision | Why |
+| --- | --- |
+| The site's navigation is a working Laminar dock (same cosine magnification as `prototype/js/dock.js`) | The product demonstrates itself on every screen. The Make it yours sliders reshape that dock live. |
+| Web replicas instead of video | Launchpad, search, stacks, previews and the widget wall are HTML/SVG built from the original icon set, so they stay sharp and stay true to the app's layout. |
+| Download goes straight to `releases/latest/download/LaminarDock-win-Setup.exe` | It's always the newest installer, with no releases page in between. The repo was renamed `Laminar_Dock`; the old `Better-Bar` URLs still redirect. |
+| Signing fund meter driven by one number (`fund.raisedUSD` in `site/js/config.js`) | A static site can't see donations, so the total is updated by hand. Each full $10 drops below the bar as one month line. |
+
+Checked in the in-app browser at 1440×900 and 390×844: every act renders, no horizontal overflow, the version lookup from the GitHub API works, and the thank-you dialog opens on download with the meter (tested with `?raised=37`: $7 of $10 and 3 months covered). The real download was stubbed during testing. ⚠️ Not yet checked: real-speed motion (the hidden browser pane ran at 2 fps, so scenes were stepped by setting their progress), reduced-motion mode in a browser, Safari and Firefox, and real phones. Donations go through GitHub Sponsors (Dave's choice, 2026-11-16): the buttons link to `github.com/sponsors/davesousa` and `.github/FUNDING.yml` adds the repo's Sponsor button. ⚠️ Not working yet: the Sponsors profile isn't set up, so that address redirects to the GitHub profile until GitHub approves it.
+
+Website, round two (2026-11-16, Dave's feedback): the type is now Geist (the app replicas keep Segoe UI Variable). The hero is now centred copy above the real dock, shown large, which settles into the navigation as you scroll. The navigation dock was rebuilt to work like `dock.rs`: the shelf height is fixed, icons grow up out of it from their bottom-left corner, the shelf widens and slides so the icon under the pointer stays put, the cosine range is 2.6, and Amount eases in over 160 ms and out over 260 ms with cubic-bezier(.25,.8,.25,1). It changes transforms only. Every app icon was redrawn as one v2 set, and the Start mark copies `start_tile`, including its hover sheen. It's used in the dock and on the Windows keycap. Donations ask for any amount against a $10/month goal. There are four logo concepts in `site/brand/` (following the process of the public `neonwatty/logo-designer-skill`, since no logo skill is installed here). Concept B is in place until Dave picks one. Checked at 1440×900 and 390×844 in the in-app browser, including synthetic pointer magnification. ⚠️ Real mouse feel at full frame rate is untested because the pane was hidden.
+
+New logo, Glass L (2026-11-16, Dave's pick): two rounded bars overlap like panes of glass, and the overlap is left clear. It was made with the kaankiziltug logo-design skill's process (brief, category check, concepts in black, `svg_audit`, readings and size tests, checkpoint, kit). Masters, Laminar Blue `#3366FF`, rules and exports are in `docs/brand/`. The site now uses it for the logo, favicon and touch icon. Still on the old logo: the app's own icon, the README banner, and the installer icon.
+
+Website fixes from Dave's screenshots (2026-11-16):
+
+- **Blur:** the hero dock was scaled with a transform, and items carried `will-change: transform`, so Chrome enlarged a bitmap. The hero dock is now laid out at its real larger size, and the hints are removed from the dock and the widget wall.
+- **Stats:** the four stats now run full width with each label on one line.
+- **Attention dot:** the chat icon's own running dot is green and pulsing, with a label under the dock pointing up at it.
+- **Make it yours:** the card follows radius, tint, icon size, spacing and light/dark. These use a new `--dock-rgb`, so light mode no longer recolours the other replicas.
+- **Receipt:** it prints once its top edge enters the view, instead of scrubbing over a long scroll.
+- **Caching:** scripts and the stylesheet now load with `?v=4`; bump it after edits.
+
+The website moved to a private repo (2026-11-17). Its source now lives in `../laminar-site` (GitHub: `davesousa/Laminar-Site`, private), so it is not part of this public repo. It will be hosted on Cloudflare Pages; deploy steps are in that repo's README. The `site` preview in `.claude/launch.json` serves that folder, and the Tailscale preview (port 8443 on the dev PC) still points at port 5181. Anyone can still view the live page's HTML, CSS and JS in their browser; only the repo and its history are private.
+
+### Stacks audit and polish (2026-11-23, branch `widget-polish`, not released)
+
+Dave's request: stacks "kind of suck"; you couldn't right-click an app in a stack or take one out. The HTML prototype (`prototype/js/stacks.js`) already had both; the native dock never got them.
+
+| Problem | Fix |
+| --- | --- |
+| Right-clicking an app in an open stack did nothing | It opens the app's menu, and the stack stays open behind it: its windows (if running), **Open** or **Open New Window**, **Move to Dock**, **Move to "other stack"**, **Remove from Stack**, **Close Window**. Right-clicking the stack's title or background opens the stack's own menu (Rename, Ungroup, Remove from Dock). |
+| No way to take an app out of a stack | **Remove from Stack** in that menu, or drag the app out of the panel. The dock takes over the drag. Drop it in the dock to pin it there, on another stack or app to move it, back on its own stack to change nothing, or anywhere else to take it out (a puff, like dragging a pin off the dock). A stack left with one app becomes that app, and an empty one goes, as in the prototype. |
+| Couldn't tell which apps in a stack were open | A running dot under the app's name, as in the dock. |
+| Shift+click / middle-click for a new window did nothing (the dock menu advertised "Shift+Click", and this log said middle-click worked) | Both now open a new window from the dock and from a stack. |
+| Clicking a second stack while one was open only closed the first | It switches to the second. |
+| Every new stack was called "New Stack", so **Move to** menus showed duplicates | New stacks get "New Stack 2", "New Stack 3"… **New Stack** from an app's menu opens the stack with the name selected, ready to type. |
+| A big stack grew off the top of the screen | The grid adds columns once the rows wouldn't fit above the dock. |
+| No keyboard use | Arrow keys, Home and End move the highlight, Enter opens. |
+| Rename from the stack's own menu reopened the stack | It renames in place. |
+
+How: `stack.rs` reports `OpenNew` and `DragOut` events, offers `app_at` for right-clicks, and can redraw in place (`show(…, animate: false)` at the remembered anchor). `dock.rs` builds the in-stack menus (`stack_popup_menu`), does every "app leaves a stack" change in one place (`take_out_of_stack`), and marks a drag that came out of a stack (`Drag::from_stack`). `Pin::without_app`, `dedupe_pins` and `new_stack_name` in `config.rs` have unit tests. The stack stays open under its menu because its "lost focus" notice arrives while the dock is busy and is skipped. Choosing an item gives focus back to the stack, and clicking elsewhere closes both.
+
+Checked (agent, 2026-11-23, debug test dock beside Dave's running dock: `--demo stack`, `APPDATA` pointed at a scratch folder so Dave's `config.json` was never touched, `LAMINAR_TESTCTL` pointer, captures by `PrintWindow`): builds with 0 warnings. `cargo test -p laminar`: 17 pass, including the 3 new ones. The 1 failure is `real_searches`, the timing check in Launchpad search, which fails in debug builds, failed before this work, and is unrelated. Driven through the test driver, with the saved `config.json` checked after each step:
+
+- the app menu
+- Remove from Stack (the stack redraws in place)
+- Move to Dock (pinned right after the stack)
+- Move to another stack (no duplicate)
+- dragging out into a dock gap (a 2-app stack became its last app)
+- dragging back onto its own stack (no change)
+- dragging out and dropping away (taken out)
+- the stack menu → Rename in place
+- arrow keys
+- switching stacks
+- a 20-app stack (5 rows of 4)
+- New Stack opening with its name selected
+- running dots
+
+⚠️ Not checked:
+
+- with a real mouse and real animation speed
+- Shift+click and middle-click (not run, so no apps were launched on Dave's desktop)
+- the column growth with 40+ apps
+- light theme
+
+Not done:
+
+- The prototype's Fan view and its "Add apps from Launchpad…" footer.
+- An app in a stack that's no longer installed still shows its raw id with no icon.

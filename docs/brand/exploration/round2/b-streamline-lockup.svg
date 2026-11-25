@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 256" width="900" height="256" role="img" aria-labelledby="title">
+  <title id="title">Laminar lockup (exploration: live text)</title>
+  <g id="symbol" fill="#000" transform="translate(-8 8)"><path d="M46 40 V106 A104 104 0 0 0 150 210 H216 A10 10 0 0 0 216 190 H150 A84 84 0 0 1 66 106 V40 A10 10 0 0 0 46 40 Z M80 40 V106 A70 70 0 0 0 150 176 H216 A10 10 0 0 0 216 156 H150 A50 50 0 0 1 100 106 V40 A10 10 0 0 0 80 40 Z M114 40 V106 A36 36 0 0 0 150 142 H216 A10 10 0 0 0 216 122 H150 A16 16 0 0 1 134 106 V40 A10 10 0 0 0 114 40 Z"/></g>
+  <text id="wordmark" x="268" y="170" font-family="Segoe UI Variable Display, Segoe UI, Arial, sans-serif" font-size="128" font-weight="600" letter-spacing="-5" fill="#000">Laminar</text>
+</svg>

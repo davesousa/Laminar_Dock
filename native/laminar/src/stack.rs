@@ -1,14 +1,20 @@
 //! Stack pop-up: a glass grid of the apps in a dock stack (folder).
 //!
-//! - Click an app to open it.
+//! - Click an app to open it; Shift+click or middle-click opens a new window.
+//! - Right-click an app for its menu (Remove from Stack, Move to Dock…); right-click the
+//!   title or background for the stack's own menu. (The dock builds both menus.)
 //! - Drag an app within the grid to reorder; the others glide aside to make room.
+//!   Drag it out of the panel to carry it to the dock (or drop it away to remove it).
+//! - Arrow keys move the highlight, Enter opens.
 //! - Click the title (or choose **Rename Stack…** on the dock) to rename it inline:
 //!   type, Enter saves, Esc cancels, clicking elsewhere saves.
 
 use windows::core::{Interface, Result};
 use windows::UI::Composition::*;
 use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VK_BACK, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+};
 
 use crate::gfx::{Gfx, TextStyle};
 use crate::ui::{self, hs, ms, rgba, theme, v2, v3, Popup};
@@ -16,10 +22,17 @@ use crate::ui::{self, hs, ms, rgba, theme, v2, v3, Popup};
 /// What the dock should do after a stack pop-up interaction.
 pub enum StackEvent {
     Open(String),
+    /// Open another window of the app (Shift+click, middle-click).
+    OpenNew(String),
     /// The stack's apps in their new order.
     Reorder(Vec<String>),
     Rename(String),
+    /// An app was dragged out of the panel: the dock takes over the drag.
+    DragOut(String),
 }
+
+/// How far (px at 100%) the pointer must leave the panel before a dragged app comes out.
+const DRAG_OUT: f32 = 14.0;
 
 struct Cell {
     id: String,
@@ -48,6 +61,7 @@ struct Grid {
     top: f32,
     cw: f32,
     ch: f32,
+    cols: usize,
 }
 
 const MAX_NAME: usize = 40;
@@ -79,12 +93,17 @@ pub struct StackView {
     /// Clickable title area (content coordinates: x, y, w, h).
     title_rect: (f32, f32, f32, f32),
     edit: Option<Edit>,
+    /// Where the pop-up was anchored (icon centre x, bottom, monitor), so it can be
+    /// redrawn in place after a change.
+    pub anchor: (i32, i32, RECT),
 }
 
 pub struct StackApp<'a> {
     pub id: &'a str,
     pub name: &'a str,
     pub brush: Option<&'a CompositionSurfaceBrush>,
+    /// The app has a window open (a dot under its name, as in the dock).
+    pub running: bool,
 }
 
 impl StackView {
@@ -109,6 +128,7 @@ impl StackView {
             title_max_w: 0.0,
             title_rect: (0.0, 0.0, 0.0, 0.0),
             edit: None,
+            anchor: (0, 0, RECT::default()),
         })
     }
 
@@ -129,10 +149,12 @@ impl StackView {
         bottom: i32,
         scale: f32,
         monitor: RECT,
+        animate: bool,
     ) -> Result<()> {
         let s = scale;
         self.scale = s;
         self.pin = pin;
+        self.anchor = (icon_x, bottom, monitor);
         self.cells.clear();
         self.hover = None;
         self.press = None;
@@ -140,11 +162,15 @@ impl StackView {
         self.edit = None;
         self.name = name.to_string();
         let n = apps.len().max(1);
-        let cols = n.min(4);
-        let rows = n.div_ceil(4);
         let (cw, ch) = ((92.0 * s).round(), (96.0 * s).round());
         let pad = 14.0 * s;
         let head = 40.0 * s;
+        // Four across; add columns when the rows wouldn't fit above the dock.
+        let room_h = (bottom - monitor.top) as f32 - 24.0 * s - (pad + head + pad * 0.6);
+        let max_rows = ((room_h / ch).floor() as usize).max(1);
+        let max_cols = ((((monitor.right - monitor.left) as f32 - 48.0 * s - 2.0 * pad) / cw).floor() as usize).max(1);
+        let cols = n.div_ceil(max_rows).max(4).min(max_cols).min(n);
+        let rows = n.div_ceil(cols);
         let w = (pad * 2.0 + cols as f32 * cw).max(240.0 * s).round();
         let h = (pad + head + rows as f32 * ch + pad * 0.6).round();
 
@@ -171,7 +197,7 @@ impl StackView {
         ct.SetOffset(v3(w - pad - cw2 - 4.0 * s, pad + (head - cth) / 2.0 - 4.0 * s, 0.0))?;
         panel.content.Children()?.InsertAtTop(&ct)?;
 
-        self.grid = Grid { gx: (w - cols as f32 * cw) / 2.0, top: pad + head, cw, ch };
+        self.grid = Grid { gx: (w - cols as f32 * cw) / 2.0, top: pad + head, cw, ch, cols };
         let (hl, _, _) = ui::rounded(c, cw - 6.0 * s, ch - 6.0 * s, 14.0 * s, theme::fill_2())?;
         hl.SetOpacity(0.0)?;
         panel.content.Children()?.InsertAtTop(&hl)?;
@@ -197,9 +223,16 @@ impl StackView {
                 sp.SetOffset(v3(((cw - icon) / 2.0).round(), 6.0 * s, 0.0))?;
                 vis.Children()?.InsertAtTop(&sp)?;
             }
-            let (lab, lw, _) = ui::text(c, gfx, a.name, &TextStyle { px: 11.5 * s, max_w: Some(cw - 8.0 * s), ..Default::default() })?;
-            lab.SetOffset(v3(((cw - lw) / 2.0).round(), 6.0 * s + icon + 6.0 * s, 0.0))?;
+            let (lab, lw, lh) = ui::text(c, gfx, a.name, &TextStyle { px: 11.5 * s, max_w: Some(cw - 8.0 * s), ..Default::default() })?;
+            let ly = 6.0 * s + icon + 6.0 * s;
+            lab.SetOffset(v3(((cw - lw) / 2.0).round(), ly, 0.0))?;
             vis.Children()?.InsertAtTop(&lab)?;
+            if a.running {
+                let d = (4.0 * s).round().max(3.0);
+                let (dot, _, _) = ui::rounded(c, d, d, d / 2.0, theme::ink(0.75))?;
+                dot.SetOffset(v3(((cw - d) / 2.0).round(), (ly + lh + 3.0 * s).round().min(ch - d - 2.0 * s), 0.0))?;
+                vis.Children()?.InsertAtTop(&dot)?;
+            }
             panel.content.Children()?.InsertAtTop(&vis)?;
             self.cells.push(Cell { id: a.id.to_string(), vis });
         }
@@ -209,13 +242,17 @@ impl StackView {
         let left = icon_x - ww / 2;
         let top = bottom - wh + m as i32;
         let r = ui::clamp_rect(RECT { left, top, right: left + ww, bottom: top + wh }, monitor);
-        // Spring up out of the dock.
-        let cx = (icon_x - r.left) as f32 - m;
-        panel.body.SetCenterPoint(v3(cx, h, 0.0))?;
-        let body: CompositionObject = panel.body.cast()?;
-        ui::animate_v3_from(c, &body, "Scale", v3(0.85, 0.85, 1.0), v3(1.0, 1.0, 1.0), 260)?;
-        root.SetOpacity(0.0)?;
-        ui::animate_scalar(c, &root.cast()?, "Opacity", 1.0, 140)?;
+        if animate {
+            // Spring up out of the dock.
+            let cx = (icon_x - r.left) as f32 - m;
+            panel.body.SetCenterPoint(v3(cx, h, 0.0))?;
+            let body: CompositionObject = panel.body.cast()?;
+            ui::animate_v3_from(c, &body, "Scale", v3(0.85, 0.85, 1.0), v3(1.0, 1.0, 1.0), 260)?;
+            root.SetOpacity(0.0)?;
+            ui::animate_scalar(c, &root.cast()?, "Opacity", 1.0, 140)?;
+        } else {
+            root.SetOpacity(1.0)?;
+        }
         self.popup.show(r, true);
         self.open = true;
         Ok(())
@@ -236,7 +273,18 @@ impl StackView {
     /// Top-left of grid position k (content coordinates).
     fn slot_pos(&self, k: usize) -> (f32, f32) {
         let g = self.grid;
-        (g.gx + (k % 4) as f32 * g.cw, g.top + (k / 4) as f32 * g.ch)
+        let cols = g.cols.max(1);
+        (g.gx + (k % cols) as f32 * g.cw, g.top + (k / cols) as f32 * g.ch)
+    }
+
+    /// The app under a window point (for right-click), if any.
+    pub fn app_at(&self, x: f32, y: f32) -> Option<String> {
+        let (cx, cy) = self.to_content(x, y);
+        self.cell_at(cx, cy).map(|k| self.cells[k].id.clone())
+    }
+
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     /// Grid position under a content-coordinate point, if it's on an app.
@@ -251,11 +299,12 @@ impl StackView {
     fn nearest_slot(&self, x: f32, y: f32) -> usize {
         let g = self.grid;
         let n = self.cells.len();
-        let cols = n.min(4).max(1) as i32;
-        let rows = n.div_ceil(4).max(1) as i32;
+        let per_row = g.cols.max(1);
+        let cols = n.min(per_row).max(1) as i32;
+        let rows = n.div_ceil(per_row).max(1) as i32;
         let col = (((x - g.gx) / g.cw).floor() as i32).clamp(0, cols - 1);
         let row = (((y - g.top) / g.ch).floor() as i32).clamp(0, rows - 1);
-        ((row * 4 + col) as usize).min(n.saturating_sub(1))
+        ((row * per_row as i32 + col) as usize).min(n.saturating_sub(1))
     }
 
     /// True if a window point is in the transparent shadow margin, not on the panel.
@@ -328,10 +377,11 @@ impl StackView {
         ev
     }
 
-    pub fn on_move(&mut self, c: &Compositor, x: f32, y: f32) {
+    /// Pointer moved. Returns `DragOut` when a dragged app leaves the panel.
+    pub fn on_move(&mut self, c: &Compositor, x: f32, y: f32) -> Option<StackEvent> {
         let (cx, cy) = self.to_content(x, y);
         if let Some((k, px, py)) = self.press {
-            if self.drag.is_none() && ((cx - px).powi(2) + (cy - py).powi(2)).sqrt() > 6.0 * self.scale && self.cells.len() > 1 {
+            if self.drag.is_none() && ((cx - px).powi(2) + (cy - py).powi(2)).sqrt() > 6.0 * self.scale {
                 // Lift the app out of the grid.
                 let (sx, sy) = self.slot_pos(k);
                 self.drag = Some(Drag { from: k, slot: k, grab: (px - sx, py - sy) });
@@ -352,6 +402,13 @@ impl StackView {
         }
         if let Some(d) = &self.drag {
             let (from, grab, old_slot) = (d.from, d.grab, d.slot);
+            // Pulled out of the panel: hand the app to the dock (which shows its own ghost).
+            let out = DRAG_OUT * self.scale;
+            if cx < -out || cy < -out || cx > self.panel_size.0 + out || cy > self.panel_size.1 + out {
+                let id = self.cells[from].id.clone();
+                self.cancel_drag(c);
+                return Some(StackEvent::DragOut(id));
+            }
             let _ = self.cells[from].vis.SetOffset(v3(cx - grab.0, cy - grab.1, 0.0));
             // Drop position follows the centre of the dragged icon, not the pointer.
             let (mx, my) = (cx - grab.0 + self.grid.cw / 2.0, cy - grab.1 + self.grid.ch / 2.0);
@@ -364,13 +421,15 @@ impl StackView {
                 let order = self.order_for(d);
                 self.layout(c, &order, Some(from));
             }
-            return;
+            return None;
         }
         let h = self.cell_at(cx, cy);
         self.set_highlight(c, h);
+        None
     }
 
-    pub fn on_up(&mut self, c: &Compositor, x: f32, y: f32) -> Option<StackEvent> {
+    /// Button up. `new_window`: Shift was held (or it was the middle button).
+    pub fn on_up(&mut self, c: &Compositor, x: f32, y: f32, new_window: bool) -> Option<StackEvent> {
         let (cx, cy) = self.to_content(x, y);
         let press = self.press.take();
         if let Some(d) = self.drag.take() {
@@ -389,9 +448,17 @@ impl StackView {
             return Some(StackEvent::Reorder(self.cells.iter().map(|c| c.id.clone()).collect()));
         }
         match (press, self.cell_at(cx, cy)) {
-            (Some((k, _, _)), Some(j)) if k == j => Some(StackEvent::Open(self.cells[k].id.clone())),
+            (Some((k, _, _)), Some(j)) if k == j => {
+                let id = self.cells[k].id.clone();
+                Some(if new_window { StackEvent::OpenNew(id) } else { StackEvent::Open(id) })
+            }
             _ => None,
         }
+    }
+
+    /// Middle-click: a new window of the app under the pointer.
+    pub fn on_middle(&mut self, x: f32, y: f32) -> Option<StackEvent> {
+        self.app_at(x, y).map(StackEvent::OpenNew)
     }
 
     /// Mouse capture lost mid-drag: put everything back.
@@ -452,7 +519,7 @@ impl StackView {
     /// Keys while the pop-up has focus. Returns (handled, event).
     pub fn key_down(&mut self, c: &Compositor, gfx: &Gfx, vk: u16) -> (bool, Option<StackEvent>) {
         if self.edit.is_none() {
-            return (false, None);
+            return self.key_nav(c, vk);
         }
         if vk == VK_RETURN.0 {
             return (true, self.commit_rename(c, gfx));
@@ -476,6 +543,38 @@ impl StackView {
             return (true, None);
         }
         let _ = self.render_title(c, gfx);
+        (true, None)
+    }
+
+    /// Arrow keys move the highlight through the grid; Enter or Space opens it.
+    fn key_nav(&mut self, c: &Compositor, vk: u16) -> (bool, Option<StackEvent>) {
+        let n = self.cells.len();
+        if n == 0 || self.drag.is_some() {
+            return (false, None);
+        }
+        let cols = self.grid.cols.max(1) as i32;
+        let step = if vk == VK_LEFT.0 {
+            -1
+        } else if vk == VK_RIGHT.0 {
+            1
+        } else if vk == VK_UP.0 {
+            -cols
+        } else if vk == VK_DOWN.0 {
+            cols
+        } else if vk == VK_HOME.0 {
+            -(n as i32)
+        } else if vk == VK_END.0 {
+            n as i32
+        } else if vk == VK_RETURN.0 || vk == VK_SPACE.0 {
+            return (true, self.hover.map(|k| StackEvent::Open(self.cells[k].id.clone())));
+        } else {
+            return (false, None);
+        };
+        let next = match self.hover {
+            None => 0,
+            Some(k) => (k as i32 + step).clamp(0, n as i32 - 1) as usize,
+        };
+        self.set_highlight(c, Some(next));
         (true, None)
     }
 

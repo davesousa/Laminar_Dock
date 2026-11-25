@@ -69,6 +69,39 @@ impl Pin {
             _ => None,
         }
     }
+
+    /// This pin with `id` taken out of it, if it's a stack. A stack left with one app
+    /// becomes that app; an empty one goes (None). Other pins come back unchanged.
+    pub fn without_app(self, id: &str) -> Option<Pin> {
+        match self {
+            Pin::Stack { stack, mut apps } => {
+                apps.retain(|a| !a.eq_ignore_ascii_case(id));
+                match apps.len() {
+                    0 => None,
+                    1 => apps.pop().map(Pin::Id),
+                    _ => Some(Pin::Stack { stack, apps }),
+                }
+            }
+            other => Some(other),
+        }
+    }
+}
+
+/// Drop repeated app pins, keeping the first (e.g. after a stack shrank to an app that
+/// was already in the dock).
+pub fn dedupe_pins(pins: &mut Vec<Pin>) {
+    let mut seen = std::collections::HashSet::new();
+    pins.retain(|p| p.app().map(|a| seen.insert(a.to_lowercase())).unwrap_or(true));
+}
+
+/// "New Stack", or "New Stack 2", "New Stack 3"… if that name is taken, so stacks can be
+/// told apart in menus like **Move to "New Stack"**.
+pub fn new_stack_name(pins: &[Pin]) -> String {
+    let taken = |n: &str| pins.iter().any(|p| matches!(p, Pin::Stack { stack, .. } if stack == n));
+    if !taken("New Stack") {
+        return "New Stack".into();
+    }
+    (2..).map(|k| format!("New Stack {k}")).find(|n| !taken(n)).unwrap_or_default()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -327,5 +360,37 @@ mod tests {
         c.launchpad_widgets.push(WRef::Id("no-such-widget".into()));
         c = c.sanitized();
         assert!(!c.launchpad_widgets.iter().any(|w| w.id() == "no-such-widget"));
+    }
+
+    fn stack(name: &str, apps: &[&str]) -> Pin {
+        Pin::Stack { stack: name.into(), apps: apps.iter().map(|a| a.to_string()).collect() }
+    }
+
+    #[test]
+    fn taking_apps_out_of_a_stack() {
+        // Three apps: the stack stays, minus the one taken out.
+        assert_eq!(stack("S", &["a", "b", "c"]).without_app("b"), Some(stack("S", &["a", "c"])));
+        // Two apps: the stack becomes the app that's left.
+        assert_eq!(stack("S", &["a", "b"]).without_app("a"), Some(Pin::Id("b".into())));
+        // One app: the stack goes.
+        assert_eq!(stack("S", &["a"]).without_app("a"), None);
+        // Case doesn't matter (exe paths), and other pins pass through untouched.
+        assert_eq!(stack("S", &["A", "b", "c"]).without_app("a"), Some(stack("S", &["b", "c"])));
+        assert_eq!(Pin::Id("a".into()).without_app("a"), Some(Pin::Id("a".into())));
+        assert_eq!(Pin::sep().without_app("|"), Some(Pin::sep()));
+    }
+
+    #[test]
+    fn repeated_app_pins_are_dropped() {
+        let mut pins = vec![Pin::Id("a".into()), Pin::sep(), stack("S", &["a", "b"]), Pin::sep(), Pin::Id("A".into()), Pin::Id("b".into())];
+        dedupe_pins(&mut pins);
+        assert_eq!(pins, vec![Pin::Id("a".into()), Pin::sep(), stack("S", &["a", "b"]), Pin::sep(), Pin::Id("b".into())]);
+    }
+
+    #[test]
+    fn new_stacks_get_unique_names() {
+        assert_eq!(new_stack_name(&[]), "New Stack");
+        assert_eq!(new_stack_name(&[stack("New Stack", &["a", "b"])]), "New Stack 2");
+        assert_eq!(new_stack_name(&[stack("New Stack", &[]), stack("New Stack 2", &[])]), "New Stack 3");
     }
 }

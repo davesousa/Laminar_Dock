@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Laminar</title>
+  <defs><clipPath id="v"><path d="M76.0 30H76.0A32.0 32.0 0 0 1 108 62.0V190.0A32.0 32.0 0 0 1 76.0 222H76.0A32.0 32.0 0 0 1 44 190.0V62.0A32.0 32.0 0 0 1 76.0 30Z"/></clipPath></defs>
+  <g id="symbol"><path fill="#3366FF" fill-rule="evenodd" d="M76.0 30H76.0A32.0 32.0 0 0 1 108 62.0V190.0A32.0 32.0 0 0 1 76.0 222H76.0A32.0 32.0 0 0 1 44 190.0V62.0A32.0 32.0 0 0 1 76.0 30Z M76.0 158H180.0A32.0 32.0 0 0 1 212 190.0V190.0A32.0 32.0 0 0 1 180.0 222H76.0A32.0 32.0 0 0 1 44 190.0V190.0A32.0 32.0 0 0 1 76.0 158Z"/><path fill="#3366FF" fill-opacity=".4" clip-path="url(#v)" d="M76.0 158H180.0A32.0 32.0 0 0 1 212 190.0V190.0A32.0 32.0 0 0 1 180.0 222H76.0A32.0 32.0 0 0 1 44 190.0V190.0A32.0 32.0 0 0 1 76.0 158Z"/></g>
+</svg>

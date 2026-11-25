@@ -86,6 +86,8 @@ const WM_APP_UPDATE: u32 = WM_APP + 7;
 /// so the dock can be exercised (and captured with PrintWindow) without a real mouse,
 /// for example while the session is locked.
 const WM_APP_TESTCTL: u32 = WM_APP + 40;
+/// Mouse-message wParam flag: Shift was held.
+const MK_SHIFT: usize = 0x0004;
 
 /// A window that belongs to this process (Launchpad, menus, previews, the dock itself).
 fn is_own_window(h: HWND) -> bool {
@@ -149,6 +151,10 @@ const CMD_STACK_UNGROUP: usize = 32;
 const CMD_STACK_REMOVE: usize = 33;
 const CMD_NEW_STACK: usize = 34;
 const CMD_STACK_RENAME: usize = 35;
+// Right-click on an app inside an open stack.
+const CMD_STACK_APP_OPEN: usize = 36;
+const CMD_STACK_APP_TO_DOCK: usize = 37;
+const CMD_STACK_APP_REMOVE: usize = 38;
 const CMD_ADD_TO_STACK_BASE: usize = 2000;
 const CMD_POWER_LOCK: usize = 40;
 const CMD_POWER_SIGNOUT: usize = 41;
@@ -411,6 +417,8 @@ struct Drag {
     ext: Option<String>,
     /// A widget dragged in from Launchpad: the pin to insert.
     ext_widget: Option<Pin>,
+    /// The app was dragged out of this stack (pin index): dropping it takes it out.
+    from_stack: Option<usize>,
 }
 
 /// The floating copy of an icon that follows the pointer while dragging.
@@ -501,6 +509,9 @@ struct Dock {
     stack_view: StackView,
     /// Stack (pin index) the open menu is about.
     menu_stack: Option<usize>,
+    /// (stack pin index, app id) the open menu is about, when it was opened on an app
+    /// inside an open stack.
+    menu_stack_app: Option<(usize, String)>,
     /// Launchpad and the data it shows (fetched by the services worker).
     launchpad: Launchpad,
     services: Services,
@@ -1770,8 +1781,9 @@ impl Dock {
     // ---------------------------------------------------------------- clicks
 
     /// Windows taskbar behaviour: launch if closed; bring to front if behind;
-    /// minimize (or cycle windows) if already in front.
-    fn on_click(&mut self, i: usize) {
+    /// minimize (or cycle windows) if already in front. `new_window` (Shift+click or
+    /// middle-click) launches another instance of an app instead.
+    fn on_click(&mut self, i: usize, new_window: bool) {
         self.hide_preview();
         let it = self.items[i].clone();
         // Opening or switching to something from the dock leaves Launchpad. (Clicking the
@@ -1786,7 +1798,9 @@ impl Dock {
             Kind::Separator => {}
             Kind::Widget => self.widget_click(i),
             Kind::Stack => {
-                if self.stack_view.open {
+                // Clicking the open stack closes it; clicking another one switches to it.
+                let this = self.stack_of(&it.key).map(|v| v.0);
+                if self.stack_view.open && Some(self.stack_view.pin) == this {
                     self.stack_view.hide();
                 } else {
                     self.open_stack(i);
@@ -1795,7 +1809,7 @@ impl Dock {
             Kind::App => {
                 let wins = self.item_windows(&it);
                 let fg = tracker::foreground();
-                if wins.is_empty() {
+                if wins.is_empty() || new_window {
                     let _ = self.bounce(i);
                     apps::launch(&it.key);
                 } else if wins.iter().any(|w| w.hwnd == fg) {
@@ -1913,6 +1927,7 @@ impl Dock {
 
         self.hide_preview();
         self.stack_view.hide();
+        self.menu_stack_app = None;
         if !item.as_ref().map(|it| it.kind == Kind::Stack).unwrap_or(false) {
             self.menu_stack = None;
         }
@@ -2234,10 +2249,41 @@ impl Dock {
             return;
         }
         let (item, wins) = self.menu_ctx.take().unwrap_or((None, Vec::new()));
+        // Opened on an app inside an open stack.
+        let in_stack = self.menu_stack_app.take();
+        if in_stack.is_some() && (cmd == CMD_NEW || cmd == CMD_STACK_APP_OPEN || (CMD_WINDOW_BASE..CMD_WINDOW_BASE + 8).contains(&cmd)) {
+            self.stack_view.hide(); // going to the app
+        }
         match cmd {
             CMD_NEW => {
                 if let Some(it) = &item {
                     apps::launch(&it.key);
+                }
+            }
+            CMD_STACK_APP_OPEN => {
+                if let Some((_, id)) = &in_stack {
+                    self.open_app(id);
+                }
+            }
+            CMD_STACK_APP_REMOVE => {
+                if let Some((pin, id)) = in_stack {
+                    self.take_out_of_stack(pin, &id, |_, _| {});
+                }
+            }
+            CMD_STACK_APP_TO_DOCK => {
+                // Out of the stack and pinned just after it (an existing pin of the app
+                // further along moves here; one earlier in the dock stays where it is).
+                if let Some((pin, id)) = in_stack {
+                    let app = id.clone();
+                    self.take_out_of_stack(pin, &id, move |pins, at| {
+                        if let Some(k) = pins.iter().position(|p| p.app().map(|a| a.eq_ignore_ascii_case(&app)).unwrap_or(false)) {
+                            if k < at {
+                                return;
+                            }
+                            pins.remove(k);
+                        }
+                        pins.insert(at.min(pins.len()), Pin::Id(app));
+                    });
                 }
             }
             CMD_PIN => {
@@ -2368,7 +2414,11 @@ impl Dock {
             }
             CMD_STACK_RENAME => {
                 if let Some(n) = self.menu_stack.take() {
-                    if let Some(i) = self.items.iter().position(|it| it.key == format!("::stack{n}")) {
+                    if self.stack_view.open && self.stack_view.pin == n {
+                        // Chosen inside the open stack: rename it where it is.
+                        let c = self.compositor.clone();
+                        self.stack_view.begin_rename(&c, &self.gfx);
+                    } else if let Some(i) = self.items.iter().position(|it| it.key == format!("::stack{n}")) {
                         self.open_stack(i);
                         if self.stack_view.open {
                             let c = self.compositor.clone();
@@ -2386,6 +2436,7 @@ impl Dock {
                             c.pins.splice(n..n + 1, add);
                         }
                     });
+                    self.stack_view.hide();
                 }
             }
             CMD_STACK_REMOVE => {
@@ -2395,15 +2446,45 @@ impl Dock {
                             c.pins.remove(n);
                         }
                     });
+                    self.stack_view.hide();
                 }
             }
             CMD_NEW_STACK => {
                 if let Some(it) = item {
+                    let mut made = None;
                     self.save_and_apply(|c| {
                         if let Some(i) = c.pins.iter().position(|p| p.app() == Some(it.key.as_str())) {
-                            c.pins[i] = Pin::Stack { stack: "New Stack".into(), apps: vec![it.key.clone()] };
+                            c.pins[i] = Pin::Stack { stack: config::new_stack_name(&c.pins), apps: vec![it.key.clone()] };
+                            made = Some(i);
                         }
                     });
+                    // Open it with the name ready to type over.
+                    if let Some(i) = made.and_then(|n| self.items.iter().position(|it| it.key == format!("::stack{n}"))) {
+                        self.open_stack(i);
+                        if self.stack_view.open {
+                            let c = self.compositor.clone();
+                            self.stack_view.begin_rename(&c, &self.gfx);
+                        }
+                    }
+                }
+            }
+            c if c >= CMD_ADD_TO_STACK_BASE && in_stack.is_some() => {
+                // From inside a stack: move the app to another stack.
+                let n = c - CMD_ADD_TO_STACK_BASE;
+                let (src, id) = in_stack.unwrap();
+                if n != src && matches!(self.cfg.pins.get(n), Some(Pin::Stack { .. })) {
+                    let app = id.clone();
+                    // Add to the target first: taking it out may remove the source pin.
+                    if let Some(Pin::Stack { apps, .. }) = self.cfg.pins.get(n).cloned() {
+                        if !apps.iter().any(|a| a.eq_ignore_ascii_case(&app)) {
+                            self.save_and_apply(|cfg| {
+                                if let Some(Pin::Stack { apps, .. }) = cfg.pins.get_mut(n) {
+                                    apps.push(app);
+                                }
+                            });
+                        }
+                    }
+                    self.take_out_of_stack(src, &id, |_, _| {});
                 }
             }
             c if c >= CMD_ADD_TO_STACK_BASE => {
@@ -2442,6 +2523,7 @@ impl Dock {
         if let Some(c) = cmd {
             self.on_menu_command(c);
         }
+        self.menu_stack_app = None;
     }
 
     /// Messages for pop-up windows (menus, previews, stacks, Launchpad, Settings).
@@ -2655,8 +2737,11 @@ impl Dock {
             let (x, y) = lparam_xy(lp);
             let c = self.compositor.clone();
             match msg {
-                WM_MOUSEMOVE => self.stack_view.on_move(&c, x, y),
-                WM_LBUTTONDOWN | WM_RBUTTONDOWN if self.stack_view.outside(x, y) => {
+                WM_MOUSEMOVE => {
+                    let ev = self.stack_view.on_move(&c, x, y);
+                    self.stack_event(ev);
+                }
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if self.stack_view.outside(x, y) => {
                     // Clicked the invisible shadow margin: that's clicking away. Save a
                     // rename in progress and close, as for a click anywhere else.
                     let ev = self.stack_view.commit_rename(&c, &self.gfx);
@@ -2671,11 +2756,21 @@ impl Dock {
                     self.stack_event(ev);
                 }
                 WM_LBUTTONUP => {
-                    let ev = self.stack_view.on_up(&c, x, y);
+                    let ev = self.stack_view.on_up(&c, x, y, wp.0 & MK_SHIFT != 0);
                     unsafe {
                         let _ = ReleaseCapture();
                     }
                     self.stack_event(ev);
+                }
+                WM_MBUTTONUP => {
+                    let ev = self.stack_view.on_middle(x, y);
+                    self.stack_event(ev);
+                }
+                WM_RBUTTONUP if !self.stack_view.dragging() => {
+                    let ev = self.stack_view.commit_rename(&c, &self.gfx);
+                    self.stack_event(ev);
+                    let app = self.stack_view.app_at(x, y);
+                    self.stack_popup_menu(app);
                 }
                 WM_CAPTURECHANGED => self.stack_view.cancel_drag(&c),
                 WM_CHAR => {
@@ -2755,6 +2850,15 @@ impl Dock {
                     if (wp.0 & 0xFFFF) as u32 == WA_INACTIVE && self.menu.open {
                         // Clicked elsewhere: close without stealing focus back.
                         self.menu.hide(false);
+                        // A menu opened inside a stack: clicking anywhere but the stack
+                        // closes the stack too (it lost focus while the menu had it).
+                        if self.menu_stack_app.is_some() || self.stack_view.open {
+                            let to = HWND(lp.0 as *mut _);
+                            if to != self.stack_view.hwnd() {
+                                self.stack_view.hide();
+                            }
+                        }
+                        self.menu_stack_app = None;
                         self.menu_closed();
                     }
                 }
@@ -2771,26 +2875,140 @@ impl Dock {
 
     fn open_stack(&mut self, i: usize) {
         let it = self.items[i].clone();
-        let Some((pin, name, ids)) = self.stack_of(&it.key) else { return };
+        let Some((pin, _, _)) = self.stack_of(&it.key) else { return };
         self.hide_preview();
         let _ = self.show_label(None);
-        let names: Vec<String> = ids.iter().map(|a| self.names.get(a).cloned().unwrap_or_else(|| a.clone())).collect();
-        let brushes: Vec<Option<CompositionSurfaceBrush>> = ids.iter().map(|a| self.brushes.get(a).cloned()).collect();
-        let list: Vec<StackApp> = ids
-            .iter()
-            .zip(names.iter())
-            .zip(brushes.iter())
-            .map(|((id, name), b)| StackApp { id, name, brush: b.as_ref() })
-            .collect();
         let mut p = POINT::default();
         let _ = get_cursor_pos(&mut p);
         let win_top = self.monitor.bottom - self.geo.win_h as i32;
         let (cx, sc) = self.geo.slot_center((p.x - self.monitor.left) as f32, if self.hovering { 1.0 } else { 0.0 }, i);
         let icon_top = self.geo.y0 + self.geo.p + self.geo.b - self.geo.b * sc;
         let bottom = win_top + (icon_top - 8.0 * self.scale) as i32;
+        self.show_stack(pin, self.monitor.left + cx as i32, bottom, true);
+    }
+
+    /// Draw the stack pop-up for pin `pin` above the given point.
+    fn show_stack(&mut self, pin: usize, icon_x: i32, bottom: i32, animate: bool) {
+        let Some(Pin::Stack { stack: name, apps: ids }) = self.cfg.pins.get(pin).cloned() else {
+            self.stack_view.hide();
+            return;
+        };
+        for a in &ids {
+            self.ensure_brush(&Item { kind: Kind::App, key: a.clone(), pinned: true });
+        }
+        let names: Vec<String> = ids.iter().map(|a| self.names.get(a).cloned().unwrap_or_else(|| a.clone())).collect();
+        let brushes: Vec<Option<CompositionSurfaceBrush>> = ids.iter().map(|a| self.brushes.get(a).cloned()).collect();
+        let running: Vec<bool> = ids.iter().map(|a| !self.item_windows(&Item { kind: Kind::App, key: a.clone(), pinned: true }).is_empty()).collect();
+        let list: Vec<StackApp> = ids
+            .iter()
+            .zip(names.iter())
+            .zip(brushes.iter())
+            .zip(running.iter())
+            .map(|(((id, name), b), &running)| StackApp { id, name, brush: b.as_ref(), running })
+            .collect();
         let (c, gfx, bd) = (self.compositor.clone(), &self.gfx, self.backdrop.clone());
-        if let Err(e) = self.stack_view.show(&c, gfx, &bd, pin, &name, &list, self.monitor.left + cx as i32, bottom, self.scale, self.monitor) {
+        if let Err(e) = self.stack_view.show(&c, gfx, &bd, pin, &name, &list, icon_x, bottom, self.scale, self.monitor, animate) {
             trace!("stack failed: {e:?}");
+        }
+    }
+
+    /// Redraw the open stack in place after its apps changed (or close it if it's gone).
+    fn refresh_stack(&mut self) {
+        if !self.stack_view.open {
+            return;
+        }
+        let (x, bottom, _) = self.stack_view.anchor;
+        self.show_stack(self.stack_view.pin, x, bottom, false);
+    }
+
+    /// Right-click inside an open stack: the app's menu (`app`), or the stack's own.
+    fn stack_popup_menu(&mut self, app: Option<String>) {
+        let pin = self.stack_view.pin;
+        let Some(Pin::Stack { stack: name, .. }) = self.cfg.pins.get(pin).cloned() else { return };
+        let mut m: Vec<MenuItem> = Vec::new();
+        self.menu_ctx = None;
+        self.menu_stack = None;
+        self.menu_stack_app = None;
+        match app {
+            Some(id) => {
+                let it = Item { kind: Kind::App, key: id.clone(), pinned: true };
+                let wins = self.item_windows(&it);
+                m.push(MenuItem::header(self.names.get(&id).cloned().unwrap_or_else(|| id.clone())));
+                for (i, w) in wins.iter().enumerate().take(8) {
+                    let title = if w.title.chars().count() > 48 { format!("{}…", w.title.chars().take(47).collect::<String>()) } else { w.title.clone() };
+                    m.push(MenuItem::item(title, CMD_WINDOW_BASE + i).checked(w.hwnd == self.fg));
+                }
+                if !wins.is_empty() {
+                    m.push(MenuItem::sep());
+                    m.push(MenuItem::item("Open New Window", CMD_NEW).shortcut("Shift+Click"));
+                } else {
+                    m.push(MenuItem::item("Open", CMD_STACK_APP_OPEN));
+                }
+                m.push(MenuItem::sep());
+                m.push(MenuItem::item("Move to Dock", CMD_STACK_APP_TO_DOCK));
+                for (n, p) in self.cfg.pins.iter().enumerate() {
+                    if let Pin::Stack { stack, .. } = p {
+                        if n != pin {
+                            m.push(MenuItem::item(format!("Move to \u{201c}{stack}\u{201d}"), CMD_ADD_TO_STACK_BASE + n));
+                        }
+                    }
+                }
+                m.push(MenuItem::item("Remove from Stack", CMD_STACK_APP_REMOVE).danger());
+                if !wins.is_empty() {
+                    m.push(MenuItem::sep());
+                    let label = if wins.len() == 1 { "Close Window".to_string() } else { format!("Close All {} Windows", wins.len()) };
+                    m.push(MenuItem::item(label, CMD_CLOSE).danger());
+                }
+                self.menu_ctx = Some((Some(it), wins));
+                self.menu_stack_app = Some((pin, id));
+            }
+            None => {
+                m.push(MenuItem::header(name));
+                m.push(MenuItem::item("Rename Stack…", CMD_STACK_RENAME));
+                m.push(MenuItem::item("Ungroup Stack", CMD_STACK_UNGROUP));
+                m.push(MenuItem::item("Remove from Dock", CMD_STACK_REMOVE).danger());
+                self.menu_stack = Some(pin);
+            }
+        }
+        self.hide_preview();
+        self.menu_open = true;
+        let mut p = POINT::default();
+        let _ = get_cursor_pos(&mut p);
+        // The stack stays open underneath: its "lost focus" notice arrives while the dock
+        // is busy here, so it's skipped, and choosing an item hands focus back to it.
+        if let Err(e) = self.menu.show(&self.compositor, &self.gfx, &self.backdrop, m, p, false, self.scale, self.monitor) {
+            trace!("menu failed: {e:?}");
+            self.menu_open = false;
+            self.menu_stack_app = None;
+        }
+    }
+
+    /// Change the pins for an app leaving stack `pin` (it shrinks, becomes its last app,
+    /// or goes), then redraw or close the open stack.
+    /// `also` gets the new pins and the index just after where the stack was.
+    fn take_out_of_stack(&mut self, pin: usize, id: &str, also: impl FnOnce(&mut Vec<Pin>, usize)) {
+        let mut pins = self.cfg.pins.clone();
+        let Some(p @ Pin::Stack { .. }) = pins.get(pin).cloned() else { return };
+        let left = p.without_app(id);
+        let survives = matches!(left, Some(Pin::Stack { .. }));
+        let at = match left {
+            Some(np) => {
+                pins[pin] = np;
+                pin + 1
+            }
+            None => {
+                pins.remove(pin);
+                pin
+            }
+        };
+        also(&mut pins, at);
+        config::dedupe_pins(&mut pins);
+        trace!("stack {pin}: took out {id} (stack {})", if survives { "stays" } else { "gone" });
+        self.save_and_apply(|c| c.pins = pins);
+        if survives {
+            self.refresh_stack();
+        } else {
+            self.stack_view.hide();
         }
     }
 
@@ -2803,6 +3021,20 @@ impl Dock {
             Some(StackEvent::Open(id)) => {
                 self.stack_view.hide();
                 self.open_app(&id);
+            }
+            Some(StackEvent::OpenNew(id)) => {
+                self.stack_view.hide();
+                apps::launch(&id);
+            }
+            Some(StackEvent::DragOut(id)) => {
+                // Carry the app to the dock: it can land in the dock, on another stack,
+                // back on its own stack (no change), or anywhere else (out of the stack).
+                trace!("stack {pin}: dragged out {id}");
+                self.stack_view.hide();
+                self.start_external_drag(&id);
+                if let Some(d) = self.drag.as_mut() {
+                    d.from_stack = Some(pin);
+                }
             }
             Some(StackEvent::Reorder(order)) => {
                 trace!("stack {pin} reordered: {order:?}");
@@ -3860,7 +4092,7 @@ impl Dock {
         self.stack_view.hide();
         trace!("drag start: item {i} {}", self.items[i].key);
         let width = self.geo.width[i];
-        self.drag = Some(Drag { index: i, insert: None, removing: false, width, merge: None, merge_ready: false, ext: None, ext_widget: None });
+        self.drag = Some(Drag { index: i, insert: None, removing: false, width, merge: None, merge_ready: false, ext: None, ext_widget: None, from_stack: None });
         let _ = self.animate_amount(0.0, 120);
         let _ = self.show_label(None);
         let _ = self.slots[i].SetOpacity(0.0);
@@ -3889,7 +4121,7 @@ impl Dock {
         if let Err(e) = r {
             trace!("ghost failed: {e:?}");
         }
-        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(id.to_string()), ext_widget: None });
+        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(id.to_string()), ext_widget: None, from_stack: None });
         let _ = self.animate_amount(0.0, 120);
         if self.tucked {
             self.set_tucked(false);
@@ -4123,7 +4355,7 @@ impl Dock {
                             }
                             Pin::Stack { stack, apps }
                         }
-                        Pin::Id(a) => Pin::Stack { stack: "New Stack".into(), apps: vec![a, it.key.clone()] },
+                        Pin::Id(a) => Pin::Stack { stack: config::new_stack_name(&self.cfg.pins), apps: vec![a, it.key.clone()] },
                         w @ Pin::Widget { .. } => w,
                     });
                 } else {
@@ -4176,7 +4408,19 @@ impl Dock {
                 }
             }
         }
-        let already = self.cfg.pins.iter().any(|p| p.app() == Some(id));
+        // Dragged out of a stack: the dock item showing that stack, whose pin loses the app
+        // wherever it lands.
+        let src_item = d.from_stack.and_then(|n| self.items.iter().position(|it| it.key == format!("::stack{n}")));
+        let from_src = |j: usize, p: Pin| if Some(j) == src_item { p.without_app(id) } else { Some(p) };
+        if commit && d.merge.is_some() && d.merge == src_item {
+            // Back onto its own stack: no change.
+            trace!("external drag end: back onto its own stack");
+            self.hide_ghost(false);
+            if let Ok(o) = self.ptr.cast::<CompositionObject>() {
+                let _ = crate::ui::animate_scalar(&self.compositor, &o, "Delta", 0.0, 220);
+            }
+            return;
+        }
         if commit && d.merge_ready && d.merge.is_some() {
             self.hide_ghost(true);
             let t = d.merge.unwrap();
@@ -4185,20 +4429,20 @@ impl Dock {
                 .pinned_order()
                 .into_iter()
                 .filter(|(_, p)| p.app() != Some(id))
-                .map(|(j, p)| {
+                .filter_map(|(j, p)| {
                     if j != t {
-                        return p;
+                        return from_src(j, p);
                     }
-                    match target.clone() {
+                    Some(match target.clone() {
                         Pin::Stack { stack, mut apps } => {
                             if !apps.iter().any(|a| a == id) {
                                 apps.push(id.to_string());
                             }
                             Pin::Stack { stack, apps }
                         }
-                        Pin::Id(a) => Pin::Stack { stack: "New Stack".into(), apps: vec![a, id.to_string()] },
+                        Pin::Id(a) => Pin::Stack { stack: config::new_stack_name(&self.cfg.pins), apps: vec![a, id.to_string()] },
                         w @ Pin::Widget { .. } => w,
-                    }
+                    })
                 })
                 .collect();
             self.apply_pin_order(order);
@@ -4207,7 +4451,12 @@ impl Dock {
         if commit {
             if let Some(k) = d.insert {
                 self.hide_ghost(false);
-                let without: Vec<(usize, Pin)> = self.pinned_order().into_iter().filter(|(_, p)| d.ext_widget.is_some() || p.app() != Some(id)).collect();
+                let without: Vec<(usize, Pin)> = self
+                    .pinned_order()
+                    .into_iter()
+                    .filter(|(_, p)| d.ext_widget.is_some() || p.app() != Some(id))
+                    .filter_map(|(j, p)| from_src(j, p).map(|p| (j, p)))
+                    .collect();
                 let pos = without.iter().filter(|(j, _)| *j < k).count();
                 let mut order: Vec<Pin> = without.into_iter().map(|(_, p)| p).collect();
                 order.insert(pos.min(order.len()), d.ext_widget.clone().unwrap_or_else(|| Pin::Id(id.to_string())));
@@ -4215,13 +4464,16 @@ impl Dock {
                 return;
             }
         }
-        let _ = already;
         self.hide_ghost(true);
         if let Some(n) = d.insert {
             self.set_slot_value(n, "Gap", 0.0);
         }
         if let Ok(o) = self.ptr.cast::<CompositionObject>() {
             let _ = crate::ui::animate_scalar(&self.compositor, &o, "Delta", 0.0, 220);
+        }
+        // Dropped away from the dock: out of the stack (like dragging a pin off the dock).
+        if let (true, Some(src)) = (commit, d.from_stack) {
+            self.take_out_of_stack(src, id, |_, _| {});
         }
     }
 
@@ -4236,6 +4488,7 @@ impl Dock {
                 }
             }
         }
+        config::dedupe_pins(&mut order);
         self.save_and_apply(|c| c.pins = order);
     }
 
@@ -4519,7 +4772,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     let hit = d.geo.hit(x, y, 1.0);
                     if hit.is_some() && hit == d.pressed {
                         d.ptr_xy = (x, y);
-                        d.on_click(hit.unwrap());
+                        d.on_click(hit.unwrap(), wp.0 & MK_SHIFT != 0);
                     }
                 }
                 d.pressed = None;
@@ -4527,6 +4780,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             unsafe {
                 let _ = ReleaseCapture();
             }
+            return LRESULT(0);
+        }
+        WM_MBUTTONUP => {
+            // Middle-click an app: open a new window, as on the Windows taskbar.
+            let (x, y) = lparam_xy(lp);
+            with_dock(|d| {
+                if let Some(i) = d.geo.hit(x, y, 1.0).filter(|&i| d.items[i].kind == Kind::App) {
+                    d.ptr_xy = (x, y);
+                    d.on_click(i, true);
+                }
+            });
             return LRESULT(0);
         }
         WM_CAPTURECHANGED => {
@@ -4986,8 +5250,10 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             None,
         )?;
         // Allow the live desktop blur, and keep the dock visible during Aero Peek.
+        // DWMWA_USE_HOSTBACKDROPBRUSH is Windows 11 only: on Windows 10 it fails and the
+        // dock just loses the blur, so never let it stop startup.
         let on: i32 = 1;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as _, 4)?;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &on as *const _ as _, 4);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_EXCLUDED_FROM_PEEK, &on as *const _ as _, 4);
         // Start fully clipped so nothing is clickable until the dock is built.
         SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
@@ -5061,6 +5327,7 @@ pub fn run(opts: Options, started: Instant) -> Result<()> {
             preview_pending: None,
             stack_view,
             menu_stack: None,
+            menu_stack_app: None,
             launchpad,
             services: Services::start(hwnd),
             lp_apps: Vec::new(),

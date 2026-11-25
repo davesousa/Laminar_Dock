@@ -480,7 +480,7 @@ impl Dock {
         if let Err(e) = self.show_widget_ghost(def, size, ww) {
             trace!("widget ghost failed: {e:?}");
         }
-        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(format!("::widget:{}", def.id)), ext_widget: Some(Pin::Widget { widget: def.id.to_string(), size: (size != def.size).then_some(size) }) });
+        self.drag = Some(Drag { index: usize::MAX, insert: None, removing: false, width, merge: None, merge_ready: false, ext: Some(format!("::widget:{}", def.id)), ext_widget: Some(Pin::Widget { widget: def.id.to_string(), size: (size != def.size).then_some(size) }), from_stack: None });
         if self.tucked {
             self.set_tucked(false);
         }
